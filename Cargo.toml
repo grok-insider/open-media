@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/om-core",
+    "crates/om-config",
+    "crates/om-metadata",
+    "crates/om-sources",
+    "crates/om-debrid",
+    "crates/om-stream",
+    "crates/om-player",
+    "crates/om-track",
+    "crates/om-history",
+    "crates/om-app",
+    "crates/om-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Minimum supported Rust version. Pinned conservatively; CI uses stable (>= this)
+# and the nix devshell's rustc is canonical.
+rust-version = "1.82"
+license = "MIT"
+authors = ["0xfell"]
+repository = "https://github.com/0xfell/open-media"
+
+[workspace.dependencies]
+# --- Internal crates (path deps) ---
+om-core = { path = "crates/om-core" }
+om-config = { path = "crates/om-config" }
+om-metadata = { path = "crates/om-metadata" }
+om-sources = { path = "crates/om-sources" }
+om-debrid = { path = "crates/om-debrid" }
+om-stream = { path = "crates/om-stream" }
+om-player = { path = "crates/om-player" }
+om-track = { path = "crates/om-track" }
+om-history = { path = "crates/om-history" }
+om-app = { path = "crates/om-app" }
+
+# --- Shared third-party deps (versions pinned once here; see ARCHITECTURE.md) ---
+# Kept light in the scaffold. Heavy adapter deps (reqwest, librqbit, rusqlite)
+# are added to their owning crate as each phase lands — NOT here — so the core
+# contract stays I/O-free and the workspace builds fast.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+
+# Release profile for the shipped `om` binary. Streaming startup latency matters
+# more than build time (CI/cache absorbs the longer build): thin LTO + one
+# codegen unit for cross-crate inlining on the resolve/stream path; strip for a
+# smaller binary. panic = "unwind" stays (the playback loop recovers from a
+# failed source by falling through to the next candidate; a panic must not abort
+# mid-session cleanup of the torrent/debrid state).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Repo-wide lints so `cargo clippy` and editors surface the same gate CI enforces
+# with `-D warnings`. "warn" here (CI denies); priority -1 lets local
+# `#[allow(...)]` override where justified.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

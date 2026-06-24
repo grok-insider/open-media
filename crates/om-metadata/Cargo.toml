@@ -1,0 +1,17 @@
+[package]
+name = "om-metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "MetadataProvider adapters: TMDB (movies/series) and AniList (anime)."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+# Phase 1: add `reqwest` + `serde_json` here when implementing the HTTP clients.
+
+[lints]
+workspace = true

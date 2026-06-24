@@ -1,0 +1,18 @@
+[package]
+name = "om-sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "SourceProvider adapters: Torrentio (all media) and direct nyaa.si (anime)."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+# Phase 2: add `reqwest`, `serde_json`, `regex` (Torrentio title parsing) and
+# `quick-xml`/`rss` (nyaa RSS feed) here.
+
+[lints]
+workspace = true

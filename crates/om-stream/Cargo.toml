@@ -1,0 +1,20 @@
+[package]
+name = "om-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "StreamResolver: hybrid debrid/P2P resolution + the local librqbit stream server."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+# Phase 4: add `librqbit` (P2P engine + built-in Range-aware HTTP stream server)
+# and `tokio`. This is the port of toru's streaming server, but librqbit ships
+# the `/torrents/{id}/stream/{file_idx}` endpoint, so we mount it rather than
+# hand-rolling the Range handling.
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "om-track"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tracker (AniList/MAL/composite), Enricher (AniSkip/Jikan), and Discord presence."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+# Phase 6: add `reqwest` (AniList GraphQL, AniSkip, Jikan) and a Discord RPC crate.
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
