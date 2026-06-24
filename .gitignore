@@ -1,0 +1,24 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo lock is committed for the binary workspace (reproducible builds).
+# (do NOT ignore Cargo.lock)
+
+# Local secrets / runtime state — never commit API tokens or watch history.
+*.env
+.env
+config.toml
+/secrets
+*.session
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Nix
+result
+result-*

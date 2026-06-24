@@ -1,0 +1,36 @@
+[package]
+name = "om-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "open-media CLI/TUI binary (`om`): the composition root that wires adapters to the engine."
+
+[[bin]]
+name = "om"
+path = "src/main.rs"
+
+[dependencies]
+om-core = { workspace = true }
+om-config = { workspace = true }
+om-app = { workspace = true }
+# Adapter crates — om-cli is the ONLY crate allowed to depend on concrete
+# adapters, because it is the composition root (DIP).
+om-metadata = { workspace = true }
+om-sources = { workspace = true }
+om-debrid = { workspace = true }
+om-stream = { workspace = true }
+om-player = { workspace = true }
+om-track = { workspace = true }
+om-history = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

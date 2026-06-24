@@ -1,0 +1,17 @@
+[package]
+name = "om-debrid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "DebridProvider adapters: Real-Debrid (+ future AllDebrid/Torbox/Premiumize)."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+# Phase 3: add `reqwest` + `serde_json` for the REST clients.
+
+[lints]
+workspace = true

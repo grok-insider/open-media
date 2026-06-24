@@ -1,0 +1,18 @@
+[package]
+name = "om-player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Player adapters: mpv (with JSON IPC control) and vlc (launch-only)."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+which = "6"
+# Phase 5: add `tokio` (process + UnixStream IPC) + `serde_json` (mpv IPC codec).
+
+[lints]
+workspace = true

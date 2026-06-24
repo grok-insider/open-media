@@ -1,0 +1,221 @@
+//! `om` — open-media command-line entrypoint.
+//!
+//! This binary is intentionally thin: parse args, load config, build the
+//! [`Engine`] via [`compose::build_engine`], and dispatch. All real work lives in
+//! `om-app` (orchestration) and the adapter crates (I/O).
+//!
+//! [`Engine`]: om_app::Engine
+
+mod compose;
+
+use clap::{Parser, Subcommand};
+use om_core::model::MediaKind;
+
+/// open-media: watch movies, series, and anime from the terminal — via
+/// Real-Debrid (instant, cached) or direct P2P, into mpv/vlc.
+#[derive(Debug, Parser)]
+#[command(name = "om", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// First-time setup: create the config file and set required keys.
+    Init,
+    /// Inspect or modify configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Search for media (movies, series, anime).
+    Search {
+        /// Free-text query.
+        query: String,
+        /// Restrict to a kind: movie | series | anime.
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Search, pick a source, and play (interactive). [Phase 8]
+    Play {
+        /// Free-text query.
+        query: String,
+        #[arg(long)]
+        season: Option<u32>,
+        #[arg(long)]
+        episode: Option<u32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Print the resolved configuration (secrets masked).
+    Show,
+    /// Print the config file path.
+    Path,
+    /// Set a key: `om config set tmdb_api_key=...`.
+    Set {
+        /// `key=value`. Keys: tmdb_api_key, real_debrid_token, anilist_token,
+        /// mal_token, debrid_provider, player_command.
+        kv: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("om=info,warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        None => run_interactive().await,
+        Some(Command::Init) => cmd_init(),
+        Some(Command::Config { action }) => cmd_config(action),
+        Some(Command::Search { query, kind }) => cmd_search(&query, kind.as_deref()).await,
+        Some(Command::Play {
+            query,
+            season,
+            episode,
+        }) => cmd_play(&query, season, episode).await,
+    }
+}
+
+/// Default (no subcommand): the interactive TUI. [Phase 9]
+async fn run_interactive() -> anyhow::Result<()> {
+    if om_config::load().is_err() {
+        println!("No configuration found. Run `om init` first.");
+        return Ok(());
+    }
+    println!("The interactive TUI lands in Phase 9 (see docs/ROADMAP.md).");
+    println!("For now use: om search \"<title>\"   (or)   om play \"<title>\"");
+    Ok(())
+}
+
+fn cmd_init() -> anyhow::Result<()> {
+    let path = om_config::config_path();
+    if om_config::load().is_ok() {
+        println!("Config already exists at {}", path.display());
+        println!("Edit it directly, or use `om config set key=value`.");
+        return Ok(());
+    }
+    let cfg = om_config::Config::default();
+    om_config::save(&cfg)?;
+    println!("Created {}", path.display());
+    println!();
+    println!("Next steps:");
+    println!("  om config set tmdb_api_key=<your TMDB v3 key>      # required");
+    println!("  om config set real_debrid_token=<your RD token>   # optional, recommended");
+    println!();
+    println!(
+        "Get keys: https://www.themoviedb.org/settings/api  +  https://real-debrid.com/apitoken"
+    );
+    Ok(())
+}
+
+fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
+    match action {
+        ConfigAction::Path => {
+            println!("{}", om_config::config_path().display());
+            Ok(())
+        }
+        ConfigAction::Show => {
+            let cfg = om_config::load()?;
+            println!("config: {}", om_config::config_path().display());
+            println!(
+                "  tmdb_api_key      = {}",
+                mask(&cfg.credentials.tmdb_api_key)
+            );
+            println!("  debrid_provider   = {}", cfg.credentials.debrid_provider);
+            println!(
+                "  real_debrid_token = {}",
+                mask(&cfg.credentials.real_debrid_token)
+            );
+            println!(
+                "  anilist_token     = {}",
+                mask(&cfg.credentials.anilist_token)
+            );
+            println!("  player.command    = {}", cfg.player.command);
+            println!("  quality           = {}", cfg.providers.quality);
+            println!("  nyaa_direct       = {}", cfg.providers.nyaa_direct);
+            println!("  skip_intro_outro  = {}", cfg.behavior.skip_intro_outro);
+            Ok(())
+        }
+        ConfigAction::Set { kv } => {
+            let (key, value) = kv
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("expected key=value, got `{kv}`"))?;
+            let mut cfg = om_config::load().unwrap_or_default();
+            match key {
+                "tmdb_api_key" => cfg.credentials.tmdb_api_key = value.to_string(),
+                "real_debrid_token" => cfg.credentials.real_debrid_token = value.to_string(),
+                "anilist_token" => cfg.credentials.anilist_token = value.to_string(),
+                "mal_token" => cfg.credentials.mal_token = value.to_string(),
+                "debrid_provider" => cfg.credentials.debrid_provider = value.to_string(),
+                "player_command" => cfg.player.command = value.to_string(),
+                other => anyhow::bail!("unknown key `{other}`"),
+            }
+            om_config::save(&cfg)?;
+            println!("Updated {key}.");
+            Ok(())
+        }
+    }
+}
+
+async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
+    let cfg = load_or_hint()?;
+    let engine = compose::build_engine(&cfg);
+    match engine.search(query, parse_kind(kind)).await {
+        Ok(results) if results.is_empty() => {
+            println!("No results. (Metadata adapters are stubbed until Phase 1 — see ROADMAP.)");
+        }
+        Ok(results) => {
+            for m in results {
+                println!(
+                    "[{}] {} ({})",
+                    m.kind.label(),
+                    m.display_title(),
+                    m.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into())
+                );
+            }
+        }
+        Err(e) => println!("Search unavailable: {e}"),
+    }
+    Ok(())
+}
+
+async fn cmd_play(query: &str, _season: Option<u32>, _episode: Option<u32>) -> anyhow::Result<()> {
+    let cfg = load_or_hint()?;
+    let _engine = compose::build_engine(&cfg);
+    println!("Playback orchestration lands in Phase 8 (see docs/ROADMAP.md).");
+    println!("Wired and ready: search `{query}` → sources → resolve → mpv.");
+    Ok(())
+}
+
+fn load_or_hint() -> anyhow::Result<om_config::Config> {
+    om_config::load().map_err(|_| anyhow::anyhow!("no config found — run `om init` first"))
+}
+
+fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {
+    match kind?.to_ascii_lowercase().as_str() {
+        "movie" => Some(MediaKind::Movie),
+        "series" | "tv" => Some(MediaKind::Series),
+        "anime" => Some(MediaKind::Anime),
+        _ => None,
+    }
+}
+
+/// Mask a secret for display: show nothing but presence + length hint.
+fn mask(secret: &str) -> String {
+    if secret.is_empty() {
+        "(not set)".to_string()
+    } else {
+        format!("set ({} chars)", secret.len())
+    }
+}
