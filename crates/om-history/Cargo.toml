@@ -10,8 +10,10 @@ description = "HistoryStore: local watch-progress persistence for resume + recen
 
 [dependencies]
 om-core = { workspace = true }
-# Phase 7: add `rusqlite` (bundled) for the SQLite-backed store. A SQLite file
-# is preferred over curd's full-file-rewrite CSV for concurrent-safe updates.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

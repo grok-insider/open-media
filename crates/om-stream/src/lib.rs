@@ -27,33 +27,8 @@ use om_core::error::{CoreError, CoreResult};
 use om_core::ports::{DebridProvider, StreamResolver};
 use om_core::stream::{Playback, PlaybackOrigin, SourceCandidate};
 
-/// Local P2P streaming engine (librqbit). Serves torrent bytes over HTTP with
-/// Range support so the player can seek without a full download.
-pub struct P2pEngine {
-    #[allow(dead_code)]
-    http_port: u16,
-    #[allow(dead_code)]
-    cleanup_after_playback: bool,
-}
-
-impl P2pEngine {
-    pub fn new(http_port: u16, cleanup_after_playback: bool) -> Self {
-        Self {
-            http_port,
-            cleanup_after_playback,
-        }
-    }
-
-    /// Add a magnet and return its local stream URL. (Phase 4.)
-    pub async fn stream_magnet(&self, _magnet: &str) -> CoreResult<Playback> {
-        Err(CoreError::NotImplemented("p2p.stream_magnet"))
-    }
-
-    /// Tear down the active torrent (+ files when configured). (Phase 4.)
-    pub async fn cleanup(&self) {
-        let _ = self.cleanup_after_playback;
-    }
-}
+mod p2p;
+pub use p2p::P2pEngine;
 
 /// Picks debrid-direct vs P2P for each candidate.
 ///
