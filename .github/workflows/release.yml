@@ -1,0 +1,163 @@
+name: Release
+
+# Automated versioning + GitHub Releases via release-plz (config: release-plz.toml).
+#
+# Flow on every push to master:
+#   * release-plz-pr      — opens/updates the "release PR" (bumps the single
+#                           [workspace.package].version + Cargo.lock, regenerates
+#                           CHANGELOG.md from Conventional Commits).
+#   * release-plz-release — when that PR is merged, creates the `vX.Y.Z` tag +
+#                           GitHub Release from the changelog.
+#   * upload-binary       — builds a portable static `om` and attaches it.
+#
+# Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
+# master push and pushes `om-X.Y.Z` to 0xfell.cachix.org (flake.nix reads the
+# version straight from Cargo.toml). Nothing is published to crates.io — see the
+# `git_only` setting in release-plz.toml.
+
+on:
+  push:
+    branches: [master]
+
+# Least privilege by default; each job elevates only what it needs.
+permissions:
+  contents: read
+
+jobs:
+  # Keep the release PR up to date on every push. Merging that PR is what later
+  # triggers the `release` job (via the resulting push to master).
+  release-plz-pr:
+    name: release-plz PR
+    if: github.repository_owner == '0xfell'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz (release-pr)
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # On a release-PR merge: create the `vX.Y.Z` tag + GitHub Release. Exposes
+  # whether a release was cut (and its tag/version) to the artifact job below.
+  release-plz-release:
+    name: release-plz release
+    if: github.repository_owner == '0xfell'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz (release)
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build a portable, statically-linked `om` (x86_64 musl) and attach it to the
+  # just-created GitHub Release, for users who don't consume the Nix/cachix path.
+  # This job is independent: if it fails, the tag/Release/changelog/cachix are
+  # already done — only the binary attachment is missing, and can be re-run.
+  #
+  # musl static (via cargo-zigbuild) runs on any glibc/musl distro, incl. Alpine
+  # and older enterprise. aws-lc-sys (rustls' crypto backend) cross-compiles fine:
+  # our pin is 0.41.0 (> 0.32.1, which fixed the musl `linux/random.h` break) and
+  # zig supplies the cross C toolchain that CMake/bindgen need.
+  #
+  # FALLBACK if a musl build ever breaks: set TARGET=x86_64-unknown-linux-gnu, run
+  # on `ubuntu-22.04` (glibc 2.35 baseline), drop the zig + cargo-zigbuild steps,
+  # and replace `cargo zigbuild` with `cargo build`.
+  upload-binary:
+    name: attach om binary (x86_64-linux)
+    needs: release-plz-release
+    if: needs.release-plz-release.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - name: Resolve release tag/version
+        id: rel
+        env:
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
+        run: |
+          set -euo pipefail
+          echo "tag=$(echo "$RELEASES" | jq -r '.[0].tag')" >> "$GITHUB_OUTPUT"
+          echo "version=$(echo "$RELEASES" | jq -r '.[0].version')" >> "$GITHUB_OUTPUT"
+      - name: Checkout the released tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+      # aws-lc-sys builds aws-lc with CMake and binds it via libclang/bindgen; zig
+      # provides the cross C compiler + musl libc that cargo-zigbuild drives.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ env.TARGET }}
+      - name: Build static om
+        run: cargo zigbuild --release -p om-cli --target "$TARGET"
+      - name: Verify the binary is static
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/om"
+          file "$bin"
+          # A static binary makes `ldd` print "not a dynamic executable"; any
+          # glibc NEEDED entry means the build silently linked dynamically.
+          if ldd "$bin" 2>&1 | grep -qiE 'libc\.so|GLIBC'; then
+            echo "::error::om is dynamically linked against glibc"; exit 1
+          fi
+      - name: Package tarball + checksum
+        id: pkg
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="om-${VERSION}-x86_64-linux-musl.tar.gz"
+          tar -czf "$archive" -C "target/$TARGET/release" om
+          sha256sum "$archive" > "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Upload to the GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ARCHIVE: ${{ steps.pkg.outputs.archive }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber

@@ -1,0 +1,130 @@
+# release-plz — automated versioning + releases for the `om` workspace.
+# Docs: https://release-plz.dev/docs/config   (validated against release-plz 0.3.x)
+#
+# Every crate shares ONE version via `version.workspace = true` (root Cargo.toml
+# `[workspace.package] version`). To keep that single field consistent, all crates
+# are pinned to one `version_group` so they bump in lockstep — a change in ANY
+# crate (e.g. an `om-debrid` fix) moves the whole workspace to the next version.
+#
+# Only the binary crate `om-cli` emits a tag + GitHub Release + changelog; the ten
+# libraries ride the shared version silently (their commits are folded into the
+# single root CHANGELOG.md via om-cli's `changelog_include`).
+#
+# On each push to master, release-plz opens/updates a "release PR" (bump +
+# Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z` and creates the GitHub Release.
+# Delivery is that Release (binary + notes) and the 0xfell cachix cache — flake.nix
+# reads the same version from Cargo.toml, so the cached path tracks it as
+# `om-X.Y.Z`. Nothing is published to crates.io (`git_only`).
+
+[workspace]
+# Not on crates.io: read the current version from the `v*` git tag, not the cargo
+# registry. Implies no `cargo publish`.
+git_only = true
+# Cut a release only when the release PR is merged, not on every master commit.
+release_always = false
+# Only open/update the release PR when a `feat`/`fix` has landed. This keeps the
+# release PR meaningful AND skips the expensive per-crate `cargo package` analysis
+# on chore/docs/ci/refactor-only pushes (those changes still ride into the next
+# release's changelog — release_commits filters the trigger, not the notes).
+release_commits = "^(feat|fix)"
+# Internal libs + one bin, not a published API: skip cargo-semver-checks.
+semver_check = false
+# This is an end-user app (not a published library), so treat `feat:` as a
+# minor bump even on 0.x — more communicative than the Cargo-SemVer 0.x default
+# (where features are patch and only breaking changes bump the minor).
+features_always_increment_minor = true
+# Defaults for the ten library crates below: no own tag/release/changelog. om-cli
+# overrides these to true.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+pr_labels = ["release"]
+
+# --- The ten libraries: share the version group, stay silent individually. ------
+[[package]]
+name = "om-core"
+version_group = "om"
+[[package]]
+name = "om-config"
+version_group = "om"
+[[package]]
+name = "om-metadata"
+version_group = "om"
+[[package]]
+name = "om-sources"
+version_group = "om"
+[[package]]
+name = "om-debrid"
+version_group = "om"
+[[package]]
+name = "om-stream"
+version_group = "om"
+[[package]]
+name = "om-player"
+version_group = "om"
+[[package]]
+name = "om-track"
+version_group = "om"
+[[package]]
+name = "om-history"
+version_group = "om"
+[[package]]
+name = "om-app"
+version_group = "om"
+
+# --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
+[[package]]
+name = "om-cli"
+version_group = "om"
+git_tag_enable = true
+git_release_enable = true
+# One workspace-wide tag/release name, e.g. `v0.2.0` (not `om-cli-v0.2.0`).
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+# Keep the single curated changelog at the repo root (path is relative to the
+# root Cargo.toml, i.e. the repo root in CI).
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+# om-cli is the composition root that depends on every other crate, so a change
+# anywhere ships in the binary. Fold all members' commits into the root changelog.
+changelog_include = [
+    "om-core",
+    "om-config",
+    "om-metadata",
+    "om-sources",
+    "om-debrid",
+    "om-stream",
+    "om-player",
+    "om-track",
+    "om-history",
+    "om-app",
+]
+
+# Preserve the curated changelog header (release-plz would otherwise substitute its
+# generic default). New version sections are inserted under `## [Unreleased]`.
+[changelog]
+header = """# Changelog
+
+All notable changes to open-media are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
+to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+"""
+# Never drop a breaking change from the changelog, even if its type is skipped.
+protect_breaking_commits = true
+# Map Conventional Commit types onto Keep-a-Changelog sections; skip the
+# internal-only types (chore/ci/build/test/style/docs) so the changelog stays a
+# user-facing "what changed" list.
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Changed" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^revert", group = "Changed" },
+    { message = "^deprecat", group = "Deprecated" },
+    { message = "^remov", group = "Removed" },
+    { message = "^sec(urity)?", group = "Security" },
+    { message = "^(chore|ci|build|test|style|docs)", skip = true },
+    { message = "^.*", group = "Changed" },
+]
