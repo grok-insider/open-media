@@ -74,6 +74,10 @@ impl Default for Credentials {
 /// Source/metadata provider knobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Providers {
+    /// Use Stremio Cinemeta for keyless movie/series discovery. On by default so
+    /// the app works with no TMDB key; disable to rely solely on TMDB.
+    #[serde(default = "default_true")]
+    pub cinemeta: bool,
     /// Torrentio sub-providers, highest priority first.
     #[serde(default = "default_torrentio_providers")]
     pub torrentio_providers: Vec<String>,
@@ -91,6 +95,7 @@ pub struct Providers {
 impl Default for Providers {
     fn default() -> Self {
         Self {
+            cinemeta: true,
             torrentio_providers: default_torrentio_providers(),
             nyaa_direct: true,
             quality: default_quality(),
@@ -188,14 +193,22 @@ impl Default for Ui {
 }
 
 impl Config {
-    /// True once the minimum required key (TMDB) is present.
+    /// Whether search can return movies/series. Keyless via Cinemeta by default,
+    /// or via a configured TMDB key. (Anime always works through AniList.)
     pub fn is_usable(&self) -> bool {
-        !self.credentials.tmdb_api_key.is_empty()
+        self.providers.cinemeta || !self.credentials.tmdb_api_key.is_empty()
     }
 
     /// Whether a debrid token is configured (else P2P streaming is used).
     pub fn has_debrid(&self) -> bool {
         !self.credentials.real_debrid_token.is_empty()
+    }
+
+    /// Whether Real-Debrid specifically is the active, configured backend. Gates
+    /// both the `DebridProvider` wiring and the `realdebrid=` Torrentio param so
+    /// the two never disagree.
+    pub fn has_real_debrid(&self) -> bool {
+        self.has_debrid() && self.credentials.debrid_provider == "real-debrid"
     }
 }
 
@@ -289,7 +302,16 @@ tmdb_api_key = "abc"
         assert!(!cfg.has_debrid());
         assert_eq!(cfg.player.command, "mpv");
         assert!(cfg.providers.nyaa_direct);
+        assert!(cfg.providers.cinemeta);
         assert!(cfg.behavior.skip_intro_outro);
+    }
+
+    #[test]
+    fn keyless_config_is_usable_via_cinemeta() {
+        // No TMDB key at all: still usable because Cinemeta is keyless + on.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.credentials.tmdb_api_key.is_empty());
+        assert!(cfg.is_usable());
     }
 
     #[test]

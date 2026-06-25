@@ -3,7 +3,7 @@
 //! A render-from-state loop with an `mpsc` channel for async results — the
 //! littlejohn/miru pattern. All engine I/O is `tokio::spawn`ed and posts a
 //! [`Msg`] back, so the UI never blocks. Flow:
-//!   Search → Results → (episodic ⇒ Episodes) → Sources → Playing → back.
+//!   Search → Results → (episodic ⇒ Seasons? ⇒ Episodes) → Sources → play → back.
 
 use std::io::{self, Stdout};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
 use om_app::{Engine, PlayRequest};
-use om_core::model::{Media, MediaKind};
+use om_core::model::{Episode, Media, MediaKind, Season};
 use om_core::stream::{CacheState, SourceCandidate};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -25,6 +25,7 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 enum Screen {
     Search,
     Results,
+    Seasons,
     Episodes,
     Sources,
 }
@@ -32,7 +33,10 @@ enum Screen {
 /// Async results posted back to the UI loop.
 enum Msg {
     Results(Vec<Media>),
-    Episodes(Media),
+    /// Multi-season series → show the season picker.
+    Seasons(Media, Vec<Season>),
+    /// Episodes for a resolved season (real titles when the provider has them).
+    Episodes(Media, u32, Vec<Episode>),
     Sources {
         media: Media,
         candidates: Vec<SourceCandidate>,
@@ -54,8 +58,19 @@ struct App {
     results_state: ListState,
 
     media: Option<Media>,
-    episodes: Vec<u32>,
+
+    seasons: Vec<Season>,
+    seasons_state: ListState,
+
+    episodes: Vec<Episode>,
     episodes_state: ListState,
+
+    /// Coordinates resolved at episode/movie selection, threaded into the play
+    /// request so sources and the player title agree (and don't desync with the
+    /// list cursor). Movies leave all three `None`.
+    sel_season: Option<u32>,
+    sel_episode: Option<u32>,
+    sel_episode_title: Option<String>,
 
     candidates: Vec<SourceCandidate>,
     candidates_state: ListState,
@@ -79,8 +94,13 @@ impl App {
             results: Vec::new(),
             results_state: ListState::default(),
             media: None,
+            seasons: Vec::new(),
+            seasons_state: ListState::default(),
             episodes: Vec::new(),
             episodes_state: ListState::default(),
+            sel_season: None,
+            sel_episode: None,
+            sel_episode_title: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
             tx,
@@ -97,10 +117,19 @@ impl App {
                 self.screen = Screen::Results;
                 self.status = format!("{} results", self.results.len());
             }
-            Msg::Episodes(media) => {
-                let count = media.episode_count.unwrap_or(12).max(1);
-                self.episodes = (1..=count).collect();
-                self.episodes_state.select(Some(0));
+            Msg::Seasons(media, seasons) => {
+                self.seasons = seasons;
+                self.seasons_state
+                    .select((!self.seasons.is_empty()).then_some(0));
+                self.media = Some(media);
+                self.screen = Screen::Seasons;
+                self.status = "Pick a season".into();
+            }
+            Msg::Episodes(media, season, episodes) => {
+                self.episodes = episodes;
+                self.episodes_state
+                    .select((!self.episodes.is_empty()).then_some(0));
+                self.sel_season = Some(season);
                 self.media = Some(media);
                 self.screen = Screen::Episodes;
                 self.status = "Pick an episode".into();
@@ -196,6 +225,18 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
+        Screen::Seasons => match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                App::list_move(&mut app.seasons_state, app.seasons.len(), 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                App::list_move(&mut app.seasons_state, app.seasons.len(), -1)
+            }
+            KeyCode::Enter => select_season(app),
+            KeyCode::Esc => app.screen = Screen::Results,
+            KeyCode::Char('q') => app.should_quit = true,
+            _ => {}
+        },
         Screen::Episodes => match code {
             KeyCode::Char('j') | KeyCode::Down => {
                 App::list_move(&mut app.episodes_state, app.episodes.len(), 1)
@@ -204,7 +245,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 App::list_move(&mut app.episodes_state, app.episodes.len(), -1)
             }
             KeyCode::Enter => select_episode(app),
-            KeyCode::Esc => app.screen = Screen::Results,
+            // Back to Seasons if we came through a multi-season picker, else Results.
+            KeyCode::Esc => {
+                app.screen = if app.seasons.len() > 1 {
+                    Screen::Seasons
+                } else {
+                    Screen::Results
+                }
+            }
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -260,30 +308,99 @@ fn select_result(app: &mut App) {
     };
     app.busy = true;
     app.status = "Loading…".into();
+    // Reset prior episodic state so a new pick doesn't inherit stale coordinates.
+    app.seasons.clear();
+    app.sel_season = None;
+    app.sel_episode = None;
+    app.sel_episode_title = None;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
         // Hydrate ids (IMDB) for sources; fall back to the search result.
         let media = engine.details(&media.ids).await.unwrap_or(media);
         if media.kind == MediaKind::Movie {
-            send_sources(&engine, &tx, media, None, None).await;
-        } else {
-            let _ = tx.send(Msg::Episodes(media));
+            // Movies have no coordinates or episode title.
+            send_sources(&engine, &tx, media, None, None, None).await;
+            return;
+        }
+        // Episodic: list seasons. >1 → picker; otherwise jump straight to the
+        // single (or synthetic, for flat-numbered anime) season's episodes.
+        match engine.seasons(&media.ids).await {
+            Ok(seasons) if seasons.len() > 1 => {
+                let _ = tx.send(Msg::Seasons(media, seasons));
+            }
+            Ok(seasons) => {
+                let season = seasons.first().map(|s| s.number).unwrap_or(1);
+                fetch_episodes(&engine, &tx, media, season).await;
+            }
+            Err(_) => fetch_episodes(&engine, &tx, media, 1).await,
         }
     });
+}
+
+fn select_season(app: &mut App) {
+    let (Some(idx), Some(media)) = (app.seasons_state.selected(), app.media.clone()) else {
+        return;
+    };
+    let season = app.seasons.get(idx).map(|s| s.number).unwrap_or(1);
+    app.busy = true;
+    app.status = format!("Loading season {season}…");
+    let engine = app.engine.clone();
+    let tx = app.tx.clone();
+    tokio::spawn(async move {
+        fetch_episodes(&engine, &tx, media, season).await;
+    });
+}
+
+/// Fetch a season's episodes (real titles when available), degrading to bare
+/// numbered entries from `episode_count` if the provider returns none.
+async fn fetch_episodes(
+    engine: &Arc<Engine>,
+    tx: &mpsc::UnboundedSender<Msg>,
+    media: Media,
+    season: u32,
+) {
+    let episodes = match engine.episodes(&media.ids, season).await {
+        Ok(eps) if !eps.is_empty() => eps,
+        _ => fallback_episodes(season, media.episode_count.unwrap_or(1).max(1)),
+    };
+    let _ = tx.send(Msg::Episodes(media, season, episodes));
+}
+
+/// Bare episodes `1..=count` with no titles — the graceful fallback when a
+/// provider can't enumerate a season (e.g. a currently-airing anime).
+fn fallback_episodes(season: u32, count: u32) -> Vec<Episode> {
+    (1..=count)
+        .map(|number| Episode {
+            season,
+            number,
+            title: None,
+            air_date: None,
+            overview: None,
+            runtime_minutes: None,
+            rating: None,
+        })
+        .collect()
 }
 
 fn select_episode(app: &mut App) {
     let (Some(idx), Some(media)) = (app.episodes_state.selected(), app.media.clone()) else {
         return;
     };
-    let episode = app.episodes.get(idx).copied().unwrap_or(1);
+    let Some(ep) = app.episodes.get(idx).cloned() else {
+        return;
+    };
+    // Pin the chosen coordinates + title so sources and playback stay consistent.
+    app.sel_season = Some(ep.season);
+    app.sel_episode = Some(ep.number);
+    app.sel_episode_title = ep.title.clone();
     app.busy = true;
-    app.status = format!("Finding sources for episode {episode}…");
+    app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
     let tx = app.tx.clone();
+    let (season, episode, title) = (Some(ep.season), Some(ep.number), ep.title);
     tokio::spawn(async move {
-        send_sources(&engine, &tx, media, Some(1), Some(episode)).await;
+        send_sources(&engine, &tx, media, season, episode, title).await;
     });
 }
 
@@ -293,11 +410,13 @@ async fn send_sources(
     media: Media,
     season: Option<u32>,
     episode: Option<u32>,
+    episode_title: Option<String>,
 ) {
     let req = PlayRequest {
         media: media.clone(),
         season,
         episode,
+        episode_title,
         include_uncached: true,
     };
     let _ = match engine.find_sources(&req).await {
@@ -313,11 +432,10 @@ fn play_selected(app: &mut App) {
     let Some(candidate) = app.candidates.get(idx).cloned() else {
         return;
     };
-    let episode = app
-        .episodes_state
-        .selected()
-        .and_then(|i| app.episodes.get(i).copied());
-    let season = media.kind.is_episodic().then_some(1);
+    // Use the coordinates pinned at episode selection — not the live cursor.
+    let season = app.sel_season;
+    let episode = app.sel_episode;
+    let episode_title = app.sel_episode_title.clone();
     app.busy = true;
     app.status = format!("Playing {}…", media.display_title());
 
@@ -328,6 +446,7 @@ fn play_selected(app: &mut App) {
             media,
             season,
             episode,
+            episode_title,
             include_uncached: true,
         };
         let _ = tx.send(Msg::Status("Resolving + launching player…".into()));
@@ -336,6 +455,11 @@ fn play_selected(app: &mut App) {
             Err(e) => tx.send(Msg::Error(e.to_string())),
         };
     });
+}
+
+/// `S01E01` for status lines.
+fn ep_coordinate(ep: &Episode) -> String {
+    format!("S{:02}E{:02}", ep.season, ep.number)
 }
 
 // --- Rendering ---
@@ -352,6 +476,7 @@ fn draw(f: &mut Frame, app: &App) {
     let title = match app.screen {
         Screen::Search => "open-media — Search",
         Screen::Results => "open-media — Results",
+        Screen::Seasons => "open-media — Seasons",
         Screen::Episodes => "open-media — Episodes",
         Screen::Sources => "open-media — Sources",
     };
@@ -365,6 +490,7 @@ fn draw(f: &mut Frame, app: &App) {
     match app.screen {
         Screen::Search => draw_search(f, app, chunks[1]),
         Screen::Results => draw_results(f, app, chunks[1]),
+        Screen::Seasons => draw_seasons(f, app, chunks[1]),
         Screen::Episodes => draw_episodes(f, app, chunks[1]),
         Screen::Sources => draw_sources(f, app, chunks[1]),
     }
@@ -373,6 +499,7 @@ fn draw(f: &mut Frame, app: &App) {
     let hints = match app.screen {
         Screen::Search => "type query · Enter: search · Esc: quit",
         Screen::Results => "j/k: move · Enter: select · /: search · q: quit",
+        Screen::Seasons => "j/k: move · Enter: select · Esc: back · q: quit",
         Screen::Episodes => "j/k: move · Enter: select · Esc: back · q: quit",
         Screen::Sources => "j/k: move · Enter: play · Esc: back · q: quit",
     };
@@ -411,11 +538,32 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
     render_list(f, area, "Results", items, &app.results_state);
 }
 
+fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .seasons
+        .iter()
+        .map(|s| {
+            let name = s
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("Season {}", s.number));
+            ListItem::new(format!("{name}  ({} episodes)", s.episode_count))
+        })
+        .collect();
+    render_list(f, area, "Seasons", items, &app.seasons_state);
+}
+
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .episodes
         .iter()
-        .map(|n| ListItem::new(format!("Episode {n}")))
+        .map(|ep| {
+            let label = match &ep.title {
+                Some(t) if !t.is_empty() => format!("E{:02} · {t}", ep.number),
+                _ => format!("E{:02}", ep.number),
+            };
+            ListItem::new(label)
+        })
         .collect();
     render_list(f, area, "Episodes", items, &app.episodes_state);
 }

@@ -67,6 +67,13 @@ impl SourceProvider for TorrentioSource {
     }
 
     async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+        // Torrentio is IMDB-keyed. AniList anime carry no IMDB id; rather than
+        // erroring per call (which the engine would only log), contribute nothing
+        // and let the anime-native providers (nyaa) serve those titles.
+        if query.media.ids.imdb.is_none() {
+            tracing::debug!("torrentio: no IMDB id; skipping (anime handled by nyaa)");
+            return Ok(Vec::new());
+        }
         let url = self.build_url(query)?;
         tracing::debug!(%url, "torrentio request");
 

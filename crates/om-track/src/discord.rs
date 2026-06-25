@@ -174,7 +174,7 @@ mod tests {
     fn playing_activity_has_timestamps() {
         let a = Activity {
             title: "Frieren".into(),
-            detail: "Episode 1".into(),
+            detail: "S01E01 - The Journey's End".into(),
             paused: false,
             position_secs: 60,
             duration_secs: 1440,
@@ -183,6 +183,8 @@ mod tests {
         let v = build_activity(&a);
         assert_eq!(v["type"], 3);
         assert_eq!(v["details"], "Frieren");
+        // The episode coordinate/title (from om_core::title) flows to `state`.
+        assert_eq!(v["state"], "S01E01 - The Journey's End");
         assert!(v.get("timestamps").is_some());
         assert!(v.get("assets").is_some());
     }
@@ -191,7 +193,7 @@ mod tests {
     fn paused_activity_omits_timestamps() {
         let a = Activity {
             title: "Frieren".into(),
-            detail: "Episode 1".into(),
+            detail: "S01E01".into(),
             paused: true,
             position_secs: 60,
             duration_secs: 1440,

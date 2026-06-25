@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — keyless metadata + UX
+- **Cinemeta metadata (`om-metadata`)**: new keyless, IMDB-native `CinemetaProvider`
+  (Stremio `v3-cinemeta.strem.io`) for movies and live-action series. It is wired
+  on by default (`providers.cinemeta`), so **search works with no TMDB key** —
+  `om search "breaking bad"` now returns results out of the box. TMDB stays as an
+  optional richer source when a key is set; results are de-duplicated by IMDB id.
+- **Season navigation (`om-cli` TUI)**: a Seasons screen plus real per-season
+  episode lists fetched from the metadata provider; multi-season series are now
+  fully browsable (previously only season 1, with a fabricated 12-episode list).
+- **Accurate player titles (`om-core::title`)**: mpv's `--force-media-title` (and
+  Discord presence) now read `Series - S01E01 - Episode Title` (degrading to
+  `Series - S01E01`, or `Movie (Year)`), via a shared pure title helper. The
+  selected episode's title is threaded through `PlayRequest`.
+
+### Fixed
+- **Real-Debrid multi-file playback (`om-debrid`)**: a season pack now unrestricts
+  the *requested* episode. RD's `links` array is indexed per *selected* file, not
+  per full-torrent file; the resolver maps the candidate's file index correctly
+  and labels the stream with the real file name.
+- **Resolver cache-gating (`om-stream`)**: `HybridResolver` no longer forces a slow
+  add→download→unrestrict warm-up for *uncached* candidates when P2P can stream
+  them, and now falls back to P2P if a debrid resolve fails.
+- **Torrentio for anime (`om-sources`)**: returns empty (instead of erroring) for
+  titles with no IMDB id, so AniList anime cleanly fall through to nyaa.
+- **Dead config key (`om-cli`)**: `behavior.complete_threshold` is now passed to the
+  engine (previously always the hard-coded 0.85).
+- **Debrid gating consistency (`om-cli`)**: the `realdebrid=` Torrentio parameter is
+  only injected when Real-Debrid is the active backend, matching the provider
+  wiring (`Config::has_real_debrid`).
+- Removed the outdated "metadata adapters are stubbed until Phase 1" message and
+  stale `[Phase 8]`/"Phase 4" doc comments.
+
 ### Added — Phases 4–9: streaming, players, session, history, tracking, TUI
 - **P2P streaming (`om-stream`)**: `P2pEngine` over librqbit (rust-tls + http-api,
   no system OpenSSL) — magnet → metadata → largest video file → librqbit's
@@ -78,8 +110,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CONTRIBUTING.md`, MIT `LICENSE`.
 
 ### Notes
-- This release is a foundation: it builds, passes `cargo clippy -D warnings`, and
-  has green tests, but network adapters are stubbed. See `docs/PLAN.md` for the
-  phased path to the first watchable build (Milestone M2).
+- The full discover → source → resolve → play pipeline is implemented and tested
+  (Phases 1–9); network adapters are real, not stubs. Remaining work is packaging
+  and polish — see `docs/PLAN.md`.
 
 [Unreleased]: https://github.com/0xfell/open-media/commits/main

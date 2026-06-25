@@ -15,7 +15,7 @@ use om_core::stream::Quality;
 
 use om_debrid::RealDebrid;
 use om_history::SqliteHistory;
-use om_metadata::{AniListProvider, TmdbProvider};
+use om_metadata::{AniListProvider, CinemetaProvider, TmdbProvider};
 use om_player::{MpvPlayer, VlcPlayer};
 use om_sources::{NyaaSource, TorrentioSource};
 use om_stream::{HybridResolver, P2pEngine};
@@ -23,11 +23,19 @@ use om_track::{AniListTracker, AniSkipEnricher, CompositeTracker, DiscordPresenc
 
 /// Build the fully-wired [`Engine`] for the given config.
 pub fn build_engine(cfg: &Config) -> Engine {
-    let mut builder = EngineBuilder::default().scoring_prefs(scoring_prefs(cfg));
+    let mut builder = EngineBuilder::default()
+        .scoring_prefs(scoring_prefs(cfg))
+        .complete_threshold(cfg.behavior.complete_threshold);
 
     // --- Metadata providers ---
+    // TMDB first (richest) when a key is configured; its IMDB ids win on dedup.
     if !cfg.credentials.tmdb_api_key.is_empty() {
         builder = builder.add_metadata(Arc::new(TmdbProvider::new(&cfg.credentials.tmdb_api_key)));
+    }
+    // Cinemeta: keyless, IMDB-native movie/series discovery — the default so the
+    // app works with no TMDB key. Results dedup against TMDB by IMDB id.
+    if cfg.providers.cinemeta {
+        builder = builder.add_metadata(Arc::new(CinemetaProvider::new()));
     }
     // AniList needs no key for read/search; it enriches anime discovery.
     builder = builder.add_metadata(Arc::new(AniListProvider::new()));
@@ -39,14 +47,13 @@ pub fn build_engine(cfg: &Config) -> Engine {
     }
 
     // --- Debrid + resolver (debrid optional → P2P fallback) ---
-    let debrid: Option<Arc<dyn om_core::ports::DebridProvider>> =
-        if cfg.has_debrid() && cfg.credentials.debrid_provider == "real-debrid" {
-            Some(Arc::new(RealDebrid::new(
-                &cfg.credentials.real_debrid_token,
-            )))
-        } else {
-            None
-        };
+    let debrid: Option<Arc<dyn om_core::ports::DebridProvider>> = if cfg.has_real_debrid() {
+        Some(Arc::new(RealDebrid::new(
+            &cfg.credentials.real_debrid_token,
+        )))
+    } else {
+        None
+    };
     let p2p = Arc::new(P2pEngine::new(
         cfg.streaming.http_port,
         cfg.streaming.cleanup_after_playback,
@@ -126,7 +133,9 @@ fn torrentio_config_string(cfg: &Config) -> String {
         "sort=qualitysize".to_string(),
         "qualityfilter=scr,cam".to_string(),
     ];
-    if cfg.has_debrid() {
+    // Only inject the RD param when Real-Debrid is the active backend — matches
+    // the `DebridProvider` wiring gate so the two never disagree.
+    if cfg.has_real_debrid() {
         if !cfg.providers.show_uncached {
             parts.push("debridoptions=nodownloadlinks".to_string());
         }

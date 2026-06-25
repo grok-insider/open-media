@@ -113,7 +113,10 @@ async fn torrentio_series_uses_season_episode_path() {
 }
 
 #[tokio::test]
-async fn torrentio_without_imdb_errors() {
+async fn torrentio_without_imdb_returns_empty() {
+    // An AniList-only anime (no IMDB id) makes Torrentio a clean no-op, not an
+    // error — nyaa serves anime. The base URL is unreachable to prove no request
+    // is even attempted.
     let src = TorrentioSource::with_base_url("testcfg", "http://127.0.0.1:1");
     let q = SourceQuery {
         media: media(
@@ -125,8 +128,8 @@ async fn torrentio_without_imdb_errors() {
         episode: Some(1),
         include_uncached: false,
     };
-    let err = src.find(&q).await.unwrap_err();
-    assert!(err.to_string().to_lowercase().contains("imdb"));
+    let out = src.find(&q).await.unwrap();
+    assert!(out.is_empty());
 }
 
 #[tokio::test]
