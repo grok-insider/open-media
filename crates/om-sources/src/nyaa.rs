@@ -39,22 +39,32 @@ impl NyaaSource {
         }
     }
 
-    fn build_query_text(query: &SourceQuery) -> String {
+    /// Build the nyaa search text plus the season context used to filter results.
+    ///
+    /// Returns `(query_text, base, ordinal)`:
+    /// - `base` is the franchise name with any season suffix stripped, so the
+    ///   query targets the whole franchise and the season filter (not the query)
+    ///   does the precision work — which also fixes recall for sequels whose
+    ///   release naming differs from AniList's ("2nd Season" vs "S2").
+    /// - `ordinal` is which season the selected entry is (1 when unmarked).
+    fn plan_query(query: &SourceQuery) -> (String, String, u32) {
         // Release groups (SubsPlease/Erai-raws) name files with the romaji title,
         // so prefer `original_title`; and drop any English subtitle after a colon
-        // ("Frieren: Beyond Journey's End" → "Frieren") so the search actually
-        // matches nyaa filenames.
+        // ("Frieren: Beyond Journey's End" → "Frieren") so the search matches nyaa
+        // filenames.
         let raw = query
             .media
             .original_title
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| query.media.display_title());
-        let base = raw.split(':').next().unwrap_or(raw).trim();
-        match query.episode {
+        let no_sub = raw.split(':').next().unwrap_or(raw).trim();
+        let (base, ordinal) = crate::season::parse_title_season(no_sub);
+        let text = match query.episode {
             Some(ep) => format!("{base} {ep:02}"),
-            None => base.to_string(),
-        }
+            None => base.clone(),
+        };
+        (text, base, ordinal)
     }
 }
 
@@ -75,13 +85,14 @@ impl SourceProvider for NyaaSource {
     }
 
     async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
-        let q = urlencoding::encode(&Self::build_query_text(query)).into_owned();
+        let (qtext, base, ordinal) = Self::plan_query(query);
+        let q = urlencoding::encode(&qtext).into_owned();
         // c=1_2 = English-translated anime, sorted by seeders desc.
         let url = format!(
             "{}/?page=rss&q={q}&c=1_2&f=0&s=seeders&o=desc",
             self.base_url
         );
-        tracing::debug!(%url, "nyaa rss request");
+        tracing::debug!(%url, ordinal, "nyaa rss request");
 
         let resp = self.client.get(&url).send().await.map_err(|e| {
             if e.is_timeout() {
@@ -101,7 +112,23 @@ impl SourceProvider for NyaaSource {
             .text()
             .await
             .map_err(|e| CoreError::Network(format!("nyaa: {e}")))?;
-        parse_rss(&xml)
+        let all = parse_rss(&xml)?;
+
+        // Keep only releases for the requested season (AniList numbers each season
+        // from 1, so episode "01" otherwise matches every season's premiere).
+        let filtered: Vec<SourceCandidate> = all
+            .iter()
+            .filter(|c| crate::season::release_season(&c.title, &base).covers(ordinal))
+            .cloned()
+            .collect();
+
+        // Safety net: if the season heuristic removed everything (e.g. an unusual
+        // naming scheme), show the unfiltered set rather than a dead-end.
+        if filtered.is_empty() && !all.is_empty() {
+            tracing::debug!(%base, ordinal, "season filter matched nothing; returning unfiltered");
+            return Ok(all);
+        }
+        Ok(filtered)
     }
 }
 
