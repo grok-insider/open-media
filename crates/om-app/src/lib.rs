@@ -11,8 +11,9 @@
 //! Holds the selected adapters and exposes the use-cases:
 //! - [`Engine::search`] — fan out across metadata providers, merge results.
 //! - [`Engine::find_sources`] — fan out across source providers, merge + rank.
+//! - [`Engine::seasons`]/[`Engine::episodes`] — episodic navigation.
 //! - [`Engine::play`] — the playback orchestrator (see its doc for the full
-//!   sequence). Scaffolded; lands in Phase 8.
+//!   sequence).
 //!
 //! Build one with [`EngineBuilder`].
 
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use om_core::error::{CoreError, CoreResult};
-use om_core::model::{IdSet, Media, MediaKind};
+use om_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use om_core::ports::{
     Chapter, Enricher, HistoryStore, MetadataProvider, PlayOptions, PlaybackControl, Player,
     PresenceReporter, SourceProvider, SourceQuery, StreamResolver, Tracker,
@@ -36,6 +37,10 @@ pub struct PlayRequest {
     pub media: Media,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    /// Display title of the selected episode, when the metadata provider supplied
+    /// one. Threaded into the player's media-title; `None` degrades gracefully to
+    /// just the `S01E01` coordinate. Always `None` for movies.
+    pub episode_title: Option<String>,
     pub include_uncached: bool,
 }
 
@@ -62,7 +67,8 @@ impl Engine {
     /// Search every configured metadata provider concurrently and merge results.
     ///
     /// Provider failures are logged and skipped, not fatal — a TMDB outage should
-    /// not stop AniList from returning anime.
+    /// not stop AniList from returning anime. Results sharing an IMDB id (e.g. the
+    /// same film from both Cinemeta and TMDB) are collapsed into one.
     pub async fn search(&self, query: &str, kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
         if self.metadata.is_empty() {
             return Err(CoreError::Config("no metadata providers configured".into()));
@@ -78,7 +84,7 @@ impl Engine {
                 Err(e) => tracing::warn!(provider = name, error = %e, "metadata search failed"),
             }
         }
-        Ok(out)
+        Ok(dedup_by_imdb(out))
     }
 
     /// Hydrate full details (and extra ids, e.g. IMDB) for a known item by trying
@@ -93,6 +99,33 @@ impl Engine {
         }
         Err(last_err
             .unwrap_or_else(|| CoreError::NotFound("no metadata provider resolved details".into())))
+    }
+
+    /// List the seasons of an episodic item. Returns the first provider that knows
+    /// the id dialect and reports any seasons; `Ok(vec![])` when none do (the
+    /// caller treats that as a single flat season).
+    pub async fn seasons(&self, ids: &IdSet) -> CoreResult<Vec<Season>> {
+        for provider in &self.metadata {
+            if let Ok(seasons) = provider.seasons(ids).await {
+                if !seasons.is_empty() {
+                    return Ok(seasons);
+                }
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// List the episodes of a season. Returns the first provider that knows the id
+    /// dialect and reports episodes; `Ok(vec![])` when none do.
+    pub async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+        for provider in &self.metadata {
+            if let Ok(eps) = provider.episodes(ids, season).await {
+                if !eps.is_empty() {
+                    return Ok(eps);
+                }
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Find playable candidates across every applicable source provider
@@ -138,7 +171,7 @@ impl Engine {
 
     /// Resolve a chosen candidate and play it end-to-end.
     ///
-    /// The full sequence (Phase 8):
+    /// The full sequence:
     /// 1. [`StreamResolver::resolve`] → a [`Playback`] URL (debrid-direct or P2P).
     /// 2. [`Player::play`] → spawn mpv with `force-media-title` + resume position.
     /// 3. If the player exposes [`PlaybackControl`]: start the concurrent tasks —
@@ -187,9 +220,16 @@ impl Engine {
             None => SkipTimes::default(),
         };
 
-        // 4. Launch the player with title + resume.
+        // 4. Launch the player with title + resume. The media-title carries the
+        //    series name, the S01E01 coordinate, and the episode title when known
+        //    (see `om_core::title`); movies get just the name (+ year).
         let opts = PlayOptions {
-            title: Some(req.media.display_title().to_string()),
+            title: Some(om_core::title::media_title(
+                &req.media,
+                season,
+                episode,
+                req.episode_title.as_deref(),
+            )),
             start_at_secs: resume,
             extra_args: Vec::new(),
         };
@@ -206,7 +246,12 @@ impl Engine {
             season,
             episode,
             title: req.media.display_title().to_string(),
-            detail: episode_label(req),
+            detail: om_core::title::episode_detail(
+                &req.media,
+                season,
+                episode,
+                req.episode_title.as_deref(),
+            ),
             image: req.media.poster.clone(),
         };
         let monitor = monitor_playback(
@@ -356,12 +401,27 @@ fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {
     chapters
 }
 
-fn episode_label(req: &PlayRequest) -> String {
-    if req.media.kind.is_episodic() {
-        format!("Episode {}", req.episode.unwrap_or(1))
-    } else {
-        "Movie".to_string()
+/// Collapse provider results that share an IMDB id, preserving order.
+///
+/// Cinemeta and TMDB both resolve a live-action title to the same `tt…` id; a
+/// keyed user would otherwise see each movie/series twice. First occurrence wins
+/// (provider order in the builder is the priority); later duplicates only donate
+/// ids the kept entry lacks. Items without an IMDB id (e.g. AniList anime) are
+/// never collapsed.
+fn dedup_by_imdb(items: Vec<Media>) -> Vec<Media> {
+    let mut out: Vec<Media> = Vec::with_capacity(items.len());
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in items {
+        if let Some(imdb) = item.ids.imdb.clone() {
+            if let Some(&idx) = seen.get(&imdb) {
+                out[idx].ids.merge(&item.ids);
+                continue;
+            }
+            seen.insert(imdb, out.len());
+        }
+        out.push(item);
     }
+    out
 }
 
 fn unix_now() -> i64 {
@@ -507,5 +567,49 @@ mod tests {
     async fn search_without_providers_errors() {
         let engine = Engine::builder().build();
         assert!(engine.search("x", None).await.is_err());
+    }
+
+    fn media_with_ids(title: &str, ids: IdSet) -> Media {
+        Media {
+            kind: MediaKind::Movie,
+            ids,
+            title: title.into(),
+            original_title: None,
+            year: None,
+            score: None,
+            overview: None,
+            poster: None,
+            genres: vec![],
+            status: None,
+            episode_count: None,
+            season_count: None,
+        }
+    }
+
+    #[test]
+    fn dedup_collapses_shared_imdb_and_folds_ids() {
+        // Same film from Cinemeta (imdb only) and TMDB (imdb + tmdb).
+        let items = vec![
+            media_with_ids("Interstellar", IdSet::default().with_imdb("tt0816692")),
+            media_with_ids(
+                "Interstellar",
+                IdSet::default().with_imdb("tt0816692").with_tmdb(157336),
+            ),
+        ];
+        let out = dedup_by_imdb(items);
+        assert_eq!(out.len(), 1);
+        // First occurrence kept; the later duplicate donated its tmdb id.
+        assert_eq!(out[0].ids.tmdb, Some(157336));
+    }
+
+    #[test]
+    fn dedup_keeps_items_without_imdb() {
+        // Two AniList anime (no imdb) must not collapse into one.
+        let items = vec![
+            media_with_ids("Frieren", IdSet::default().with_anilist(154587)),
+            media_with_ids("Bocchi", IdSet::default().with_anilist(140960)),
+        ];
+        let out = dedup_by_imdb(items);
+        assert_eq!(out.len(), 2);
     }
 }

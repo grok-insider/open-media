@@ -13,6 +13,7 @@
 //! - [`stream`] — [`SourceCandidate`] (a found file) and [`Playback`] (a resolved,
 //!   player-openable URL), plus [`Quality`]/[`CacheState`].
 //! - [`tracking`] — [`SkipTimes`], [`WatchProgress`], [`ListStatus`], [`Activity`].
+//! - [`title`] — pure human-facing title formatting (mpv media-title + presence).
 //! - [`ports`] — the trait boundaries: [`MetadataProvider`], [`SourceProvider`],
 //!   [`DebridProvider`], [`StreamResolver`], [`Player`]/[`PlaybackControl`],
 //!   [`Tracker`], [`Enricher`], [`HistoryStore`], [`PresenceReporter`].
@@ -51,6 +52,7 @@ pub mod model;
 pub mod ports;
 pub mod scoring;
 pub mod stream;
+pub mod title;
 pub mod tracking;
 
 pub use error::{CoreError, CoreResult};

@@ -92,7 +92,8 @@ impl WatchProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Activity {
     pub title: String,
-    /// e.g. `"Episode 12"` or `"Movie"`.
+    /// The episode line, e.g. `"S01E12 - Title"`, `"S01E12"`, or `"Movie"` (built
+    /// by [`crate::title::episode_detail`]).
     pub detail: String,
     pub paused: bool,
     pub position_secs: u32,

@@ -38,7 +38,7 @@ enum Command {
         #[arg(long)]
         kind: Option<String>,
     },
-    /// Search, pick a source, and play (interactive). [Phase 8]
+    /// Search, pick the best source, and play.
     Play {
         /// Free-text query.
         query: String,
@@ -185,7 +185,7 @@ async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
     let engine = compose::build_engine(&cfg);
     match engine.search(query, parse_kind(kind)).await {
         Ok(results) if results.is_empty() => {
-            println!("No results. (Metadata adapters are stubbed until Phase 1 — see ROADMAP.)");
+            println!("No results for “{query}”.");
         }
         Ok(results) => {
             for m in results {
@@ -219,11 +219,31 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
     // 2. Hydrate ids (IMDB) needed by the sources.
     let media = engine.details(&top.ids).await.unwrap_or(top);
 
-    // 3. Find + rank sources.
+    // 3. Resolve coordinates: episodic content defaults to S1E1 when unspecified
+    //    (a movie stays None/None).
+    let (req_season, req_episode) = if media.kind.is_episodic() {
+        (Some(season.unwrap_or(1)), Some(episode.unwrap_or(1)))
+    } else {
+        (None, None)
+    };
+
+    // 4. Best-effort episode title for the player's media-title.
+    let episode_title = match (req_season, req_episode) {
+        (Some(s), Some(e)) => engine
+            .episodes(&media.ids, s)
+            .await
+            .ok()
+            .and_then(|eps| eps.into_iter().find(|ep| ep.number == e))
+            .and_then(|ep| ep.title),
+        _ => None,
+    };
+
+    // 5. Find + rank sources.
     let req = PlayRequest {
         media,
-        season,
-        episode: episode.or(if season.is_some() { Some(1) } else { None }),
+        season: req_season,
+        episode: req_episode,
+        episode_title,
         include_uncached: cfg.providers.show_uncached,
     };
     let candidates = engine.find_sources(&req).await?;
@@ -246,7 +266,7 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
             .unwrap_or_else(|| "?".into())
     );
 
-    // 4. Resolve + play.
+    // 6. Resolve + play.
     engine.play(&req, &best).await?;
     Ok(())
 }

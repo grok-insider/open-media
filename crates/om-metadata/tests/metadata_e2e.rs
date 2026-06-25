@@ -6,7 +6,7 @@
 
 use om_core::model::{IdSet, MediaKind};
 use om_core::ports::MetadataProvider;
-use om_metadata::{AniListProvider, TmdbProvider};
+use om_metadata::{AniListProvider, CinemetaProvider, TmdbProvider};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -188,4 +188,150 @@ async fn anilist_propagates_graphql_errors() {
     let provider = AniListProvider::with_base_url(server.uri());
     let err = provider.search("x", None).await.unwrap_err();
     assert!(err.to_string().contains("Invalid token"));
+}
+
+// --- Cinemeta (keyless) ---
+
+#[tokio::test]
+async fn cinemeta_search_movie_maps_imdb_id_and_year() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/catalog/movie/top/search=interstellar.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metas": [
+                {
+                    "id": "tt0816692",
+                    "imdb_id": "tt0816692",
+                    "type": "movie",
+                    "name": "Interstellar",
+                    "poster": "https://img/p.jpg",
+                    "releaseInfo": "2014"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = CinemetaProvider::with_base_url(server.uri());
+    let results = provider
+        .search("interstellar", Some(MediaKind::Movie))
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    let m = &results[0];
+    assert_eq!(m.kind, MediaKind::Movie);
+    assert_eq!(m.ids.imdb.as_deref(), Some("tt0816692"));
+    assert_eq!(m.title, "Interstellar");
+    assert_eq!(m.year, Some(2014));
+}
+
+#[tokio::test]
+async fn cinemeta_search_none_queries_both_catalogs() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/catalog/movie/top/search=breaking%20bad.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "metas": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/catalog/series/top/search=breaking%20bad.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metas": [
+                { "id": "tt0903747", "type": "series", "name": "Breaking Bad", "releaseInfo": "2008–2013" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = CinemetaProvider::with_base_url(server.uri());
+    let results = provider.search("breaking bad", None).await.unwrap();
+
+    assert_eq!(results.len(), 1, "series catalog result must appear");
+    assert_eq!(results[0].kind, MediaKind::Series);
+    assert_eq!(results[0].ids.imdb.as_deref(), Some("tt0903747"));
+    assert_eq!(results[0].year, Some(2008));
+}
+
+#[tokio::test]
+async fn cinemeta_skips_anime_without_network() {
+    // Anime is AniList's domain; Cinemeta must not hit the network for it.
+    let provider = CinemetaProvider::with_base_url("http://127.0.0.1:1/should-not-be-called");
+    let results = provider
+        .search("frieren", Some(MediaKind::Anime))
+        .await
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn cinemeta_details_tries_series_first_then_movie() {
+    let server = MockServer::start().await;
+    // Series miss → meta: null (Cinemeta's clean-miss shape).
+    Mock::given(method("GET"))
+        .and(path("/meta/series/tt0816692.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "meta": null })))
+        .mount(&server)
+        .await;
+    // Movie hit.
+    Mock::given(method("GET"))
+        .and(path("/meta/movie/tt0816692.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": {
+                "id": "tt0816692",
+                "imdb_id": "tt0816692",
+                "type": "movie",
+                "name": "Interstellar",
+                "releaseInfo": "2014",
+                "imdbRating": "8.7",
+                "genres": ["Adventure", "Drama", "Sci-Fi"]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = CinemetaProvider::with_base_url(server.uri());
+    let ids = IdSet::default().with_imdb("tt0816692");
+    let m = provider.details(&ids).await.unwrap();
+    assert_eq!(m.kind, MediaKind::Movie);
+    assert_eq!(m.title, "Interstellar");
+    assert_eq!(m.score, Some(8.7));
+    assert_eq!(m.genres, vec!["Adventure", "Drama", "Sci-Fi"]);
+}
+
+#[tokio::test]
+async fn cinemeta_episodes_parsed_from_videos() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/series/tt0903747.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": {
+                "id": "tt0903747",
+                "imdb_id": "tt0903747",
+                "type": "series",
+                "name": "Breaking Bad",
+                "videos": [
+                    { "season": 0, "number": 1, "name": "Special", "released": "2009-02-17T05:00:00.000Z" },
+                    { "season": 1, "number": 1, "episode": 1, "name": "Pilot", "released": "2008-01-21T05:00:00.000Z", "rating": "7.7" },
+                    { "season": 1, "number": 2, "episode": 2, "name": "Cat's in the Bag...", "released": "2008-01-28T05:00:00.000Z" }
+                ]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = CinemetaProvider::with_base_url(server.uri());
+    let ids = IdSet::default().with_imdb("tt0903747");
+
+    let seasons = provider.seasons(&ids).await.unwrap();
+    assert_eq!(seasons.len(), 1, "S0 specials excluded");
+    assert_eq!(seasons[0].number, 1);
+    assert_eq!(seasons[0].episode_count, 2);
+
+    let eps = provider.episodes(&ids, 1).await.unwrap();
+    assert_eq!(eps.len(), 2);
+    assert_eq!(eps[0].number, 1);
+    assert_eq!(eps[0].title.as_deref(), Some("Pilot"));
+    assert_eq!(eps[0].air_date.as_deref(), Some("2008-01-21"));
+    assert_eq!(eps[0].rating, Some(7.7));
 }

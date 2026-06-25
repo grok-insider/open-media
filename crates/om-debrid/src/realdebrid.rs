@@ -218,15 +218,25 @@ impl DebridProvider for RealDebrid {
                     selected = true;
                 }
                 "downloaded" if !info.links.is_empty() => {
-                    let idx = candidate
-                        .file_index
-                        .filter(|i| *i < info.links.len())
-                        .unwrap_or(0);
+                    // RD's `links` carries one URL per *selected* file, in order —
+                    // not per full-torrent file. Map the candidate's file_index
+                    // (a full-list position) onto the right selected link so a
+                    // season pack plays the requested episode, not the first file.
+                    let (idx, file_name) = match choose_selected_link(
+                        &info.files,
+                        info.links.len(),
+                        candidate.file_index,
+                    ) {
+                        Some((idx, file)) => (idx, basename(&file.path)),
+                        // No per-file signal (e.g. single-file torrent): fall
+                        // back to the first link + the torrent name.
+                        None => (0, info.filename.clone().unwrap_or_else(|| "stream".into())),
+                    };
                     let url = self.unrestrict(&info.links[idx]).await?;
                     return Ok(Playback {
                         url,
                         origin: PlaybackOrigin::Debrid,
-                        file_name: info.filename.unwrap_or_else(|| "stream".into()),
+                        file_name,
                     });
                 }
                 _ => {}
@@ -249,6 +259,65 @@ fn video_file_ids(files: &[FileEntry]) -> Vec<String> {
         .filter(|f| is_video(&f.path))
         .map(|f| f.id.to_string())
         .collect()
+}
+
+/// Map a torrent `file_index` (Torrentio's position in the *full* file list)
+/// onto the index into RD's `links` array, which holds one URL per **selected**
+/// file in list order. Returns the link index and the chosen file.
+///
+/// Falls back to the largest selected file when the target can't be pinpointed
+/// (e.g. the index is missing, out of range, or points at a non-selected file) —
+/// that's the feature movie/episode in the common single-video case.
+fn choose_selected_link(
+    files: &[FileEntry],
+    links_len: usize,
+    file_index: Option<usize>,
+) -> Option<(usize, &FileEntry)> {
+    if links_len == 0 {
+        return None;
+    }
+    // Files RD actually selected, in order — these line up 1:1 with `links`.
+    // Older API responses may omit `selected`; fall back to video files then all.
+    let selected: Vec<&FileEntry> = {
+        let by_flag: Vec<&FileEntry> = files.iter().filter(|f| f.selected == 1).collect();
+        if !by_flag.is_empty() {
+            by_flag
+        } else {
+            let videos: Vec<&FileEntry> = files.iter().filter(|f| is_video(&f.path)).collect();
+            if videos.is_empty() {
+                files.iter().collect()
+            } else {
+                videos
+            }
+        }
+    };
+    if selected.is_empty() {
+        return None;
+    }
+
+    // Target by Torrentio fileIdx: the file at that position in the full list,
+    // located among the selected files to get its link index.
+    if let Some(idx) = file_index {
+        if let Some(target) = files.get(idx) {
+            if let Some(pos) = selected.iter().position(|f| f.id == target.id) {
+                if pos < links_len {
+                    return Some((pos, selected[pos]));
+                }
+            }
+        }
+    }
+
+    // Fallback: the largest selected file, clamped into the links range.
+    let (pos, file) = selected.iter().enumerate().max_by_key(|(_, f)| f.bytes)?;
+    Some((pos.min(links_len - 1), *file))
+}
+
+/// Last path segment of a torrent file path (RD uses `/`-rooted paths).
+fn basename(path: &str) -> String {
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn is_video(path: &str) -> bool {
@@ -317,6 +386,10 @@ struct FileEntry {
     path: String,
     #[serde(default)]
     bytes: u64,
+    /// RD marks files chosen via `selectFiles` with `selected: 1`. `links` holds
+    /// one URL per selected file, in this list's order.
+    #[serde(default)]
+    selected: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,22 +413,52 @@ mod tests {
     #[test]
     fn selects_only_video_files() {
         let files = vec![
-            FileEntry {
-                id: 1,
-                path: "/sample.txt".into(),
-                bytes: 1,
-            },
-            FileEntry {
-                id: 2,
-                path: "/Movie.mkv".into(),
-                bytes: 100,
-            },
-            FileEntry {
-                id: 3,
-                path: "/poster.jpg".into(),
-                bytes: 2,
-            },
+            file(1, "/sample.txt", 1, 0),
+            file(2, "/Movie.mkv", 100, 0),
+            file(3, "/poster.jpg", 2, 0),
         ];
         assert_eq!(video_file_ids(&files), vec!["2".to_string()]);
+    }
+
+    fn file(id: u32, path: &str, bytes: u64, selected: u8) -> FileEntry {
+        FileEntry {
+            id,
+            path: path.into(),
+            bytes,
+            selected,
+        }
+    }
+
+    #[test]
+    fn season_pack_maps_file_index_to_correct_selected_link() {
+        // Full torrent: txt + 3 episodes; only the videos were selected, so RD's
+        // `links` has 3 entries for files at full-list positions 1,2,3.
+        let files = vec![
+            file(1, "/Show/readme.txt", 10, 0),
+            file(2, "/Show/S01E01.mkv", 100, 1),
+            file(3, "/Show/S01E02.mkv", 100, 1),
+            file(4, "/Show/S01E03.mkv", 100, 1),
+        ];
+        // Torrentio fileIdx for E02 is full-list position 2 → 2nd selected link.
+        let (idx, chosen) = choose_selected_link(&files, 3, Some(2)).unwrap();
+        assert_eq!(idx, 1, "E02 is the 2nd selected file → links[1]");
+        assert_eq!(chosen.path, "/Show/S01E02.mkv");
+    }
+
+    #[test]
+    fn missing_file_index_falls_back_to_largest_selected() {
+        let files = vec![
+            file(1, "/Show/S01E01.mkv", 100, 1),
+            file(2, "/Show/Extras.mkv", 800, 1),
+        ];
+        let (idx, chosen) = choose_selected_link(&files, 2, None).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(chosen.bytes, 800);
+    }
+
+    #[test]
+    fn basename_takes_last_segment() {
+        assert_eq!(basename("/Show/S01E01.mkv"), "S01E01.mkv");
+        assert_eq!(basename("Movie.mkv"), "Movie.mkv");
     }
 }

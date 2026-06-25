@@ -146,6 +146,7 @@ async fn full_pipeline_search_details_sources_resolve() {
         media,
         season: None,
         episode: None,
+        episode_title: None,
         include_uncached: true,
     };
     let candidates = engine.find_sources(&req).await.unwrap();
