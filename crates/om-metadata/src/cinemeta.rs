@@ -183,7 +183,7 @@ impl MetadataProvider for CinemetaProvider {
 
     async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
         let meta = self.series_meta(ids).await?;
-        Ok(meta
+        let mut episodes: Vec<Episode> = meta
             .videos
             .into_iter()
             .filter(|v| v.season == Some(season))
@@ -199,7 +199,11 @@ impl MetadataProvider for CinemetaProvider {
                 runtime_minutes: None,
                 rating: v.rating.as_deref().and_then(|r| r.parse().ok()),
             })
-            .collect())
+            .collect();
+        // Cinemeta's `videos` can arrive slightly out of order; present them by
+        // episode number.
+        episodes.sort_by_key(|e| e.number);
+        Ok(episodes)
     }
 }
 

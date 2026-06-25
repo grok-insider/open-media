@@ -107,7 +107,7 @@ async fn run_interactive() -> anyhow::Result<()> {
         }
     };
     let engine = compose::build_engine(&cfg);
-    tui::run(engine, None).await
+    tui::run(engine, cfg, None).await
 }
 
 fn cmd_init() -> anyhow::Result<()> {
