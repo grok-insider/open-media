@@ -13,9 +13,11 @@
 //! [`SourceProvider`]: om_core::ports::SourceProvider
 
 pub mod nyaa;
+pub mod season;
 pub mod tags;
 pub mod torrentio;
 
 pub use nyaa::NyaaSource;
+pub use season::{parse_title_season, release_season, SeasonMatch};
 pub use tags::{parse_release_name, parse_size_to_bytes, parse_torrentio, ParsedRelease};
 pub use torrentio::TorrentioSource;

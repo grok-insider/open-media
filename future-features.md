@@ -53,6 +53,16 @@ when scheduled. Not promises.
   serve them (nyaa does). Bridge via Cinemeta/anime-lists so anime also get
   Torrentio/RD cached sources. Cinemeta episode titles for anime would also fill
   the `Series - S01E01` (no title) gap.
+- **Anime absolute episode numbering (nyaa)**: some groups number a sequel
+  continuously (S2E01 released as `… - 21` when S1 had 20 eps). The season filter
+  (`om-sources/src/season.rs`) classifies by title markers, so an absolute-numbered
+  S2 release with *no* season marker is treated as season 1 and won't match an S2
+  pick. Proper fix: derive an episode offset from AniList `relations` (sum of prior
+  TV seasons' episodes), add a defaulted `MetadataProvider::episode_offset` port +
+  `SourceQuery.absolute_episode`, and have nyaa also query/match the absolute number
+  (second RSS fetch, merge by infohash). Also: singular "Season 1-5" batches are
+  read as season 1 only (plural "Seasons 1-5" and "S01-S05" ranges work), and
+  cross-arc/OVA chains aren't modeled.
 - **Binge auto-advance**: `Engine::play` plays one episode; add the
   advance-to-next-(non-filler)-episode loop and call `Enricher::filler_episodes`.
 - **Pagination**: TMDB (page 1 only), AniList (`perPage: 15`), and nyaa (one RSS

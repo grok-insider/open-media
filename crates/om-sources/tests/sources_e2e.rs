@@ -176,6 +176,68 @@ async fn nyaa_rss_search_returns_candidates() {
 }
 
 #[tokio::test]
+async fn nyaa_filters_out_wrong_season_releases() {
+    let server = MockServer::start().await;
+
+    // A mixed feed: S1 single, S1 batch (no marker), S2 single, S2 batch.
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! - 01 (1080p) [AAAA].mkv</title>
+      <nyaa:seeders>100</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[Erai-raws] Kage no Jitsuryokusha ni Naritakute! - 01 ~ 20 [1080p][Batch]</title>
+      <nyaa:seeders>90</nyaa:seeders><nyaa:size>7.0 GiB</nyaa:size>
+      <nyaa:infoHash>2222222222222222222222222222222222222222</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! S2 - 01 (1080p) [BBBB].mkv</title>
+      <nyaa:seeders>80</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>3333333333333333333333333333333333333333</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[Erai-raws] Kage no Jitsuryokusha ni Naritakute! 2nd Season - 01 ~ 12 [1080p][Batch]</title>
+      <nyaa:seeders>70</nyaa:seeders><nyaa:size>5.0 GiB</nyaa:size>
+      <nyaa:infoHash>4444444444444444444444444444444444444444</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let mut m = media(
+        MediaKind::Anime,
+        IdSet::default().with_anilist(1),
+        "The Eminence in Shadow",
+    );
+    // nyaa keys off the romaji original title.
+    m.original_title = Some("Kage no Jitsuryokusha ni Naritakute!".into());
+    let q = SourceQuery {
+        media: m,
+        season: Some(1),
+        episode: Some(1),
+        include_uncached: false,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+
+    // Only the two S1 releases (single + batch) survive; both S2 ones are dropped.
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .all(|c| !c.title.contains("S2") && !c.title.contains("2nd Season")));
+}
+
+#[tokio::test]
 async fn nyaa_does_not_support_movies() {
     let src = NyaaSource::new();
     assert!(!src.supports(MediaKind::Movie));
