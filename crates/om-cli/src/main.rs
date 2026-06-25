@@ -7,6 +7,7 @@
 //! [`Engine`]: om_app::Engine
 
 mod compose;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use om_core::model::MediaKind;
@@ -64,15 +65,10 @@ enum ConfigAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("om=info,warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    // The TUI owns the alternate screen, so stderr logs would corrupt it. In TUI
+    // mode (no subcommand) logging is silenced unless RUST_LOG is explicitly set.
+    init_tracing(cli.command.is_none());
 
     match cli.command {
         None => run_interactive().await,
@@ -87,15 +83,31 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Default (no subcommand): the interactive TUI. [Phase 9]
+fn init_tracing(tui_mode: bool) {
+    use tracing_subscriber::EnvFilter;
+    let filter = if tui_mode {
+        // Don't write to stderr under the TUI unless the user opted in.
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"))
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("om=info,warn"))
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
+/// Default (no subcommand): the interactive TUI.
 async fn run_interactive() -> anyhow::Result<()> {
-    if om_config::load().is_err() {
-        println!("No configuration found. Run `om init` first.");
-        return Ok(());
-    }
-    println!("The interactive TUI lands in Phase 9 (see docs/ROADMAP.md).");
-    println!("For now use: om search \"<title>\"   (or)   om play \"<title>\"");
-    Ok(())
+    let cfg = match om_config::load() {
+        Ok(c) => c,
+        Err(_) => {
+            println!("No configuration found. Run `om init` first.");
+            return Ok(());
+        }
+    };
+    let engine = compose::build_engine(&cfg);
+    tui::run(engine, None).await
 }
 
 fn cmd_init() -> anyhow::Result<()> {

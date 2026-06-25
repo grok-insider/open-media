@@ -4,9 +4,10 @@
 [Real-Debrid](https://real-debrid.com/) (cached, no seeding, no VPN) or directly
 over P2P, streamed into **mpv** or **vlc**. One fast TUI for everything.
 
-> Status: **early scaffold.** The architecture, ports, and docs are in place and
-> the workspace builds; the network adapters are being filled in per the
-> [roadmap](docs/ROADMAP.md). See [What works today](#what-works-today).
+> Status: **functional (pre-release).** The full pipeline — discover → source →
+> resolve (Real-Debrid or P2P) → play in mpv — is implemented and tested, with a
+> working TUI. Remaining: packaging/CI (Phase 10) and polish. See
+> [What works today](#what-works-today) and the [plan](docs/PLAN.md).
 
 ---
 
@@ -67,37 +68,40 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 
 ## What works today
 
-The discovery → resolve pipeline is **implemented and tested** (Phases 1–3):
+The whole pipeline is **implemented and tested** (Phases 1–9):
 
-- **Metadata**: TMDB (movies/series) + AniList (anime) search/details, with IMDB
-  and MAL id bridging.
+- **Metadata**: TMDB (movies/series) + AniList (anime), with IMDB/MAL id bridging.
 - **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
-- **Debrid**: Real-Debrid magnet → instant CDN URL (full
-  add→select→unrestrict flow), with a P2P fallback path (Phase 4) stubbed.
-- **Engine**: parallel `search` / `find_sources` + ranking, `details`, `resolve`.
+- **Debrid**: Real-Debrid magnet → instant CDN URL (add→select→unrestrict).
+- **P2P**: librqbit engine streaming uncached/no-debrid torrents over a local
+  Range-aware HTTP server.
+- **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
+  vlc (launch-only).
+- **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord presence.
+- **TUI**: `om` with no args → Search → Results → Episodes → Sources → play.
 
 ```console
-$ om --help
 $ om init                                # create ~/.config/open-media/config.toml
-$ om config set tmdb_api_key=...         # required
 $ om config set real_debrid_token=...    # optional, recommended
-$ om search "frieren" --kind anime       # real TMDB + AniList results
+$ om config set tmdb_api_key=...         # for movies/series (anime works without)
+$ om                                     # interactive TUI
+$ om play "interstellar"                 # one-shot: search → best source → mpv
 ```
 
-Still to come: the local P2P engine (Phase 4), player launch + mpv IPC (Phase 5),
-resume/skip/tracking (Phases 6–8), and the TUI (Phase 9). See
-[docs/PLAN.md](docs/PLAN.md).
+Still to come: packaging (Nix flake + Home Manager), CI, and the OAuth-acquisition
+flow for tracker tokens. See [docs/PLAN.md](docs/PLAN.md).
 
 ### Testing
 
 Every network adapter has unit tests plus **end-to-end integration tests against
-in-process mock servers** (`wiremock`), and a composition-root e2e
-(`crates/om-cli/tests/pipeline_e2e.rs`) drives the entire
-search → details → sources → resolve flow through the real `Engine` — including
-both the cached-direct and uncached-via-Real-Debrid branches.
+in-process mock servers** (`wiremock`); a composition-root e2e
+(`crates/om-cli/tests/pipeline_e2e.rs`) drives search → details → sources →
+resolve through the real `Engine` (both cached-direct and uncached-via-RD). Live
+integration tests (gated `#[ignore]` + env) cover real Real-Debrid, real mpv, and
+live P2P; the TUI is verified end-to-end with the `wisp` driver.
 
 ```console
-$ cargo test --workspace      # 41 tests (16 unit + 25 integration/e2e)
+$ cargo test --workspace      # 63 hermetic tests (unit + e2e)
 $ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
