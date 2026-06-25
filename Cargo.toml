@@ -26,16 +26,19 @@ repository = "https://github.com/0xfell/open-media"
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---
-om-core = { path = "crates/om-core" }
-om-config = { path = "crates/om-config" }
-om-metadata = { path = "crates/om-metadata" }
-om-sources = { path = "crates/om-sources" }
-om-debrid = { path = "crates/om-debrid" }
-om-stream = { path = "crates/om-stream" }
-om-player = { path = "crates/om-player" }
-om-track = { path = "crates/om-track" }
-om-history = { path = "crates/om-history" }
-om-app = { path = "crates/om-app" }
+# The `version` requirement is required by `cargo package` (which release-plz runs
+# to detect changes); release-plz keeps these in lockstep with the workspace
+# version on every bump. They are never published — `path` always wins for builds.
+om-core = { path = "crates/om-core", version = "0.1.0" }
+om-config = { path = "crates/om-config", version = "0.1.0" }
+om-metadata = { path = "crates/om-metadata", version = "0.1.0" }
+om-sources = { path = "crates/om-sources", version = "0.1.0" }
+om-debrid = { path = "crates/om-debrid", version = "0.1.0" }
+om-stream = { path = "crates/om-stream", version = "0.1.0" }
+om-player = { path = "crates/om-player", version = "0.1.0" }
+om-track = { path = "crates/om-track", version = "0.1.0" }
+om-history = { path = "crates/om-history", version = "0.1.0" }
+om-app = { path = "crates/om-app", version = "0.1.0" }
 
 # --- Shared third-party deps (versions pinned once here; see ARCHITECTURE.md) ---
 # Kept light in the scaffold. Heavy adapter deps (reqwest, librqbit, rusqlite)

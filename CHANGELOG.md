@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-25
+
 ### Added — Phase 10: packaging (Nix flake + cachix CI)
 - `flake.nix`: `packages.x86_64-linux.{om,default}` via `rustPlatform.buildRustPackage`
   (cmake + bindgenHook for aws-lc-sys + bundled rusqlite; no OpenSSL/system sqlite;
@@ -132,4 +134,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (Phases 1–9); network adapters are real, not stubs. Remaining work is packaging
   and polish — see `docs/PLAN.md`.
 
-[Unreleased]: https://github.com/0xfell/open-media/commits/main
+[Unreleased]: https://github.com/0xfell/open-media/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/0xfell/open-media/releases/tag/v0.1.0

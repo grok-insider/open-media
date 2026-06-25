@@ -106,7 +106,11 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       push; `build` job (master/tags) → `nix build .#om` + push to 0xfell cachix.
 - [x] Wired into the NixOS host (`~/.config/nixos` flake input + HM module);
       `rebuild` installs `om 0.1.0` from the cache (no compile).
-- [ ] Tag `v0.1.0` + GitHub release artifacts (follow-up).
+- [x] Automated releases (`release-plz.toml` + `.github/workflows/release.yml`):
+      push to master → release PR (version bump + `CHANGELOG`) → merging it tags
+      `vX.Y.Z`, creates the GitHub Release + a prebuilt `om` binary, and cachix
+      gets `om-X.Y.Z`. Conventional Commits drive the bump (see CONTRIBUTING).
+- [ ] Bootstrap: tag `v0.1.0` once to anchor release-plz (`git tag -a v0.1.0 …`).
 - **M5 — met:** `nix run github:0xfell/open-media#om -- --help` works, and the
   HM-installed `om` runs on the NixOS host.
 
