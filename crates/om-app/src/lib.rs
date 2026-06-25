@@ -16,16 +16,19 @@
 //!
 //! Build one with [`EngineBuilder`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use om_core::error::{CoreError, CoreResult};
 use om_core::model::{IdSet, Media, MediaKind};
 use om_core::ports::{
-    Enricher, HistoryStore, MetadataProvider, Player, PresenceReporter, SourceProvider,
-    SourceQuery, StreamResolver, Tracker,
+    Chapter, Enricher, HistoryStore, MetadataProvider, PlayOptions, PlaybackControl, Player,
+    PresenceReporter, SourceProvider, SourceQuery, StreamResolver, Tracker,
 };
 use om_core::scoring::{self, ScoringPrefs};
 use om_core::stream::{Playback, SourceCandidate};
+use om_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 /// A request to play something, resolved into coordinates the engine understands.
 #[derive(Debug, Clone)]
@@ -47,6 +50,8 @@ pub struct Engine {
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     prefs: ScoringPrefs,
+    /// Fraction watched at which an episode counts as complete (e.g. 0.85).
+    complete_threshold: f32,
 }
 
 impl Engine {
@@ -148,19 +153,222 @@ impl Engine {
     ///
     /// [`Playback`]: om_core::stream::Playback
     /// [`PlaybackControl`]: om_core::ports::PlaybackControl
-    pub async fn play(&self, _req: &PlayRequest, _candidate: &SourceCandidate) -> CoreResult<()> {
-        // Touch the optional ports so the field wiring is exercised by the type
-        // checker even while the orchestration is stubbed.
-        let _ = (
-            self.resolver.as_ref(),
-            self.player.as_ref(),
-            self.tracker.as_ref(),
-            self.enricher.as_ref(),
-            self.history.as_ref(),
-            self.presence.as_ref(),
+    pub async fn play(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<()> {
+        let player = self
+            .player
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no player configured".into()))?;
+
+        // 1. Resolve to a playable URL (debrid-direct or P2P).
+        let playback = self.resolve(candidate).await?;
+
+        let media_key = req
+            .media
+            .ids
+            .primary_key()
+            .unwrap_or_else(|| req.media.display_title().to_string());
+        let season = req.season.unwrap_or(1);
+        let episode = req.episode.unwrap_or(1);
+
+        // 2. Resume position (best-effort — disabled if no history port).
+        let resume = self
+            .history
+            .as_ref()
+            .and_then(|h| h.resume(&media_key, season, episode).ok().flatten())
+            .map(|p| p.position_secs)
+            .filter(|s| *s > 5);
+
+        // 3. Skip windows (best-effort — anime, via the enricher).
+        let skip = match &self.enricher {
+            Some(e) => e
+                .skip_times(&req.media.ids, episode)
+                .await
+                .unwrap_or_default(),
+            None => SkipTimes::default(),
+        };
+
+        // 4. Launch the player with title + resume.
+        let opts = PlayOptions {
+            title: Some(req.media.display_title().to_string()),
+            start_at_secs: resume,
+            extra_args: Vec::new(),
+        };
+        let mut session = player.play(&playback, &opts).await?;
+
+        let last_pos = Arc::new(AtomicU32::new(resume.unwrap_or(0)));
+        let last_dur = Arc::new(AtomicU32::new(0));
+
+        // 5. Monitor over the IPC channel while the player runs. The monitor
+        //    future runs forever; `select!` cancels it the moment the player
+        //    exits, so it doubles as the "until playback ends" signal.
+        let ctx = MonitorCtx {
+            media_key: media_key.clone(),
+            season,
+            episode,
+            title: req.media.display_title().to_string(),
+            detail: episode_label(req),
+            image: req.media.poster.clone(),
+        };
+        let monitor = monitor_playback(
+            session.control(),
+            self.history.clone(),
+            self.presence.clone(),
+            skip,
+            ctx,
+            last_pos.clone(),
+            last_dur.clone(),
         );
-        Err(CoreError::NotImplemented("engine.play"))
+        tokio::select! {
+            r = session.wait() => { r?; }
+            _ = monitor => {}
+        }
+
+        // 6. Teardown any transient P2P state.
+        if let Some(resolver) = &self.resolver {
+            resolver.cleanup().await;
+        }
+
+        // 7. Mark complete + sync the tracker if we got far enough (best-effort).
+        let pos = last_pos.load(Ordering::Relaxed);
+        let dur = last_dur.load(Ordering::Relaxed);
+        if dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold {
+            if let Some(tracker) = &self.tracker {
+                if let Err(e) = tracker.update_progress(&req.media.ids, episode).await {
+                    tracing::warn!(error = %e, "tracker progress update failed");
+                }
+            }
+        }
+        if let Some(presence) = &self.presence {
+            let _ = presence.clear().await;
+        }
+
+        Ok(())
     }
+}
+
+/// Static context the monitor needs for history + presence.
+struct MonitorCtx {
+    media_key: String,
+    season: u32,
+    episode: u32,
+    title: String,
+    detail: String,
+    image: Option<String>,
+}
+
+/// Poll the player's IPC channel ~1×/s: auto-skip OP/ED, persist progress, and
+/// push presence. Returns only if there is no control channel (it then waits
+/// forever, deferring to the player-exit branch of the caller's `select!`).
+#[allow(clippy::too_many_arguments)]
+async fn monitor_playback(
+    control: Option<Arc<dyn PlaybackControl>>,
+    history: Option<Arc<dyn HistoryStore>>,
+    presence: Option<Arc<dyn PresenceReporter>>,
+    skip: SkipTimes,
+    ctx: MonitorCtx,
+    last_pos: Arc<AtomicU32>,
+    last_dur: Arc<AtomicU32>,
+) {
+    let Some(ctrl) = control else {
+        // Launch-only player (vlc): nothing to monitor; wait for exit.
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    let chapters = chapters_from_skip(&skip);
+    if !chapters.is_empty() {
+        let _ = ctrl.set_chapters(&chapters).await;
+    }
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let pos = ctrl.position().await.ok().flatten().unwrap_or(0);
+        let dur = ctrl.duration().await.ok().flatten().unwrap_or(0);
+        if pos > 0 {
+            last_pos.store(pos, Ordering::Relaxed);
+        }
+        if dur > 0 {
+            last_dur.store(dur, Ordering::Relaxed);
+        }
+
+        // Auto-skip: fire once on entry into the window (2s trigger, curd's rule).
+        if let Some(op) = skip.opening {
+            if op.is_meaningful() && pos >= op.start && pos < op.start + 2 {
+                let _ = ctrl.seek_absolute(op.end).await;
+            }
+        }
+        if let Some(ed) = skip.ending {
+            if ed.is_meaningful() && pos >= ed.start && pos < ed.start + 2 {
+                let _ = ctrl.seek_absolute(ed.end).await;
+            }
+        }
+
+        if let Some(h) = &history {
+            let _ = h.save(&WatchProgress {
+                media_key: ctx.media_key.clone(),
+                season: ctx.season,
+                episode: ctx.episode,
+                position_secs: pos,
+                duration_secs: dur,
+                updated_at: unix_now(),
+            });
+        }
+
+        if let Some(p) = &presence {
+            let paused = ctrl.is_paused().await.ok().flatten().unwrap_or(false);
+            let _ = p
+                .update(&Activity {
+                    title: ctx.title.clone(),
+                    detail: ctx.detail.clone(),
+                    paused,
+                    position_secs: pos,
+                    duration_secs: dur,
+                    image_url: ctx.image.clone(),
+                })
+                .await;
+        }
+    }
+}
+
+fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {
+    let mut chapters = Vec::new();
+    if let Some(op) = skip.opening {
+        if op.is_meaningful() {
+            chapters.push(Chapter {
+                title: "Opening".into(),
+                time_secs: op.start,
+            });
+            chapters.push(Chapter {
+                title: "Episode".into(),
+                time_secs: op.end,
+            });
+        }
+    }
+    if let Some(ed) = skip.ending {
+        if ed.is_meaningful() {
+            chapters.push(Chapter {
+                title: "Ending".into(),
+                time_secs: ed.start,
+            });
+        }
+    }
+    chapters
+}
+
+fn episode_label(req: &PlayRequest) -> String {
+    if req.media.kind.is_episodic() {
+        format!("Episode {}", req.episode.unwrap_or(1))
+    } else {
+        "Movie".to_string()
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Builder for [`Engine`]. The composition root adds whichever adapters the
@@ -176,6 +384,7 @@ pub struct EngineBuilder {
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     prefs: ScoringPrefs,
+    complete_threshold: f32,
 }
 
 impl EngineBuilder {
@@ -215,6 +424,11 @@ impl EngineBuilder {
         self.prefs = prefs;
         self
     }
+    /// Fraction watched at which an episode is marked complete (default 0.85).
+    pub fn complete_threshold(mut self, threshold: f32) -> Self {
+        self.complete_threshold = threshold;
+        self
+    }
 
     pub fn build(self) -> Engine {
         Engine {
@@ -227,6 +441,11 @@ impl EngineBuilder {
             history: self.history,
             presence: self.presence,
             prefs: self.prefs,
+            complete_threshold: if self.complete_threshold > 0.0 {
+                self.complete_threshold
+            } else {
+                0.85
+            },
         }
     }
 }

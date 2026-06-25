@@ -12,10 +12,11 @@ description = "Application layer: use-cases and the Engine that composes ports. 
 om-core = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true
