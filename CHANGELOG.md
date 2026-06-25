@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Phase 10: packaging (Nix flake + cachix CI)
+- `flake.nix`: `packages.x86_64-linux.{om,default}` via `rustPlatform.buildRustPackage`
+  (cmake + bindgenHook for aws-lc-sys + bundled rusqlite; no OpenSSL/system sqlite;
+  webpki-roots ⇒ no ca-certificates), `homeManagerModules.default`
+  (`programs.open-media`), `devShells.default`, and `nixConfig` for the 0xfell
+  cachix cache. Secrets stay out of the store (config via `om init`); mpv is a
+  documented runtime dep.
+- `.github/workflows/ci.yml`: `rust` job (fmt + clippy `-D warnings` + tests) on
+  every push/PR; `build` job (master/tags/dispatch) builds `om` with Nix and
+  pushes the closure to `0xfell.cachix.org`.
+- Published to `github:0xfell/open-media`; wired into the NixOS host so `rebuild`
+  installs `om` from cache. `nix build .#om` + `nix flake check` verified.
+
 ### Added — keyless metadata + UX
 - **Cinemeta metadata (`om-metadata`)**: new keyless, IMDB-native `CinemetaProvider`
   (Stremio `v3-cinemeta.strem.io`) for movies and live-action series. It is wired
