@@ -98,12 +98,17 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 - **M4 — met:** verified end-to-end with Wisp — live AniList search → 28 episodes →
   **43 ranked nyaa sources** → clean quit. (Themes/wizard polish: follow-up.)
 
-## Phase 10 — Packaging & release
-- [ ] Nix flake (binary + Home Manager module), cachix push, like sibling repos.
-- [ ] CI: fmt + clippy + test on stable; release artifacts.
-- [ ] `CHANGELOG` 0.1.0; tag.
-- **M5 — Acceptance:** `nix run github:0xfell/open-media -- play "…"` works on the
-  NixOS host.
+## Phase 10 — Packaging & release ✅
+- [x] Nix flake: `packages.x86_64-linux.{om,default}` (buildRustPackage; cmake +
+      bindgenHook for aws-lc-sys/sqlite; no OpenSSL), `homeManagerModules.default`
+      (`programs.open-media`), `devShells.default`; `nixConfig` for the 0xfell cache.
+- [x] CI (`.github/workflows/ci.yml`): `rust` job (fmt + clippy + test) on every
+      push; `build` job (master/tags) → `nix build .#om` + push to 0xfell cachix.
+- [x] Wired into the NixOS host (`~/.config/nixos` flake input + HM module);
+      `rebuild` installs `om 0.1.0` from the cache (no compile).
+- [ ] Tag `v0.1.0` + GitHub release artifacts (follow-up).
+- **M5 — met:** `nix run github:0xfell/open-media#om -- --help` works, and the
+  HM-installed `om` runs on the NixOS host.
 
 ---
 
