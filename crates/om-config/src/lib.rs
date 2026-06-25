@@ -182,12 +182,52 @@ pub struct Ui {
     /// `"auto" | "dark" | "light"`.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Persisted defaults for the Sources screen's filter/sort panel.
+    #[serde(default)]
+    pub sources: SourcesUi,
 }
 
 impl Default for Ui {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            sources: SourcesUi::default(),
+        }
+    }
+}
+
+/// Persisted Sources-screen filter/sort selections. Stored as strings/bools so
+/// `om-config` stays free of the TUI's enums; the TUI maps them on load/save.
+/// `"all"` means no filter. All five are remembered across sessions and applied
+/// literally; if a remembered filter hides everything on a later search, the
+/// panel shows `0 of N` and `Clear` resets it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourcesUi {
+    /// `"relevance" | "seeders" | "quality" | "size"`.
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    /// `"all" | "2160p" | "1080p" | "720p" | "480p" | "360p"`.
+    #[serde(default = "default_all")]
+    pub quality: String,
+    /// Language name (e.g. `"English"`) or `"all"`.
+    #[serde(default = "default_all")]
+    pub language: String,
+    /// Provider/tracker name (e.g. `"1337x"`) or `"all"`.
+    #[serde(default = "default_all")]
+    pub provider: String,
+    /// Only show debrid-cached candidates.
+    #[serde(default)]
+    pub cached_only: bool,
+}
+
+impl Default for SourcesUi {
+    fn default() -> Self {
+        Self {
+            sort: default_sort(),
+            quality: default_all(),
+            language: default_all(),
+            provider: default_all(),
+            cached_only: false,
         }
     }
 }
@@ -271,6 +311,12 @@ fn default_complete_threshold() -> f32 {
 fn default_theme() -> String {
     "auto".to_string()
 }
+fn default_sort() -> String {
+    "relevance".to_string()
+}
+fn default_all() -> String {
+    "all".to_string()
+}
 fn default_torrentio_providers() -> Vec<String> {
     [
         "yts",
@@ -312,6 +358,30 @@ tmdb_api_key = "abc"
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.credentials.tmdb_api_key.is_empty());
         assert!(cfg.is_usable());
+    }
+
+    #[test]
+    fn sources_ui_defaults_and_roundtrip() {
+        // Defaults on an empty document.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.ui.sources.sort, "relevance");
+        assert_eq!(cfg.ui.sources.quality, "all");
+        assert!(!cfg.ui.sources.cached_only);
+
+        // Round-trips a customized panel state.
+        let mut c = Config::default();
+        c.ui.sources.sort = "seeders".into();
+        c.ui.sources.quality = "1080p".into();
+        c.ui.sources.language = "English".into();
+        c.ui.sources.provider = "1337x".into();
+        c.ui.sources.cached_only = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui.sources.sort, "seeders");
+        assert_eq!(back.ui.sources.quality, "1080p");
+        assert_eq!(back.ui.sources.language, "English");
+        assert_eq!(back.ui.sources.provider, "1337x");
+        assert!(back.ui.sources.cached_only);
     }
 
     #[test]

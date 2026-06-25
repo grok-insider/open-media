@@ -12,13 +12,20 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
 use om_app::{Engine, PlayRequest};
+use om_config::Config;
 use om_core::model::{Episode, Media, MediaKind, Season};
-use om_core::stream::{CacheState, SourceCandidate};
+use om_core::stream::{CacheState, Quality, SourceCandidate};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Below this terminal width the Sources side panel is hidden (list goes full
+/// width) so narrow terminals aren't squeezed.
+const PANEL_MIN_WIDTH: u16 = 100;
+/// Width of the Sources side panel.
+const PANEL_WIDTH: u16 = 34;
 
 /// Which screen is active.
 #[derive(PartialEq)]
@@ -28,6 +35,245 @@ enum Screen {
     Seasons,
     Episodes,
     Sources,
+}
+
+/// Which pane has keyboard focus on the Sources screen.
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    List,
+    Panel,
+}
+
+/// How the visible candidates are ordered.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SortKey {
+    Relevance,
+    Seeders,
+    Quality,
+    Size,
+}
+
+impl SortKey {
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Relevance => "Relevance",
+            SortKey::Seeders => "Seeders",
+            SortKey::Quality => "Quality",
+            SortKey::Size => "Size",
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            SortKey::Relevance => "relevance",
+            SortKey::Seeders => "seeders",
+            SortKey::Quality => "quality",
+            SortKey::Size => "size",
+        }
+    }
+    fn from_str(s: &str) -> SortKey {
+        match s.to_ascii_lowercase().as_str() {
+            "seeders" => SortKey::Seeders,
+            "quality" => SortKey::Quality,
+            "size" => SortKey::Size,
+            _ => SortKey::Relevance,
+        }
+    }
+    /// Cycle through the sort keys by `dir` (+1 next / -1 previous).
+    fn cycle(self, dir: i32) -> SortKey {
+        const ALL: [SortKey; 4] = [
+            SortKey::Relevance,
+            SortKey::Seeders,
+            SortKey::Quality,
+            SortKey::Size,
+        ];
+        let pos = ALL.iter().position(|&s| s == self).unwrap_or(0) as i32;
+        ALL[(pos + dir).rem_euclid(ALL.len() as i32) as usize]
+    }
+}
+
+/// Rows in the filter/sort panel (the focusable controls).
+#[derive(Clone, Copy, PartialEq)]
+enum PanelControl {
+    Sort,
+    Quality,
+    Language,
+    Provider,
+    Cached,
+    Clear,
+}
+
+impl PanelControl {
+    const ALL: [PanelControl; 6] = [
+        PanelControl::Sort,
+        PanelControl::Quality,
+        PanelControl::Language,
+        PanelControl::Provider,
+        PanelControl::Cached,
+        PanelControl::Clear,
+    ];
+}
+
+/// The active filter + sort state for the Sources list.
+#[derive(Clone)]
+struct SourceFilters {
+    sort: SortKey,
+    quality: Option<Quality>,
+    language: Option<String>,
+    provider: Option<String>,
+    cached_only: bool,
+}
+
+impl SourceFilters {
+    /// Seed from persisted config.
+    fn from_cfg(s: &om_config::SourcesUi) -> Self {
+        Self {
+            sort: SortKey::from_str(&s.sort),
+            quality: parse_quality(&s.quality),
+            language: parse_all_opt(&s.language),
+            provider: parse_all_opt(&s.provider),
+            cached_only: s.cached_only,
+        }
+    }
+
+    /// Write back into config for persistence.
+    fn write_cfg(&self, s: &mut om_config::SourcesUi) {
+        s.sort = self.sort.as_str().to_string();
+        s.quality = self
+            .quality
+            .map(|q| q.label().to_string())
+            .unwrap_or_else(|| "all".into());
+        s.language = self.language.clone().unwrap_or_else(|| "all".into());
+        s.provider = self.provider.clone().unwrap_or_else(|| "all".into());
+        s.cached_only = self.cached_only;
+    }
+
+    /// Whether a candidate passes all active filters.
+    fn matches(&self, c: &SourceCandidate) -> bool {
+        if let Some(q) = self.quality {
+            if c.quality != q {
+                return false;
+            }
+        }
+        if self.cached_only && c.cache != CacheState::Cached {
+            return false;
+        }
+        if let Some(lang) = &self.language {
+            if !c.tags.languages.iter().any(|l| l == lang) {
+                return false;
+            }
+        }
+        if let Some(p) = &self.provider {
+            if &c.provider != p {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.quality = None;
+        self.language = None;
+        self.provider = None;
+        self.cached_only = false;
+    }
+}
+
+/// `"all"`/empty → `None`, otherwise `Some(value)`.
+fn parse_all_opt(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("all") {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// `"all"` → `None`; a known label → `Some(Quality)`; unknown → `None`.
+fn parse_quality(s: &str) -> Option<Quality> {
+    match parse_all_opt(s) {
+        None => None,
+        Some(v) => match Quality::from_label(&v) {
+            Quality::Unknown => None,
+            q => Some(q),
+        },
+    }
+}
+
+/// Order candidates by the filters' sort key, returning indices into
+/// `candidates`. Relevance keeps the engine's ranked order; all sorts are stable
+/// (ties fall back to original index).
+fn visible_indices(candidates: &[SourceCandidate], f: &SourceFilters) -> Vec<usize> {
+    let mut idx: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| f.matches(c))
+        .map(|(i, _)| i)
+        .collect();
+    match f.sort {
+        SortKey::Relevance => {}
+        SortKey::Seeders => idx.sort_by(|&a, &b| {
+            candidates[b]
+                .seeders
+                .unwrap_or(0)
+                .cmp(&candidates[a].seeders.unwrap_or(0))
+                .then(a.cmp(&b))
+        }),
+        SortKey::Quality => idx.sort_by(|&a, &b| {
+            candidates[b]
+                .quality
+                .cmp(&candidates[a].quality)
+                .then(a.cmp(&b))
+        }),
+        SortKey::Size => idx.sort_by(|&a, &b| {
+            candidates[b]
+                .size_bytes
+                .cmp(&candidates[a].size_bytes)
+                .then(a.cmp(&b))
+        }),
+    }
+    idx
+}
+
+/// Distinct, sorted values present across candidates (for the cycleable
+/// language/provider option lists).
+fn distinct_languages(candidates: &[SourceCandidate]) -> Vec<String> {
+    let mut v: Vec<String> = candidates
+        .iter()
+        .flat_map(|c| c.tags.languages.iter().cloned())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn distinct_providers(candidates: &[SourceCandidate]) -> Vec<String> {
+    let mut v: Vec<String> = candidates.iter().map(|c| c.provider.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Cycle an `Option<String>` selection through `[None, options…]` by `dir`.
+fn cycle_opt(current: &Option<String>, options: &[String], dir: i32) -> Option<String> {
+    let mut all: Vec<Option<String>> = vec![None];
+    all.extend(options.iter().cloned().map(Some));
+    let pos = all.iter().position(|x| x == current).unwrap_or(0) as i32;
+    let next = (pos + dir).rem_euclid(all.len() as i32) as usize;
+    all[next].clone()
+}
+
+/// Cycle the quality filter through `[All, 2160p, 1080p, 720p, 480p, 360p]`.
+fn cycle_quality(current: Option<Quality>, dir: i32) -> Option<Quality> {
+    let all: [Option<Quality>; 6] = [
+        None,
+        Some(Quality::P2160),
+        Some(Quality::P1080),
+        Some(Quality::P720),
+        Some(Quality::P480),
+        Some(Quality::P360),
+    ];
+    let pos = all.iter().position(|&q| q == current).unwrap_or(0) as i32;
+    all[(pos + dir).rem_euclid(all.len() as i32) as usize]
 }
 
 /// Async results posted back to the UI loop.
@@ -75,15 +321,30 @@ struct App {
     candidates: Vec<SourceCandidate>,
     candidates_state: ListState,
 
+    /// Sources side panel: filters/sort, focus, and the derived visible view.
+    cfg: Config,
+    focus: Focus,
+    filters: SourceFilters,
+    panel_state: ListState,
+    /// Indices into `candidates` after filtering + sorting; the list cursor
+    /// selects within this, not `candidates` directly.
+    visible: Vec<usize>,
+    languages: Vec<String>,
+    providers: Vec<String>,
+
     tx: mpsc::UnboundedSender<Msg>,
 }
 
 impl App {
     fn new(
         engine: Arc<Engine>,
+        cfg: Config,
         tx: mpsc::UnboundedSender<Msg>,
         initial_query: Option<String>,
     ) -> Self {
+        let filters = SourceFilters::from_cfg(&cfg.ui.sources);
+        let mut panel_state = ListState::default();
+        panel_state.select(Some(0));
         Self {
             engine,
             screen: Screen::Search,
@@ -103,8 +364,51 @@ impl App {
             sel_episode_title: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
+            cfg,
+            focus: Focus::List,
+            filters,
+            panel_state,
+            visible: Vec::new(),
+            languages: Vec::new(),
+            providers: Vec::new(),
             tx,
         }
+    }
+
+    /// Recompute the filtered/sorted view and clamp the list cursor.
+    fn recompute_visible(&mut self) {
+        self.visible = visible_indices(&self.candidates, &self.filters);
+        let sel = if self.visible.is_empty() {
+            None
+        } else {
+            Some(
+                self.candidates_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.visible.len() - 1),
+            )
+        };
+        self.candidates_state.select(sel);
+        self.update_sources_status();
+    }
+
+    fn update_sources_status(&mut self) {
+        let total = self.candidates.len();
+        let shown = self.visible.len();
+        self.status = if shown == total {
+            format!("{total} sources")
+        } else if shown == 0 {
+            format!("0 of {total} sources — no match for filters (Clear to reset)")
+        } else {
+            format!("{shown} of {total} sources")
+        };
+    }
+
+    /// The candidate currently highlighted in the (filtered) list, if any.
+    fn current_candidate(&self) -> Option<&SourceCandidate> {
+        let sel = self.candidates_state.selected()?;
+        let idx = *self.visible.get(sel)?;
+        self.candidates.get(idx)
     }
 
     fn handle_msg(&mut self, msg: Msg) {
@@ -136,11 +440,15 @@ impl App {
             }
             Msg::Sources { media, candidates } => {
                 self.candidates = candidates;
+                self.languages = distinct_languages(&self.candidates);
+                self.providers = distinct_providers(&self.candidates);
                 self.candidates_state
                     .select((!self.candidates.is_empty()).then_some(0));
+                self.focus = Focus::List;
+                self.panel_state.select(Some(0));
                 self.media = Some(media);
                 self.screen = Screen::Sources;
-                self.status = format!("{} sources (Enter to play)", self.candidates.len());
+                self.recompute_visible();
             }
             Msg::PlayEnded => self.status = "Playback ended".into(),
             Msg::Status(s) => {
@@ -162,14 +470,20 @@ impl App {
 }
 
 /// Run the TUI to completion.
-pub async fn run(engine: Engine, initial_query: Option<String>) -> anyhow::Result<()> {
+pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> anyhow::Result<()> {
     let engine = Arc::new(engine);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut app = App::new(engine, tx, initial_query);
+    let mut app = App::new(engine, cfg, tx, initial_query);
 
     let mut term = setup_terminal()?;
     let result = run_loop(&mut term, &mut app, &mut rx).await;
     restore_terminal(&mut term)?;
+
+    // Persist the Sources panel's filter/sort selections for next time.
+    app.filters.write_cfg(&mut app.cfg.ui.sources);
+    if let Err(e) = om_config::save(&app.cfg) {
+        tracing::warn!(error = %e, "failed to persist UI prefs");
+    }
     result
 }
 
@@ -256,12 +570,27 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
-        Screen::Sources => match code {
+        Screen::Sources => handle_sources_key(app, code),
+    }
+}
+
+fn handle_sources_key(app: &mut App, code: KeyCode) {
+    // Tab toggles focus between the list and the filter panel.
+    if code == KeyCode::Tab {
+        app.focus = match app.focus {
+            Focus::List => Focus::Panel,
+            Focus::Panel => Focus::List,
+        };
+        return;
+    }
+
+    match app.focus {
+        Focus::List => match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                App::list_move(&mut app.candidates_state, app.candidates.len(), 1)
+                App::list_move(&mut app.candidates_state, app.visible.len(), 1)
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                App::list_move(&mut app.candidates_state, app.candidates.len(), -1)
+                App::list_move(&mut app.candidates_state, app.visible.len(), -1)
             }
             KeyCode::Enter => play_selected(app),
             KeyCode::Esc => {
@@ -279,6 +608,57 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
+        Focus::Panel => match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                App::list_move(&mut app.panel_state, PanelControl::ALL.len(), 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                App::list_move(&mut app.panel_state, PanelControl::ALL.len(), -1)
+            }
+            KeyCode::Char('h') | KeyCode::Left => adjust_filter(app, -1),
+            KeyCode::Char('l') | KeyCode::Right => adjust_filter(app, 1),
+            KeyCode::Enter => activate_control(app),
+            KeyCode::Esc => app.focus = Focus::List,
+            KeyCode::Char('q') => app.should_quit = true,
+            _ => {}
+        },
+    }
+}
+
+/// Which panel control is focused.
+fn focused_control(app: &App) -> PanelControl {
+    PanelControl::ALL[app.panel_state.selected().unwrap_or(0)]
+}
+
+/// Change the focused control's value by `dir` (left/-1, right/+1).
+fn adjust_filter(app: &mut App, dir: i32) {
+    match focused_control(app) {
+        PanelControl::Sort => app.filters.sort = app.filters.sort.cycle(dir),
+        PanelControl::Quality => app.filters.quality = cycle_quality(app.filters.quality, dir),
+        PanelControl::Language => {
+            app.filters.language = cycle_opt(&app.filters.language, &app.languages, dir)
+        }
+        PanelControl::Provider => {
+            app.filters.provider = cycle_opt(&app.filters.provider, &app.providers, dir)
+        }
+        PanelControl::Cached => app.filters.cached_only = !app.filters.cached_only,
+        PanelControl::Clear => {}
+    }
+    app.recompute_visible();
+}
+
+/// Enter on a control: toggle Cached, run Clear, else behave like "next".
+fn activate_control(app: &mut App) {
+    match focused_control(app) {
+        PanelControl::Cached => {
+            app.filters.cached_only = !app.filters.cached_only;
+            app.recompute_visible();
+        }
+        PanelControl::Clear => {
+            app.filters.clear();
+            app.recompute_visible();
+        }
+        _ => adjust_filter(app, 1),
     }
 }
 
@@ -426,10 +806,11 @@ async fn send_sources(
 }
 
 fn play_selected(app: &mut App) {
-    let (Some(idx), Some(media)) = (app.candidates_state.selected(), app.media.clone()) else {
+    let Some(media) = app.media.clone() else {
         return;
     };
-    let Some(candidate) = app.candidates.get(idx).cloned() else {
+    // Map the (filtered) list cursor back to the underlying candidate.
+    let Some(candidate) = app.current_candidate().cloned() else {
         return;
     };
     // Use the coordinates pinned at episode selection — not the live cursor.
@@ -492,7 +873,7 @@ fn draw(f: &mut Frame, app: &App) {
         Screen::Results => draw_results(f, app, chunks[1]),
         Screen::Seasons => draw_seasons(f, app, chunks[1]),
         Screen::Episodes => draw_episodes(f, app, chunks[1]),
-        Screen::Sources => draw_sources(f, app, chunks[1]),
+        Screen::Sources => draw_sources_screen(f, app, chunks[1]),
     }
 
     // Footer / status
@@ -501,7 +882,10 @@ fn draw(f: &mut Frame, app: &App) {
         Screen::Results => "j/k: move · Enter: select · /: search · q: quit",
         Screen::Seasons => "j/k: move · Enter: select · Esc: back · q: quit",
         Screen::Episodes => "j/k: move · Enter: select · Esc: back · q: quit",
-        Screen::Sources => "j/k: move · Enter: play · Esc: back · q: quit",
+        Screen::Sources => match app.focus {
+            Focus::List => "Tab: filters · j/k: move · Enter: play · Esc: back · q: quit",
+            Focus::Panel => "Tab: list · j/k: control · ←/→: change · Enter: apply · Esc: list",
+        },
     };
     let spin = if app.busy { "⏳ " } else { "" };
     f.render_widget(
@@ -535,7 +919,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(format!("{badge} {}{year}", m.display_title()))
         })
         .collect();
-    render_list(f, area, "Results", items, &app.results_state);
+    render_list(f, area, "Results", items, &app.results_state, true);
 }
 
 fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
@@ -550,7 +934,7 @@ fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(format!("{name}  ({} episodes)", s.episode_count))
         })
         .collect();
-    render_list(f, area, "Seasons", items, &app.seasons_state);
+    render_list(f, area, "Seasons", items, &app.seasons_state, true);
 }
 
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
@@ -565,38 +949,205 @@ fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(label)
         })
         .collect();
-    render_list(f, area, "Episodes", items, &app.episodes_state);
+    render_list(f, area, "Episodes", items, &app.episodes_state, true);
 }
 
-fn draw_sources(f: &mut Frame, app: &App, area: Rect) {
+fn draw_sources_screen(f: &mut Frame, app: &App, area: Rect) {
+    // Split off the side panel when there's room; otherwise list takes it all.
+    let show_panel = area.width >= PANEL_MIN_WIDTH;
+    let (list_area, panel_area) = if show_panel {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(PANEL_WIDTH)]).split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
+    draw_sources_list(f, app, list_area, show_panel);
+    if let Some(panel) = panel_area {
+        draw_sources_panel(f, app, panel);
+    }
+}
+
+fn draw_sources_list(f: &mut Frame, app: &App, area: Rect, show_panel: bool) {
     let items: Vec<ListItem> = app
-        .candidates
+        .visible
         .iter()
-        .map(|c| {
-            let cache = match c.cache {
-                CacheState::Cached => "⚡",
-                CacheState::Uncached => "⬇",
-                CacheState::Unknown => " ",
-            };
-            let seeders = c.seeders.map(|s| format!("{s}S")).unwrap_or_default();
-            ListItem::new(format!(
-                "{cache} {:<6} {:<9} {:<5} [{}] {}",
-                c.quality.label(),
-                c.human_size(),
-                seeders,
-                c.provider,
-                c.title
-            ))
+        .filter_map(|&i| app.candidates.get(i))
+        .map(|c| ListItem::new(source_row(c)))
+        .collect();
+    let focused = !show_panel || app.focus == Focus::List;
+    let title = format!("Sources ({})", app.visible.len());
+    render_list(f, area, &title, items, &app.candidates_state, focused);
+}
+
+/// One scannable line per candidate: cache · quality · size · seeders · provider
+/// · release name (first line of the raw title, the full text lives in the panel).
+fn source_row(c: &SourceCandidate) -> String {
+    let cache = match c.cache {
+        CacheState::Cached => "⚡",
+        CacheState::Uncached => "⬇",
+        CacheState::Unknown => " ",
+    };
+    let seeders = c
+        .seeders
+        .map(|s| format!("{s}S"))
+        .unwrap_or_else(|| "—".into());
+    let name = c.title.lines().next().unwrap_or(&c.title).trim();
+    format!(
+        "{cache} {:<5} {:>9} {:>6}  {:<12} {}",
+        c.quality.label(),
+        c.human_size(),
+        seeders,
+        truncate(&c.provider, 12),
+        name,
+    )
+}
+
+fn draw_sources_panel(f: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Length(8), Constraint::Min(0)]).split(area);
+    draw_filter_box(f, app, rows[0]);
+    draw_details_box(f, app, rows[1]);
+}
+
+fn draw_filter_box(f: &mut Frame, app: &App, area: Rect) {
+    let panel_focused = app.focus == Focus::Panel;
+    let sel = app.panel_state.selected().unwrap_or(0);
+    let q = app
+        .filters
+        .quality
+        .map(|q| q.label().to_string())
+        .unwrap_or_else(|| "All".into());
+    let lang = app.filters.language.clone().unwrap_or_else(|| "All".into());
+    let prov = app.filters.provider.clone().unwrap_or_else(|| "All".into());
+    let cached = if app.filters.cached_only { "On" } else { "Off" };
+
+    let rows = [
+        format!("Sort     : {}", app.filters.sort.label()),
+        format!("Quality  : {q}"),
+        format!("Language : {lang}"),
+        format!("Provider : {prov}"),
+        format!("Cached   : {cached}"),
+        "[ Clear filters ]".to_string(),
+    ];
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut item = ListItem::new(r.clone());
+            if panel_focused && i == sel {
+                item = item.style(Style::new().bg(Color::DarkGray).fg(Color::White).bold());
+            }
+            item
         })
         .collect();
-    render_list(f, area, "Sources", items, &app.candidates_state);
+    let border = if panel_focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(border))
+                .title("Filters / Sort"),
+        ),
+        area,
+    );
 }
 
-fn render_list(f: &mut Frame, area: Rect, title: &str, items: Vec<ListItem>, state: &ListState) {
+fn draw_details_box(f: &mut Frame, app: &App, area: Rect) {
+    let text = match app.current_candidate() {
+        Some(c) => {
+            let t = &c.tags;
+            let langs = if t.languages.is_empty() {
+                "—".to_string()
+            } else {
+                t.languages.join(", ")
+            };
+            let cache = match c.cache {
+                CacheState::Cached => "cached ⚡",
+                CacheState::Uncached => "uncached",
+                CacheState::Unknown => "unknown",
+            };
+            let mut lines = vec![
+                c.title
+                    .lines()
+                    .next()
+                    .unwrap_or(&c.title)
+                    .trim()
+                    .to_string(),
+                String::new(),
+                format!("Provider : {}", c.provider),
+                format!("Quality  : {}", c.quality.label()),
+                format!("Size     : {}", c.human_size()),
+                format!(
+                    "Seeders  : {}",
+                    c.seeders
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "?".into())
+                ),
+                format!("Cache    : {cache}"),
+                format!("Language : {langs}"),
+            ];
+            if let Some(v) = &t.video_codec {
+                lines.push(format!("Video    : {v}"));
+            }
+            if let Some(a) = &t.audio {
+                lines.push(format!("Audio    : {a}"));
+            }
+            if let Some(h) = &t.hdr {
+                lines.push(format!("HDR      : {h}"));
+            }
+            if let Some(s) = &t.source_type {
+                lines.push(format!("Source   : {s}"));
+            }
+            lines.join("\n")
+        }
+        None => "No candidate selected.".to_string(),
+    };
+    f.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::new().fg(Color::DarkGray))
+                    .title("Details"),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+/// Truncate to `max` chars (with an ellipsis) for fixed-width columns.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+fn render_list(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: Vec<ListItem>,
+    state: &ListState,
+    focused: bool,
+) {
+    let border = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::new().fg(border))
                 .title(title.to_string()),
         )
         .highlight_style(Style::new().bg(Color::DarkGray).fg(Color::White).bold())
@@ -617,4 +1168,174 @@ fn restore_terminal(term: &mut Term) -> anyhow::Result<()> {
     execute!(term.backend_mut(), terminal::LeaveAlternateScreen)?;
     term.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use om_core::stream::ReleaseTags;
+
+    fn cand(
+        provider: &str,
+        quality: Quality,
+        size: u64,
+        seeders: Option<u32>,
+        cache: CacheState,
+        languages: &[&str],
+    ) -> SourceCandidate {
+        SourceCandidate {
+            provider: provider.into(),
+            title: format!("{provider} release"),
+            quality,
+            size_bytes: size,
+            seeders,
+            info_hash: Some("hash".into()),
+            magnet: None,
+            direct_url: None,
+            file_index: None,
+            cache,
+            tags: ReleaseTags {
+                languages: languages.iter().map(|s| s.to_string()).collect(),
+                ..ReleaseTags::default()
+            },
+        }
+    }
+
+    fn sample() -> Vec<SourceCandidate> {
+        vec![
+            cand(
+                "1337x",
+                Quality::P1080,
+                2_000,
+                Some(400),
+                CacheState::Cached,
+                &["English"],
+            ),
+            cand(
+                "RARBG",
+                Quality::P2160,
+                18_000,
+                Some(40),
+                CacheState::Uncached,
+                &["English", "Italian"],
+            ),
+            cand(
+                "TPB",
+                Quality::P720,
+                800,
+                Some(900),
+                CacheState::Unknown,
+                &["Spanish"],
+            ),
+        ]
+    }
+
+    fn filters() -> SourceFilters {
+        SourceFilters {
+            sort: SortKey::Relevance,
+            quality: None,
+            language: None,
+            provider: None,
+            cached_only: false,
+        }
+    }
+
+    #[test]
+    fn relevance_preserves_engine_order() {
+        let c = sample();
+        assert_eq!(visible_indices(&c, &filters()), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn quality_filter_selects_one() {
+        let c = sample();
+        let mut f = filters();
+        f.quality = Some(Quality::P2160);
+        assert_eq!(visible_indices(&c, &f), vec![1]);
+    }
+
+    #[test]
+    fn language_filter_matches_any_listed() {
+        let c = sample();
+        let mut f = filters();
+        f.language = Some("Italian".into());
+        assert_eq!(visible_indices(&c, &f), vec![1]);
+        f.language = Some("English".into());
+        assert_eq!(visible_indices(&c, &f), vec![0, 1]);
+    }
+
+    #[test]
+    fn provider_and_cached_filters() {
+        let c = sample();
+        let mut f = filters();
+        f.provider = Some("TPB".into());
+        assert_eq!(visible_indices(&c, &f), vec![2]);
+        let mut f2 = filters();
+        f2.cached_only = true;
+        assert_eq!(visible_indices(&c, &f2), vec![0]);
+    }
+
+    #[test]
+    fn sorts_by_seeders_quality_size() {
+        let c = sample();
+        let mut f = filters();
+        f.sort = SortKey::Seeders;
+        assert_eq!(visible_indices(&c, &f), vec![2, 0, 1]); // 900, 400, 40
+        f.sort = SortKey::Quality;
+        assert_eq!(visible_indices(&c, &f), vec![1, 0, 2]); // 2160, 1080, 720
+        f.sort = SortKey::Size;
+        assert_eq!(visible_indices(&c, &f), vec![1, 0, 2]); // 18000, 2000, 800
+    }
+
+    #[test]
+    fn empty_when_filters_exclude_all() {
+        let c = sample();
+        let mut f = filters();
+        f.quality = Some(Quality::P480);
+        assert!(visible_indices(&c, &f).is_empty());
+    }
+
+    #[test]
+    fn quality_cycles_and_wraps() {
+        assert_eq!(cycle_quality(None, 1), Some(Quality::P2160));
+        assert_eq!(cycle_quality(Some(Quality::P360), 1), None); // wrap to All
+        assert_eq!(cycle_quality(None, -1), Some(Quality::P360)); // wrap back
+    }
+
+    #[test]
+    fn opt_cycle_includes_all_sentinel() {
+        let opts = vec!["English".to_string(), "Italian".to_string()];
+        assert_eq!(cycle_opt(&None, &opts, 1), Some("English".into()));
+        assert_eq!(cycle_opt(&Some("Italian".into()), &opts, 1), None);
+    }
+
+    #[test]
+    fn filters_roundtrip_through_config() {
+        let mut ui = om_config::SourcesUi::default();
+        let f = SourceFilters {
+            sort: SortKey::Seeders,
+            quality: Some(Quality::P1080),
+            language: Some("English".into()),
+            provider: Some("1337x".into()),
+            cached_only: true,
+        };
+        f.write_cfg(&mut ui);
+        assert_eq!(ui.sort, "seeders");
+        assert_eq!(ui.quality, "1080p");
+        let back = SourceFilters::from_cfg(&ui);
+        assert_eq!(back.sort, SortKey::Seeders);
+        assert_eq!(back.quality, Some(Quality::P1080));
+        assert_eq!(back.language.as_deref(), Some("English"));
+        assert!(back.cached_only);
+    }
+
+    #[test]
+    fn config_all_sentinel_parses_to_none() {
+        let ui = om_config::SourcesUi::default(); // all "all"
+        let f = SourceFilters::from_cfg(&ui);
+        assert_eq!(f.quality, None);
+        assert_eq!(f.language, None);
+        assert_eq!(f.provider, None);
+        assert_eq!(f.sort, SortKey::Relevance);
+    }
 }

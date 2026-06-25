@@ -28,6 +28,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Season navigation (`om-cli` TUI)**: a Seasons screen plus real per-season
   episode lists fetched from the metadata provider; multi-season series are now
   fully browsable (previously only season 1, with a fabricated 12-episode list).
+- **Sources filter/sort panel (`om-cli` TUI)**: a focusable right-hand panel
+  (`Tab` to focus, `j/k` + `←/→` to adjust) to sort by relevance/seeders/quality/
+  size and filter by quality, language, provider, and cached-only, with a live
+  Details box for the highlighted release. Rows are now one scannable line each.
+  Selections persist to `[ui.sources]` in `config.toml`.
 - **Accurate player titles (`om-core::title`)**: mpv's `--force-media-title` (and
   Discord presence) now read `Series - S01E01 - Episode Title` (degrading to
   `Series - S01E01`, or `Movie (Year)`), via a shared pure title helper. The
