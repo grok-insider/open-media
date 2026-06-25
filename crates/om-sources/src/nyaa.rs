@@ -40,10 +40,20 @@ impl NyaaSource {
     }
 
     fn build_query_text(query: &SourceQuery) -> String {
-        let title = query.media.display_title();
+        // Release groups (SubsPlease/Erai-raws) name files with the romaji title,
+        // so prefer `original_title`; and drop any English subtitle after a colon
+        // ("Frieren: Beyond Journey's End" → "Frieren") so the search actually
+        // matches nyaa filenames.
+        let raw = query
+            .media
+            .original_title
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| query.media.display_title());
+        let base = raw.split(':').next().unwrap_or(raw).trim();
         match query.episode {
-            Some(ep) => format!("{title} {ep:02}"),
-            None => title.to_string(),
+            Some(ep) => format!("{base} {ep:02}"),
+            None => base.to_string(),
         }
     }
 }
