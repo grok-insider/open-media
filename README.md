@@ -67,20 +67,39 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 
 ## What works today
 
-The scaffold is real and runs:
+The discovery → resolve pipeline is **implemented and tested** (Phases 1–3):
+
+- **Metadata**: TMDB (movies/series) + AniList (anime) search/details, with IMDB
+  and MAL id bridging.
+- **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
+- **Debrid**: Real-Debrid magnet → instant CDN URL (full
+  add→select→unrestrict flow), with a P2P fallback path (Phase 4) stubbed.
+- **Engine**: parallel `search` / `find_sources` + ranking, `details`, `resolve`.
 
 ```console
-$ om --help          # full CLI
-$ om init            # create ~/.config/open-media/config.toml
-$ om config set tmdb_api_key=...        # required
-$ om config set real_debrid_token=...   # optional, recommended
-$ om config show     # secrets masked
-$ om search "frieren" --kind anime      # wired end-to-end (adapters stubbed)
+$ om --help
+$ om init                                # create ~/.config/open-media/config.toml
+$ om config set tmdb_api_key=...         # required
+$ om config set real_debrid_token=...    # optional, recommended
+$ om search "frieren" --kind anime       # real TMDB + AniList results
 ```
 
-`om search` already flows through the composition root → `Engine` → every
-configured provider; the providers currently return `NotImplemented` while their
-HTTP clients are being written (Phase 1). The contract is fully type-checked.
+Still to come: the local P2P engine (Phase 4), player launch + mpv IPC (Phase 5),
+resume/skip/tracking (Phases 6–8), and the TUI (Phase 9). See
+[docs/PLAN.md](docs/PLAN.md).
+
+### Testing
+
+Every network adapter has unit tests plus **end-to-end integration tests against
+in-process mock servers** (`wiremock`), and a composition-root e2e
+(`crates/om-cli/tests/pipeline_e2e.rs`) drives the entire
+search → details → sources → resolve flow through the real `Engine` — including
+both the cached-direct and uncached-via-Real-Debrid branches.
+
+```console
+$ cargo test --workspace      # 41 tests (16 unit + 25 integration/e2e)
+$ cargo clippy --workspace --all-targets -- -D warnings
+```
 
 ## Install (dev)
 

@@ -18,32 +18,41 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 - [x] `cargo fmt` clean, `cargo clippy -D warnings` clean, tests green.
 - [x] README, AGENTS, ARCHITECTURE, RESEARCH, PLAN, ROADMAP, CONTRIBUTING.
 
-## Phase 1 — Metadata adapters (`om-metadata`)
-- [ ] `TmdbProvider`: search (movie+tv), details (+ external `imdb_id`), seasons,
-      episodes. Real reqwest+serde client; map errors to `CoreError`.
-- [ ] `AniListProvider`: GraphQL search/details; populate `anilist` + `mal` ids.
-- [ ] Parallelize `Engine::search` with `futures::join_all`.
-- [ ] Fixture-based tests (recorded JSON).
-- **Acceptance:** `om search "frieren"` and `om search "dune" --kind movie` print
-  real, deduplicated results with ids.
+## Phase 1 — Metadata adapters (`om-metadata`) ✅
+- [x] `TmdbProvider`: search (movie/tv/multi), details (+ external `imdb_id`),
+      seasons, episodes. Real reqwest+serde client; errors mapped to `CoreError`.
+- [x] `AniListProvider`: GraphQL search/details; populates `anilist` + `mal` ids;
+      stays out of explicit movie/series searches.
+- [x] Parallelized `Engine::search` (and `find_sources`) with `futures::join_all`.
+- [x] Unit tests + wiremock e2e (`tests/metadata_e2e.rs`): 5 unit + 6 e2e.
+- **Acceptance:** met under mock servers (search → results with ids; details →
+  imdb). Real-network smoke test pending a live key.
 
-## Phase 2 — Source adapters (`om-sources`)
-- [ ] `TorrentioSource`: build config string, fetch movie/series JSON, parse
+## Phase 2 — Source adapters (`om-sources`) ✅
+- [x] `TorrentioSource`: builds config string, fetches movie/series JSON, parses
       `name`/`title` → `SourceCandidate` (+ `ReleaseTags`, cache flags, direct
       url / infohash).
-- [ ] `NyaaSource`: RSS feed search → candidates (magnet/infohash/seeders/size).
-- [ ] Release-tag parsers (quality/HDR/codec/audio/language) ported from miru,
-      unit-tested.
-- **Acceptance:** `om sources "<title>"` (debug cmd) lists ranked candidates with
-  cache/quality/seeders; nyaa contributes anime rows.
+- [x] `NyaaSource`: RSS-feed search → candidates (magnet/infohash/seeders/size),
+      via quick-xml event reader (namespace-robust).
+- [x] Release-tag parsers (quality/HDR/codec/audio/language/size) ported from
+      miru, unit-tested.
+- [x] Unit tests + wiremock e2e (`tests/sources_e2e.rs`): 7 unit + 5 e2e.
+- **Acceptance:** met — ranked, cache-aware candidates; nyaa contributes anime.
 
-## Phase 3 — Debrid (`om-debrid`)
-- [ ] `RealDebrid`: `account_summary`, `add_magnet`, `list_files`, `select_files`,
-      `unrestrict`, and `resolve_playback` (full add→poll→select→poll→unrestrict),
-      with rate-limit backoff.
-- [ ] `check_cached` best-effort (addon flags are primary).
-- **M1 — Acceptance:** given a cached candidate, `om` resolves a direct RD URL
-  (printed). Account summary shows premium status.
+## Phase 3 — Debrid (`om-debrid`) ✅
+- [x] `RealDebrid`: `account_summary`, `add_magnet`, `list_files`, `select_files`,
+      `unrestrict`, and `resolve_playback` (full add→poll→select→poll→unrestrict).
+- [x] `check_cached` best-effort no-op (instantAvailability deprecated; addon
+      flags are primary). Auth/Remote/Timeout error mapping.
+- [x] Unit tests + wiremock e2e (`tests/realdebrid_e2e.rs`): 2 unit + 4 e2e,
+      incl. the full state-machine resolve and an auth-failure path.
+- **M1 — met:** the composition-root e2e (`om-cli/tests/pipeline_e2e.rs`) resolves
+  both a cached candidate (addon direct URL) and an uncached one (full RD flow).
+  Remaining for a live M1: a real-token account-summary smoke test.
+
+> **Cross-phase:** a wiremock-based e2e harness now covers the whole
+> discovery→resolve pipeline through the real `Engine`. Phases 4–9 below build on
+> it. Test totals so far: **41** (16 unit + 25 integration/e2e).
 
 ## Phase 4 — P2P streaming (`om-stream`)
 - [ ] `P2pEngine` over librqbit: add magnet, wait for metadata, pick largest video

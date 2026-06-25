@@ -53,6 +53,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
+# HTTP + parsing for the network adapters.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2"
+futures = "0.3"
+regex = "1"
+quick-xml = { version = "0.36", features = ["serialize"] }
+# Test-only: in-process mock HTTP server for adapter e2e/integration tests.
+wiremock = "0.6"
 
 # Release profile for the shipped `om` binary. Streaming startup latency matters
 # more than build time (CI/cache absorbs the longer build): thin LTO + one
