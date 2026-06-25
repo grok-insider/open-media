@@ -11,8 +11,18 @@ description = "SourceProvider adapters: Torrentio (all media) and direct nyaa.si
 [dependencies]
 om-core = { workspace = true }
 async-trait = { workspace = true }
-# Phase 2: add `reqwest`, `serde_json`, `regex` (Torrentio title parsing) and
-# `quick-xml`/`rss` (nyaa RSS feed) here.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+urlencoding = { workspace = true }
+regex = { workspace = true }
+quick-xml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

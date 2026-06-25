@@ -6,6 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Phases 1–3: discovery → resolve pipeline (implemented + tested)
+- **Metadata (`om-metadata`)**: real `TmdbProvider` (movie/tv/multi search,
+  details with IMDB hydration, seasons, episodes) and `AniListProvider` (GraphQL
+  anime search/details with AniList+MAL ids). Errors mapped to `CoreError`.
+- **Sources (`om-sources`)**: `TorrentioSource` (cache-aware streams, direct URLs
+  + infohashes) and `NyaaSource` (namespace-robust RSS via quick-xml), plus a
+  ported, unit-tested release-tag parser (quality/HDR/codec/audio/language/size).
+- **Debrid (`om-debrid`)**: `RealDebrid` with the full
+  add→poll→select→poll→unrestrict flow, account summary, and Auth/Remote/Timeout
+  error mapping.
+- **Resolver (`om-stream`)**: `HybridResolver` now functional — cached/direct →
+  addon URL, otherwise → debrid `resolve_playback`, else P2P (Phase 4 stub).
+- **App (`om-app`)**: `Engine::search`/`find_sources` parallelized with
+  `futures::join_all`; added `Engine::details` and `Engine::resolve` use-cases.
+- **Testing**: every network adapter ships unit tests + wiremock-based e2e
+  integration tests, plus a composition-root e2e (`om-cli/tests/pipeline_e2e.rs`)
+  that drives the whole search→details→sources→resolve pipeline (both the
+  cached-direct and uncached-via-Real-Debrid branches) through the real `Engine`.
+  **41 tests** total (16 unit + 25 integration/e2e); `cargo clippy -D warnings`
+  clean.
+
 ### Added — Phase 0: scaffold & docs
 - Cargo workspace with 11 `om-*` crates and an enforced ports-and-adapters
   dependency rule (hexagonal architecture).

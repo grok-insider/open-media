@@ -11,7 +11,16 @@ description = "MetadataProvider adapters: TMDB (movies/series) and AniList (anim
 [dependencies]
 om-core = { workspace = true }
 async-trait = { workspace = true }
-# Phase 1: add `reqwest` + `serde_json` here when implementing the HTTP clients.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+urlencoding = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

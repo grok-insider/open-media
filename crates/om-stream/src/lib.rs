@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use om_core::error::{CoreError, CoreResult};
 use om_core::ports::{DebridProvider, StreamResolver};
-use om_core::stream::{Playback, SourceCandidate};
+use om_core::stream::{Playback, PlaybackOrigin, SourceCandidate};
 
 /// Local P2P streaming engine (librqbit). Serves torrent bytes over HTTP with
 /// Range support so the player can seek without a full download.
@@ -48,6 +48,11 @@ impl P2pEngine {
     pub async fn stream_magnet(&self, _magnet: &str) -> CoreResult<Playback> {
         Err(CoreError::NotImplemented("p2p.stream_magnet"))
     }
+
+    /// Tear down the active torrent (+ files when configured). (Phase 4.)
+    pub async fn cleanup(&self) {
+        let _ = self.cleanup_after_playback;
+    }
 }
 
 /// Picks debrid-direct vs P2P for each candidate.
@@ -56,9 +61,7 @@ impl P2pEngine {
 /// engine fallback. This is the single seam where "cached → instant URL,
 /// otherwise → warm cache or stream P2P" is decided.
 pub struct HybridResolver {
-    #[allow(dead_code)]
     debrid: Option<Arc<dyn DebridProvider>>,
-    #[allow(dead_code)]
     p2p: Arc<P2pEngine>,
 }
 
@@ -70,11 +73,39 @@ impl HybridResolver {
 
 #[async_trait]
 impl StreamResolver for HybridResolver {
-    async fn resolve(&self, _candidate: &SourceCandidate) -> CoreResult<Playback> {
-        Err(CoreError::NotImplemented("hybrid.resolve"))
+    async fn resolve(&self, candidate: &SourceCandidate) -> CoreResult<Playback> {
+        // 1. The source already handed us a direct URL (cached debrid stream from
+        //    the addon). Nothing to do — play it.
+        if let Some(url) = &candidate.direct_url {
+            return Ok(Playback {
+                url: url.clone(),
+                origin: PlaybackOrigin::Debrid,
+                file_name: file_name_for(candidate, url),
+            });
+        }
+
+        // 2. A debrid backend is configured → add/warm/unrestrict via it.
+        if let Some(debrid) = &self.debrid {
+            return debrid.resolve_playback(candidate).await;
+        }
+
+        // 3. No debrid: stream the torrent locally over P2P.
+        let magnet = candidate
+            .magnet_or_from_hash()
+            .ok_or_else(|| CoreError::NoSource("candidate has no magnet or infohash".into()))?;
+        self.p2p.stream_magnet(&magnet).await
     }
 
     async fn cleanup(&self) {
-        // Phase 4: tear down the active P2P torrent when cleanup is enabled.
+        self.p2p.cleanup().await;
     }
+}
+
+/// Best-effort display file name: last URL path segment, else the release title.
+fn file_name_for(candidate: &SourceCandidate, url: &str) -> String {
+    url.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| candidate.title.clone())
 }

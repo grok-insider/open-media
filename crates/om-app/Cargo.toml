@@ -11,6 +11,7 @@ description = "Application layer: use-cases and the Engine that composes ports. 
 [dependencies]
 om-core = { workspace = true }
 tracing = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

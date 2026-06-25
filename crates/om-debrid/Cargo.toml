@@ -11,7 +11,16 @@ description = "DebridProvider adapters: Real-Debrid (+ future AllDebrid/Torbox/P
 [dependencies]
 om-core = { workspace = true }
 async-trait = { workspace = true }
-# Phase 3: add `reqwest` + `serde_json` for the REST clients.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

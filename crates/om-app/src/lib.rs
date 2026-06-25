@@ -19,13 +19,13 @@
 use std::sync::Arc;
 
 use om_core::error::{CoreError, CoreResult};
-use om_core::model::{Media, MediaKind};
+use om_core::model::{IdSet, Media, MediaKind};
 use om_core::ports::{
     Enricher, HistoryStore, MetadataProvider, Player, PresenceReporter, SourceProvider,
     SourceQuery, StreamResolver, Tracker,
 };
 use om_core::scoring::{self, ScoringPrefs};
-use om_core::stream::SourceCandidate;
+use om_core::stream::{Playback, SourceCandidate};
 
 /// A request to play something, resolved into coordinates the engine understands.
 #[derive(Debug, Clone)]
@@ -54,30 +54,45 @@ impl Engine {
         EngineBuilder::default()
     }
 
-    /// Search every configured metadata provider and merge the results.
+    /// Search every configured metadata provider concurrently and merge results.
     ///
     /// Provider failures are logged and skipped, not fatal — a TMDB outage should
-    /// not stop AniList from returning anime. (Phase 1 will parallelize this with
-    /// `join_all`; sequential is correct and simpler for the scaffold.)
+    /// not stop AniList from returning anime.
     pub async fn search(&self, query: &str, kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
         if self.metadata.is_empty() {
             return Err(CoreError::Config("no metadata providers configured".into()));
         }
+        let calls = self
+            .metadata
+            .iter()
+            .map(|provider| async move { (provider.name(), provider.search(query, kind).await) });
         let mut out = Vec::new();
-        for provider in &self.metadata {
-            match provider.search(query, kind).await {
+        for (name, result) in futures::future::join_all(calls).await {
+            match result {
                 Ok(mut items) => out.append(&mut items),
-                Err(e) => {
-                    tracing::warn!(provider = provider.name(), error = %e, "metadata search failed")
-                }
+                Err(e) => tracing::warn!(provider = name, error = %e, "metadata search failed"),
             }
         }
         Ok(out)
     }
 
-    /// Find playable candidates across every applicable source provider, merge,
-    /// and rank them with [`scoring`]. Providers that do not support the media
-    /// kind (e.g. nyaa for a live-action movie) are skipped.
+    /// Hydrate full details (and extra ids, e.g. IMDB) for a known item by trying
+    /// each metadata provider until one understands the id dialect.
+    pub async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
+        let mut last_err = None;
+        for provider in &self.metadata {
+            match provider.details(ids).await {
+                Ok(media) => return Ok(media),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| CoreError::NotFound("no metadata provider resolved details".into())))
+    }
+
+    /// Find playable candidates across every applicable source provider
+    /// concurrently, merge, and rank them with [`scoring`]. Providers that do not
+    /// support the media kind (e.g. nyaa for a live-action movie) are skipped.
     pub async fn find_sources(&self, req: &PlayRequest) -> CoreResult<Vec<SourceCandidate>> {
         let query = SourceQuery {
             media: req.media.clone(),
@@ -86,21 +101,34 @@ impl Engine {
             include_uncached: req.include_uncached,
         };
 
+        let calls = self
+            .sources
+            .iter()
+            .filter(|s| s.supports(req.media.kind))
+            .map(|source| {
+                let query = &query;
+                async move { (source.name(), source.find(query).await) }
+            });
+
         let mut candidates = Vec::new();
-        for source in &self.sources {
-            if !source.supports(req.media.kind) {
-                continue;
-            }
-            match source.find(&query).await {
+        for (name, result) in futures::future::join_all(calls).await {
+            match result {
                 Ok(mut found) => candidates.append(&mut found),
-                Err(e) => {
-                    tracing::warn!(source = source.name(), error = %e, "source lookup failed")
-                }
+                Err(e) => tracing::warn!(source = name, error = %e, "source lookup failed"),
             }
         }
 
         scoring::rank(&mut candidates, &self.prefs);
         Ok(candidates)
+    }
+
+    /// Resolve a chosen candidate into a player-openable [`Playback`].
+    pub async fn resolve(&self, candidate: &SourceCandidate) -> CoreResult<Playback> {
+        let resolver = self
+            .resolver
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no stream resolver configured".into()))?;
+        resolver.resolve(candidate).await
     }
 
     /// Resolve a chosen candidate and play it end-to-end.
