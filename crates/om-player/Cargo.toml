@@ -12,7 +12,13 @@ description = "Player adapters: mpv (with JSON IPC control) and vlc (launch-only
 om-core = { workspace = true }
 async-trait = { workspace = true }
 which = "6"
-# Phase 5: add `tokio` (process + UnixStream IPC) + `serde_json` (mpv IPC codec).
+tokio = { workspace = true, features = ["process", "net", "io-util", "time", "sync"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
 
 [lints]
 workspace = true

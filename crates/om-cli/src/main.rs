@@ -190,11 +190,52 @@ async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_play(query: &str, _season: Option<u32>, _episode: Option<u32>) -> anyhow::Result<()> {
+async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> anyhow::Result<()> {
+    use om_app::PlayRequest;
+
     let cfg = load_or_hint()?;
-    let _engine = compose::build_engine(&cfg);
-    println!("Playback orchestration lands in Phase 8 (see docs/ROADMAP.md).");
-    println!("Wired and ready: search `{query}` → sources → resolve → mpv.");
+    let engine = compose::build_engine(&cfg);
+
+    // 1. Search and take the best match.
+    let results = engine.search(query, None).await?;
+    let top = results
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no results for `{query}`"))?;
+    println!("▶ {} ({})", top.display_title(), top.kind.label());
+
+    // 2. Hydrate ids (IMDB) needed by the sources.
+    let media = engine.details(&top.ids).await.unwrap_or(top);
+
+    // 3. Find + rank sources.
+    let req = PlayRequest {
+        media,
+        season,
+        episode: episode.or(if season.is_some() { Some(1) } else { None }),
+        include_uncached: cfg.providers.show_uncached,
+    };
+    let candidates = engine.find_sources(&req).await?;
+    let best = candidates
+        .into_iter()
+        .find(|c| c.is_resolvable())
+        .ok_or_else(|| anyhow::anyhow!("no playable source found"))?;
+    println!(
+        "  source: [{}] {} {} ({}, {})",
+        best.provider,
+        best.quality.label(),
+        best.human_size(),
+        match best.cache {
+            om_core::stream::CacheState::Cached => "cached",
+            om_core::stream::CacheState::Uncached => "uncached",
+            om_core::stream::CacheState::Unknown => "unknown",
+        },
+        best.seeders
+            .map(|s| format!("{s} seeders"))
+            .unwrap_or_else(|| "?".into())
+    );
+
+    // 4. Resolve + play.
+    engine.play(&req, &best).await?;
     Ok(())
 }
 
