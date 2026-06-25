@@ -38,6 +38,11 @@ features_always_increment_minor = true
 git_tag_enable = false
 git_release_enable = false
 changelog_update = false
+# CRITICAL: every crate must resolve its release baseline to the SINGLE shared tag
+# `vX.Y.Z`. Set workspace-wide (not just on om-cli): otherwise the libraries fall
+# back to the default `om-<lib>-vX.Y.Z` pattern, find no such tag, and get treated
+# as "initial release" — replaying the entire pre-1.0 history into a spurious bump.
+git_tag_name = "v{{ version }}"
 pr_labels = ["release"]
 
 # --- The ten libraries: share the version group, stay silent individually. ------
@@ -78,8 +83,8 @@ name = "om-cli"
 version_group = "om"
 git_tag_enable = true
 git_release_enable = true
-# One workspace-wide tag/release name, e.g. `v0.2.0` (not `om-cli-v0.2.0`).
-git_tag_name = "v{{ version }}"
+# Tag/release named `vX.Y.Z` (the `git_tag_name` template is set workspace-wide
+# above so all crates share this baseline; om-cli is the only one that emits it).
 git_release_name = "v{{ version }}"
 # Keep the single curated changelog at the repo root (path is relative to the
 # root Cargo.toml, i.e. the repo root in CI).
