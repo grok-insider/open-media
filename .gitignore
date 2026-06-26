@@ -9,6 +9,7 @@
 # Local secrets / runtime state — never commit API tokens or watch history.
 *.env
 .env
+.env.*
 config.toml
 /secrets
 *.session
@@ -17,7 +18,15 @@ config.toml
 .idea/
 .vscode/
 *.swp
+*~
 .DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+nohup.out
+*.bak
+*.tmp
 
 # Nix
 result
