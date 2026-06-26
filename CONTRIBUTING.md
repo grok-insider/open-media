@@ -7,7 +7,7 @@ before a first change.
 ## Dev setup
 
 ```bash
-git clone https://github.com/0xfell/open-media && cd open-media
+git clone https://github.com/grok-insider/open-media && cd open-media
 cargo build
 cargo test --workspace
 ```
@@ -82,7 +82,7 @@ write changelog entries by hand:
    you like.
 3. **Merge the release PR to ship.** It tags `vX.Y.Z`, creates the GitHub Release,
    and attaches a prebuilt `om` binary. The same push makes CI build and push
-   `om-X.Y.Z` to the `0xfell` cachix cache (`flake.nix` reads the version from
+   `om-X.Y.Z` to the `grok-insider` cachix cache (`flake.nix` reads the version from
    `Cargo.toml`), and `om --version` reports it.
 
 Nothing is published to crates.io.

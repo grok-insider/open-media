@@ -110,7 +110,7 @@ $ cargo clippy --workspace --all-targets -- -D warnings
 Requires a recent stable Rust toolchain.
 
 ```console
-$ git clone https://github.com/0xfell/open-media
+$ git clone https://github.com/grok-insider/open-media
 $ cd open-media
 $ cargo build --release        # binary at target/release/om
 $ ./target/release/om --help
@@ -155,7 +155,7 @@ crates/
 
 ## License
 
-[MIT](LICENSE) © 2026 0xfell.
+[MIT](LICENSE) © 2026 Grok Insider.
 
 This is a client for services you bring your own account to (TMDB, Real-Debrid,
 AniList) and for public indexes. You are responsible for complying with the laws

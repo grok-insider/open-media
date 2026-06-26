@@ -149,11 +149,11 @@ numerals, bare-ordinal shorthand).
 
 ---
 
-## Note: release-prep in flight (not ours)
+## Note: release workflow (in place)
 
-The repo currently has **uncommitted** release automation (release-plz): a CHANGELOG
-version bump to `0.1.0`, a Phase 10 packaging section, `release-plz.toml`,
-`.github/workflows/release.yml`, and a `CONTRIBUTING.md` note that **`CHANGELOG.md`
-must not be hand-edited** (release-plz generates it from Conventional Commit
-messages). Use `type(scope): summary` commits going forward; don't touch those
-files as part of the above work unless coordinating the release.
+Releases are automated with **release-plz** (`release-plz.toml` +
+`.github/workflows/release.yml`); `v0.1.0` is tagged. **`CHANGELOG.md` is generated
+from Conventional Commits — do not hand-edit it.** Land each item above with a
+`fix:`/`feat:` (or `docs:`/`refactor:`/etc.) commit so the version bump and
+changelog entry are produced automatically. See `CONTRIBUTING.md` → Releases and
+`AGENTS.md` → Releasing & versioning.

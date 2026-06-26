@@ -21,8 +21,8 @@ edition = "2021"
 # and the nix devshell's rustc is canonical.
 rust-version = "1.82"
 license = "MIT"
-authors = ["0xfell"]
-repository = "https://github.com/0xfell/open-media"
+authors = ["Grok Insider <admin@grokinsider.net>"]
+repository = "https://github.com/grok-insider/open-media"
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---

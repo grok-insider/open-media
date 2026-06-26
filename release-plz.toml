@@ -12,7 +12,7 @@
 #
 # On each push to master, release-plz opens/updates a "release PR" (bump +
 # Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z` and creates the GitHub Release.
-# Delivery is that Release (binary + notes) and the 0xfell cachix cache — flake.nix
+# Delivery is that Release (binary + notes) and the grok-insider cachix cache — flake.nix
 # reads the same version from Cargo.toml, so the cached path tracks it as
 # `om-X.Y.Z`. Nothing is published to crates.io (`git_only`).
 
