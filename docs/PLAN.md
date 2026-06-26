@@ -23,10 +23,13 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       seasons, episodes. Real reqwest+serde client; errors mapped to `CoreError`.
 - [x] `AniListProvider`: GraphQL search/details; populates `anilist` + `mal` ids;
       stays out of explicit movie/series searches.
+- [x] `CinemetaProvider` (post-0.1): keyless, IMDB-native movie/series discovery
+      (Stremio `v3-cinemeta`); the default when no TMDB key is set. `Engine::search`
+      dedups results against TMDB by IMDB id.
 - [x] Parallelized `Engine::search` (and `find_sources`) with `futures::join_all`.
-- [x] Unit tests + wiremock e2e (`tests/metadata_e2e.rs`): 5 unit + 6 e2e.
+- [x] Unit tests + wiremock e2e (`tests/metadata_e2e.rs`).
 - **Acceptance:** met under mock servers (search → results with ids; details →
-  imdb). Real-network smoke test pending a live key.
+  imdb). Live keyless search (Cinemeta + AniList) verified via the TUI.
 
 ## Phase 2 — Source adapters (`om-sources`) ✅
 - [x] `TorrentioSource`: builds config string, fetches movie/series JSON, parses
@@ -89,30 +92,63 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       IPC (auto-skip OP/ED, progress/history, presence, chapters) via `select!` →
       teardown → complete→tracker. Optional ports degrade gracefully.
 - **M3 — substantially met:** the session loop is implemented and wired; full
-  unattended auto-advance/binge is a thin follow-up on top.
+  unattended auto-advance/binge is a thin follow-up on top (tracked in
+  `continue-plan.md`).
 
 ## Phase 9 — TUI (`om-cli`) ✅
 - [x] ratatui app: `Screen` state machine + `mpsc` render loop (littlejohn pattern);
-      Search → Results → Episodes → Sources → play; vim/arrow nav.
+      Search → Results → Seasons → Episodes → Sources → play; vim/arrow nav.
+- [x] Real season navigation + per-season episode lists (titles when known); a
+      focusable filter/sort side panel on Sources, persisted to `[ui.sources]`.
 - [x] Logs routed off the alternate screen in TUI mode.
-- **M4 — met:** verified end-to-end with Wisp — live AniList search → 28 episodes →
-  **43 ranked nyaa sources** → clean quit. (Themes/wizard polish: follow-up.)
+- **M4 — met:** verified end-to-end with Wisp — live search → seasons/episodes →
+  ranked, filterable sources → clean quit. (Themes/wizard polish: follow-up.)
 
 ## Phase 10 — Packaging & release ✅
 - [x] Nix flake: `packages.x86_64-linux.{om,default}` (buildRustPackage; cmake +
       bindgenHook for aws-lc-sys/sqlite; no OpenSSL), `homeManagerModules.default`
-      (`programs.open-media`), `devShells.default`; `nixConfig` for the 0xfell cache.
+      (`programs.open-media`), `devShells.default`; `nixConfig` for the grok-insider cache.
 - [x] CI (`.github/workflows/ci.yml`): `rust` job (fmt + clippy + test) on every
-      push; `build` job (master/tags) → `nix build .#om` + push to 0xfell cachix.
+      push; `build` job (master/tags) → `nix build .#om` + push to grok-insider cachix.
 - [x] Wired into the NixOS host (`~/.config/nixos` flake input + HM module);
       `rebuild` installs `om 0.1.0` from the cache (no compile).
 - [x] Automated releases (`release-plz.toml` + `.github/workflows/release.yml`):
       push to master → release PR (version bump + `CHANGELOG`) → merging it tags
       `vX.Y.Z`, creates the GitHub Release + a prebuilt `om` binary, and cachix
       gets `om-X.Y.Z`. Conventional Commits drive the bump (see CONTRIBUTING).
-- [ ] Bootstrap: tag `v0.1.0` once to anchor release-plz (`git tag -a v0.1.0 …`).
-- **M5 — met:** `nix run github:0xfell/open-media#om -- --help` works, and the
-  HM-installed `om` runs on the NixOS host.
+- [x] Bootstrap: `v0.1.0` tagged + GitHub Release published (anchors release-plz).
+      Pipeline verified live — the release PR opens on `feat`/`fix` and no-ops
+      otherwise, and the `v*` tag's CI pushed `om-0.1.0` to cachix.
+- **M5 — met:** `nix run github:grok-insider/open-media#om -- --help` works, and the
+  HM-installed `om` runs on the NixOS host. Release-pipeline hardening follow-ups
+  live in `continue-plan.md`.
+
+---
+
+## Post-0.1 hardening (ongoing)
+
+After 0.1.0, an audit + UX pass landed a batch of fixes and features (see the git
+history; `CHANGELOG` is release-plz–generated from the commits):
+
+- **Keyless metadata:** `CinemetaProvider` — movies/series search with no TMDB key;
+  `Engine::search` dedups by IMDB id.
+- **Player titles:** `om-core::title` builds `Series - S01E01 - Episode Title` for
+  mpv `--force-media-title` and Discord; the episode title threads through
+  `PlayRequest`.
+- **Source/resolve fixes:** Real-Debrid season packs unrestrict the *requested*
+  episode; `HybridResolver` falls back to P2P on a debrid failure; Torrentio no-ops
+  (not errors) for anime without an IMDB id; `behavior.complete_threshold` is wired;
+  debrid/Torrentio token-gating is consistent (`Config::has_real_debrid`).
+- **Anime season matching:** nyaa results are filtered to the selected season
+  (`om-sources/src/season.rs`) — markers, multi-season ranges, roman numerals,
+  bare-ordinal shorthand — fixing cross-season leakage (AniList numbers every
+  season from 1).
+- **TUI:** a Seasons screen + real per-season episode lists; a focusable filter/sort
+  side panel on Sources, persisted to `[ui.sources]`.
+
+**Remaining follow-ups** (audit items, anime absolute episode numbering, binge
+auto-advance, pagination, tracker OAuth, and smaller correctness nits) are tracked
+in **`continue-plan.md`** — check there before starting new work.
 
 ---
 

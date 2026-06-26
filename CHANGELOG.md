@@ -12,13 +12,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `flake.nix`: `packages.x86_64-linux.{om,default}` via `rustPlatform.buildRustPackage`
   (cmake + bindgenHook for aws-lc-sys + bundled rusqlite; no OpenSSL/system sqlite;
   webpki-roots ⇒ no ca-certificates), `homeManagerModules.default`
-  (`programs.open-media`), `devShells.default`, and `nixConfig` for the 0xfell
+  (`programs.open-media`), `devShells.default`, and `nixConfig` for the grok-insider
   cachix cache. Secrets stay out of the store (config via `om init`); mpv is a
   documented runtime dep.
 - `.github/workflows/ci.yml`: `rust` job (fmt + clippy `-D warnings` + tests) on
   every push/PR; `build` job (master/tags/dispatch) builds `om` with Nix and
-  pushes the closure to `0xfell.cachix.org`.
-- Published to `github:0xfell/open-media`; wired into the NixOS host so `rebuild`
+  pushes the closure to `grok-insider.cachix.org`.
+- Published to `github:grok-insider/open-media`; wired into the NixOS host so `rebuild`
   installs `om` from cache. `nix build .#om` + `nix flake check` verified.
 
 ### Added — keyless metadata + UX
@@ -134,5 +134,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (Phases 1–9); network adapters are real, not stubs. Remaining work is packaging
   and polish — see `docs/PLAN.md`.
 
-[Unreleased]: https://github.com/0xfell/open-media/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/0xfell/open-media/releases/tag/v0.1.0
+[Unreleased]: https://github.com/grok-insider/open-media/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/grok-insider/open-media/releases/tag/v0.1.0

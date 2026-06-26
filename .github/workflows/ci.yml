@@ -31,8 +31,8 @@ jobs:
       - run: cargo test --workspace
 
   # On main/master pushes (plus tags + manual dispatch): build the `om` package
-  # with Nix and push every store path to the 0xfell cachix cache, so NixOS
-  # consumers pointing at github:0xfell/open-media pull instead of compiling.
+  # with Nix and push every store path to the grok-insider cachix cache, so NixOS
+  # consumers pointing at github:grok-insider/open-media pull instead of compiling.
   # PRs never publish (no secrets on fork PRs).
   build:
     name: nix build + cachix push (x86_64-linux)
@@ -48,12 +48,12 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = true
 
-      # Configure the 0xfell cache as substituter AND push newly built paths to
+      # Configure the grok-insider cache as substituter AND push newly built paths to
       # it (CACHIX_AUTH_TOKEN secret). nix-community is pulled for build deps.
       - name: Set up Cachix
         uses: cachix/cachix-action@v15
         with:
-          name: 0xfell
+          name: grok-insider
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           extraPullNames: nix-community
 

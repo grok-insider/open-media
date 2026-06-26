@@ -5,15 +5,15 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  # Prebuilt closures are pushed to the 0xfell cachix cache by CI, so consumers
+  # Prebuilt closures are pushed to the grok-insider cachix cache by CI, so consumers
   # never compile open-media (the rustls/aws-lc + librqbit build is heavy).
   nixConfig = {
     extra-substituters = [
-      "https://0xfell.cachix.org"
+      "https://grok-insider.cachix.org"
       "https://nix-community.cachix.org"
     ];
     extra-trusted-public-keys = [
-      "0xfell.cachix.org-1:0VSPKbe/Eilt+WTT/0faSQeQnnhDOH7PxkUvoRtvPPo="
+      "grok-insider.cachix.org-1:ZxLVOxJ1CjdY3vQl1I99qCtwNZwIU4+/QwqSvntB/5w="
       "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
     ];
   };
@@ -61,7 +61,7 @@
 
             meta = {
               description = "Terminal media app: TMDB/AniList → Torrentio/nyaa → Real-Debrid/P2P → mpv";
-              homepage = "https://github.com/0xfell/open-media";
+              homepage = "https://github.com/grok-insider/open-media";
               license = lib.licenses.mit;
               mainProgram = "om";
               platforms = systems;

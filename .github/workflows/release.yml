@@ -11,7 +11,7 @@ name: Release
 #   * upload-binary       — builds a portable static `om` and attaches it.
 #
 # Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
-# master push and pushes `om-X.Y.Z` to 0xfell.cachix.org (flake.nix reads the
+# master push and pushes `om-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
 # version straight from Cargo.toml). Nothing is published to crates.io — see the
 # `git_only` setting in release-plz.toml.
 
@@ -28,7 +28,7 @@ jobs:
   # triggers the `release` job (via the resulting push to master).
   release-plz-pr:
     name: release-plz PR
-    if: github.repository_owner == '0xfell'
+    if: github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,7 +55,7 @@ jobs:
   # whether a release was cut (and its tag/version) to the artifact job below.
   release-plz-release:
     name: release-plz release
-    if: github.repository_owner == '0xfell'
+    if: github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
     permissions:
       contents: write
