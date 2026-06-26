@@ -13,6 +13,7 @@
 //! [`PlaybackControl`]: om_core::ports::PlaybackControl
 //! [`PlaySession::control`]: om_core::ports::PlaySession::control
 
+mod ipc;
 pub mod mpv;
 pub mod vlc;
 

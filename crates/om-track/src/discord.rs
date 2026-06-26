@@ -13,16 +13,17 @@ use om_core::error::CoreResult;
 use om_core::ports::PresenceReporter;
 use om_core::tracking::Activity;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+use crate::ipc::{self, IpcStream};
 
 static NONCE: AtomicU64 = AtomicU64::new(1);
 
 /// Discord rich-presence reporter.
 pub struct DiscordPresence {
     client_id: String,
-    conn: Mutex<Option<UnixStream>>,
+    conn: Mutex<Option<IpcStream>>,
 }
 
 impl DiscordPresence {
@@ -40,7 +41,7 @@ impl DiscordPresence {
             return true;
         }
         for path in candidate_paths() {
-            if let Ok(mut stream) = UnixStream::connect(&path).await {
+            if let Ok(mut stream) = ipc::connect(&path).await {
                 let handshake = encode_frame(0, &json!({ "v": 1, "client_id": self.client_id }));
                 if stream.write_all(&handshake).await.is_ok() {
                     let _ = read_frame(&mut stream).await; // consume handshake reply
@@ -128,7 +129,7 @@ fn encode_frame(opcode: u32, payload: &Value) -> Vec<u8> {
     buf
 }
 
-async fn read_frame(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
+async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<(u32, Vec<u8>)> {
     let mut header = [0u8; 8];
     stream.read_exact(&mut header).await?;
     let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
@@ -138,6 +139,9 @@ async fn read_frame(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> 
     Ok((opcode, data))
 }
 
+/// Unix: Discord listens on `discord-ipc-{0..9}` under `$XDG_RUNTIME_DIR`
+/// (falling back to `$TMPDIR`/`/tmp`), plus the Flatpak/snap sandbox locations.
+#[cfg(unix)]
 fn candidate_paths() -> Vec<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -151,6 +155,14 @@ fn candidate_paths() -> Vec<PathBuf> {
         paths.push(base.join(format!("snap.discord/discord-ipc-{i}")));
     }
     paths
+}
+
+/// Windows: Discord listens on the named pipes `\\.\pipe\discord-ipc-{0..9}`.
+#[cfg(windows)]
+fn candidate_paths() -> Vec<PathBuf> {
+    (0..10)
+        .map(|i| PathBuf::from(format!(r"\\.\pipe\discord-ipc-{i}")))
+        .collect()
 }
 
 #[cfg(test)]

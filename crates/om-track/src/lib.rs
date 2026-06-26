@@ -20,6 +20,7 @@ pub mod anilist;
 pub mod aniskip;
 pub mod composite;
 pub mod discord;
+mod ipc;
 pub mod mal;
 
 pub use anilist::AniListTracker;

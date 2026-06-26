@@ -4,6 +4,11 @@
 //! (`{"command":[...]}\n` → `{error,data}`) and drives the real [`MpvControl`]
 //! against it — covering the codec, event-line skipping, and the typed helpers
 //! without needing a real mpv or a display.
+//!
+//! Unix-only: the fake server uses `UnixListener`. The control plane itself is
+//! cross-platform (named pipes on Windows); that path is exercised on the
+//! Windows CI runner against real mpv rather than a hand-rolled pipe server.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 
