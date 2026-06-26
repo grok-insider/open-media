@@ -78,86 +78,108 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Build a portable, statically-linked `om` (x86_64 musl) and attach it to the
-  # just-created GitHub Release, for users who don't consume the Nix/cachix path.
-  # This job is independent: if it fails, the tag/Release/changelog/cachix are
-  # already done — only the binary attachment is missing, and can be re-run.
-  #
-  # musl static (via cargo-zigbuild) runs on any glibc/musl distro, incl. Alpine
-  # and older enterprise. aws-lc-sys (rustls' crypto backend) cross-compiles fine:
-  # our pin is 0.41.0 (> 0.32.1, which fixed the musl `linux/random.h` break) and
-  # zig supplies the cross C toolchain that CMake/bindgen need.
-  #
-  # FALLBACK if a musl build ever breaks: set TARGET=x86_64-unknown-linux-gnu, run
-  # on `ubuntu-22.04` (glibc 2.35 baseline), drop the zig + cargo-zigbuild steps,
-  # and replace `cargo zigbuild` with `cargo build`.
-  upload-binary:
-    name: attach om binary (x86_64-linux)
+  # Resolve the just-created release's tag/version once (jq on Linux) so the
+  # cross-platform matrix (incl. Windows) doesn't need jq.
+  resolve:
+    name: resolve release tag
     needs: release-plz-release
     if: needs.release-plz-release.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      TARGET: x86_64-unknown-linux-musl
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      version: ${{ steps.r.outputs.version }}
     steps:
-      - name: Resolve release tag/version
-        id: rel
+      - id: r
         env:
           RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
           set -euo pipefail
           echo "tag=$(echo "$RELEASES" | jq -r '.[0].tag')" >> "$GITHUB_OUTPUT"
           echo "version=$(echo "$RELEASES" | jq -r '.[0].version')" >> "$GITHUB_OUTPUT"
+
+  # Build the `om` binary for each target and attach an archive (+ sha256) to the
+  # Release. Independent per target (fail-fast: false): one platform failing
+  # leaves the others (and the tag/Release/changelog/cachix) intact, re-runnable.
+  #
+  # om is portable across Unix (rustls + bundled rusqlite, no system OpenSSL/sqlite).
+  # zig supplies the cross C toolchain + musl libc for the static Linux builds;
+  # aws-lc-sys (rustls crypto) builds aws-lc with CMake+bindgen.
+  #
+  # Windows is intentionally NOT in this matrix yet: the mpv IPC control plane
+  # (crates/om-player/src/mpv.rs) and Discord presence (crates/om-track/src/
+  # discord.rs) use tokio Unix sockets with no named-pipe fallback, so a Windows
+  # build does not compile. Tracking issue: cross-platform IPC (named pipes on
+  # Windows). Add `windows-latest` / `x86_64-pc-windows-msvc` here once that lands.
+  artifacts:
+    name: ${{ matrix.target }}
+    needs: [release-plz-release, resolve]
+    if: needs.release-plz-release.outputs.releases_created == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: zig }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: zig }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, cross: "" }
+          - { os: macos-14, target: aarch64-apple-darwin, cross: "" }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
       - name: Checkout the released tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.rel.outputs.tag }}
-      # aws-lc-sys builds aws-lc with CMake and binds it via libclang/bindgen; zig
-      # provides the cross C compiler + musl libc that cargo-zigbuild drives.
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y cmake clang
+          ref: ${{ needs.resolve.outputs.tag }}
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
+
+      # zig supplies the cross C toolchain + musl libc for the Linux static builds.
       - name: Install zig
+        if: matrix.cross == 'zig'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
       - name: Install cargo-zigbuild
+        if: matrix.cross == 'zig'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ env.TARGET }}
-      - name: Build static om
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build (zigbuild static)
+        if: matrix.cross == 'zig'
         run: cargo zigbuild --release -p om-cli --target "$TARGET"
-      - name: Verify the binary is static
+
+      - name: Build (native)
+        if: matrix.cross != 'zig'
+        run: cargo build --release -p om-cli --target ${{ matrix.target }}
+
+      - name: Verify Linux binary is static
+        if: matrix.cross == 'zig'
         run: |
           set -euo pipefail
           bin="target/$TARGET/release/om"
           file "$bin"
-          # A static binary makes `ldd` print "not a dynamic executable"; any
-          # glibc NEEDED entry means the build silently linked dynamically.
           if ldd "$bin" 2>&1 | grep -qiE 'libc\.so|GLIBC'; then
             echo "::error::om is dynamically linked against glibc"; exit 1
           fi
-      - name: Package tarball + checksum
-        id: pkg
+
+      - name: Package + upload
         env:
-          VERSION: ${{ steps.rel.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          archive="om-${VERSION}-x86_64-linux-musl.tar.gz"
+          archive="om-${VERSION}-${TARGET}.tar.gz"
           tar -czf "$archive" -C "target/$TARGET/release" om
-          sha256sum "$archive" > "$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-      - name: Upload to the GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.rel.outputs.tag }}
-          ARCHIVE: ${{ steps.pkg.outputs.archive }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+          shasum -a 256 "$archive" > "$archive.sha256" 2>/dev/null || sha256sum "$archive" > "$archive.sha256"
+          gh release upload "$TAG" "$archive" "$archive.sha256" --clobber
