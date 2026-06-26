@@ -105,11 +105,10 @@ jobs:
   # zig supplies the cross C toolchain + musl libc for the static Linux builds;
   # aws-lc-sys (rustls crypto) builds aws-lc with CMake+bindgen.
   #
-  # Windows is intentionally NOT in this matrix yet: the mpv IPC control plane
-  # (crates/om-player/src/mpv.rs) and Discord presence (crates/om-track/src/
-  # discord.rs) use tokio Unix sockets with no named-pipe fallback, so a Windows
-  # build does not compile. Tracking issue: cross-platform IPC (named pipes on
-  # Windows). Add `windows-latest` / `x86_64-pc-windows-msvc` here once that lands.
+  # Windows (x86_64-pc-windows-msvc) builds natively on windows-latest. The IPC
+  # control planes are cfg-gated (crates/{om-player,om-track}/src/ipc.rs): tokio
+  # Unix sockets on Unix, tokio named pipes on Windows. aws-lc-sys needs NASM on
+  # Windows, supplied by ilammy/setup-nasm; CMake + MSVC ship on the runner.
   artifacts:
     name: ${{ matrix.target }}
     needs: [release-plz-release, resolve]
@@ -124,6 +123,7 @@ jobs:
           - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: zig }
           - { os: macos-15-intel, target: x86_64-apple-darwin, cross: "" }
           - { os: macos-14, target: aarch64-apple-darwin, cross: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, cross: "" }
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
@@ -152,6 +152,12 @@ jobs:
         with:
           tool: cargo-zigbuild
 
+      # aws-lc-sys (rustls crypto) assembles its primitives with NASM on Windows,
+      # which the runner doesn't ship. CMake + MSVC are already present.
+      - name: Install NASM (aws-lc-sys, Windows)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: ilammy/setup-nasm@v1
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
@@ -174,12 +180,17 @@ jobs:
             echo "::error::om is dynamically linked against glibc"; exit 1
           fi
 
+      # `shell: bash` runs in Git Bash on the Windows runner too (default there is
+      # PowerShell), keeping one portable packaging script across every target.
       - name: Package + upload
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          bin=om
+          [ "${RUNNER_OS}" = "Windows" ] && bin=om.exe
           archive="om-${VERSION}-${TARGET}.tar.gz"
-          tar -czf "$archive" -C "target/$TARGET/release" om
+          tar -czf "$archive" -C "target/$TARGET/release" "$bin"
           shasum -a 256 "$archive" > "$archive.sha256" 2>/dev/null || sha256sum "$archive" > "$archive.sha256"
           gh release upload "$TAG" "$archive" "$archive.sha256" --clobber

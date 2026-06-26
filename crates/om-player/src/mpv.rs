@@ -16,7 +16,8 @@ use om_core::ports::{Chapter, PlayOptions, PlaySession, PlaybackControl, Player}
 use om_core::stream::Playback;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+
+use crate::ipc;
 
 static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -109,7 +110,7 @@ impl PlaySession for MpvSession {
             .wait()
             .await
             .map_err(|e| CoreError::Player(format!("mpv wait failed: {e}")))?;
-        let _ = std::fs::remove_file(&self.socket);
+        cleanup_socket(&self.socket);
         tracing::info!(?status, "mpv exited");
         Ok(())
     }
@@ -121,7 +122,7 @@ impl PlaySession for MpvSession {
 
 impl Drop for MpvSession {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
+        cleanup_socket(&self.socket);
     }
 }
 
@@ -153,18 +154,20 @@ impl MpvControl {
     }
 
     async fn request_once(&self, command: &Value) -> CoreResult<Value> {
-        let stream = UnixStream::connect(&self.socket)
+        // One connection per request: write the command, then read replies on the
+        // same stream (request/response, so a sequential write-then-read is enough
+        // and keeps the transport identical across the Unix-socket/named-pipe seam).
+        let mut stream = ipc::connect(&self.socket)
             .await
             .map_err(|e| CoreError::Player(format!("mpv ipc connect: {e}")))?;
-        let (read_half, mut write_half) = stream.into_split();
 
         let payload = serde_json::to_string(&json!({ "command": command })).unwrap();
-        write_half
+        stream
             .write_all(format!("{payload}\n").as_bytes())
             .await
             .map_err(|e| CoreError::Player(format!("mpv ipc write: {e}")))?;
 
-        let mut reader = BufReader::new(read_half);
+        let mut reader = BufReader::new(&mut stream);
         // Skip async event lines; take the first reply carrying an `error`.
         for _ in 0..50 {
             let mut line = String::new();
@@ -232,20 +235,49 @@ impl PlaybackControl for MpvControl {
     }
 }
 
-fn unique_socket_path() -> PathBuf {
+/// A process/instance-unique IPC endpoint name shared by both platforms.
+fn unique_token() -> String {
     let id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("om-mpv-{pid}-{nanos}-{id}.sock"))
+    format!("om-mpv-{pid}-{nanos}-{id}")
+}
+
+/// Unix: a `.sock` file under the temp dir.
+#[cfg(unix)]
+fn unique_socket_path() -> PathBuf {
+    std::env::temp_dir().join(format!("{}.sock", unique_token()))
+}
+
+/// Windows: a named pipe under the `\\.\pipe\` namespace (no filesystem entry).
+#[cfg(windows)]
+fn unique_socket_path() -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\{}", unique_token()))
+}
+
+/// Remove the IPC endpoint after mpv exits.
+///
+/// Unix sockets are real files that must be unlinked; Windows named pipes are
+/// owned by mpv's process and disappear when it closes them, so this is a no-op
+/// there.
+fn cleanup_socket(path: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 async fn wait_for_socket(path: &Path, timeout: Duration) {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if UnixStream::connect(path).await.is_ok() {
+        if ipc::connect(path).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
