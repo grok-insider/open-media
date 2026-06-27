@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "MetadataProvider adapters: TMDB (movies/series) and AniList (anime)."
+description = "MetadataProvider adapters: TMDB + Cinemeta (keyless) for movies/series, AniList for anime."
 
 [dependencies]
 om-core = { workspace = true }
