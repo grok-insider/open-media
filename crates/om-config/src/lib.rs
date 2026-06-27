@@ -10,7 +10,8 @@
 //! variables (`OPEN_MEDIA_*`) may override at runtime for ephemeral/CI use.
 //!
 //! The schema is intentionally flat and `#[serde(default)]`-heavy so a minimal
-//! file (just the two required keys) deserializes, matching miru's ergonomics.
+//! file (even an empty one) deserializes — there are no required keys; search
+//! works keyless via Cinemeta + AniList. Matches miru's ergonomics.
 
 use std::path::PathBuf;
 
@@ -41,7 +42,8 @@ pub struct Config {
 /// freshly-deserialized empty document would disagree on `debrid_provider`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
-    /// TMDB v3 API key — required for movie/series search.
+    /// TMDB v3 API key — optional; enriches movie/series search. Cinemeta
+    /// provides keyless movie/series discovery when this is empty.
     #[serde(default)]
     pub tmdb_api_key: String,
     /// Active debrid backend: `"real-debrid"` (default), later `"alldebrid"`,

@@ -121,12 +121,12 @@ fn cmd_init() -> anyhow::Result<()> {
     om_config::save(&cfg)?;
     println!("Created {}", path.display());
     println!();
-    println!("Next steps:");
-    println!("  om config set tmdb_api_key=<your TMDB v3 key>      # required");
-    println!("  om config set real_debrid_token=<your RD token>   # optional, recommended");
+    println!("Next steps (all optional — search works keyless via Cinemeta + AniList):");
+    println!("  om config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
+    println!("  om config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
     println!();
     println!(
-        "Get keys: https://www.themoviedb.org/settings/api  +  https://real-debrid.com/apitoken"
+        "Get keys: https://real-debrid.com/apitoken  +  https://www.themoviedb.org/settings/api"
     );
     Ok(())
 }
