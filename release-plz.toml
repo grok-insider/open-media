@@ -20,8 +20,11 @@
 # Not on crates.io: read the current version from the `v*` git tag, not the cargo
 # registry. Implies no `cargo publish`.
 git_only = true
-# Cut a release only when the release PR is merged, not on every master commit.
-release_always = false
+# Never run `cargo publish` (git_only alone doesn't always disable it).
+publish = false
+# Release the current workspace version whenever it isn't tagged yet (robust; lets
+# a direct version bump cut a release and re-baseline at packageable code).
+release_always = true
 # Only open/update the release PR when a `feat`/`fix` has landed. This keeps the
 # release PR meaningful AND skips the expensive per-crate `cargo package` analysis
 # on chore/docs/ci/refactor-only pushes (those changes still ride into the next

@@ -4,7 +4,10 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 0.2.0
+
+- Added Windows support for mpv interaction and Discord Rich Presence.
+- Added prebuilt binaries for Linux (x86_64 and aarch64) and macOS (x86_64 and arm64).
 
 ## [0.1.0] - 2026-06-25
 
@@ -134,5 +137,4 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (Phases 1–9); network adapters are real, not stubs. Remaining work is packaging
   and polish — see `docs/PLAN.md`.
 
-[Unreleased]: https://github.com/grok-insider/open-media/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/grok-insider/open-media/releases/tag/v0.1.0
