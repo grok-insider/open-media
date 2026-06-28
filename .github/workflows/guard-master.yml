@@ -1,0 +1,29 @@
+name: guard master
+
+# Enforce the integration-branch policy: only `dev` may open a PR into `master`.
+# `master` is the released branch; all feature/fix branches land in `dev` first,
+# and a single `dev -> master` PR is the only sanctioned path. GitHub branch
+# protection can require a check but can't express "only this branch may merge",
+# so this job is that check: it fails any PR into `master` whose head is not
+# `dev`. Add it to master's required status checks to make it blocking.
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  only-dev-into-master:
+    name: only dev into master
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the PR head branch is dev
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" = "dev" ]; then
+            echo "OK: PR into master comes from 'dev'."
+          else
+            echo "::error::PRs into 'master' must come from 'dev' (got '$HEAD_REF')."
+            echo "Land your work in 'dev' first, then open a single 'dev -> master' PR."
+            exit 1
+          fi
