@@ -142,8 +142,8 @@ om config path                           # print the config file path
 ```
 
 `om config set` edits these keys: `tmdb_api_key`, `real_debrid_token`,
-`anilist_token`, `mal_token`, `debrid_provider`, `player_command`. Everything else
-is set by editing `config.toml` directly.
+`anilist_token`, `mal_token`, `debrid_provider`, `player_command`, `telemetry`.
+Everything else is set by editing `config.toml` directly.
 
 ## Configuration
 
@@ -166,9 +166,42 @@ the Nix store. `om init` creates it.
 | `[behavior]` `skip_intro_outro` / `resume` | `true` | AniSkip OP/ED; resume from last position |
 | `[behavior]` `skip_filler` / `complete_threshold` / `discord_presence` | `false` / `0.85` / `false` | binge filler-skip; mark-complete fraction; Discord RPC |
 | `[ui]` `theme` / `[ui.sources]` | `auto` | UI theme; persisted Sources filter/sort panel |
+| `[telemetry]` `enabled` | `true` | anonymous active-install ping (opt-out; see Telemetry below) |
 
-> Discord rich presence is wired but ships with a placeholder application id, so
-> it won't connect until a registered Discord app id is set.
+> Discord rich presence publishes a "Watching …" status when the Discord desktop
+> client is running and `discord_presence = true`. It is best-effort: with no
+> Discord client running it is a silent no-op and never blocks playback.
+
+## Telemetry
+
+open-media sends a single **anonymous** usage ping once per launch so the project
+can estimate how many active installs exist. It is **on by default (opt-out)**.
+
+**Exactly what is sent — and nothing else, ever:**
+
+```json
+{ "v": "<app version>", "os": "<linux|macos|windows>", "arch": "<x86_64|aarch64>", "id": "<random uuid>" }
+```
+
+- `id` is a random UUID generated once on this machine (`[telemetry] install_id`
+  in your config). It lets us count *unique* installs without any personal data;
+  it is not tied to you and reveals nothing about you.
+- **Never transmitted:** anything about what you watch — titles, search queries,
+  source names, file hashes, watch history — or any API token. That is a hard
+  invariant of the telemetry code, not a setting.
+
+It is best-effort and fire-and-forget: it runs detached with a short timeout and
+never blocks or breaks playback, and silently does nothing if it can't reach the
+collector.
+
+**Opt out at any time:**
+
+```sh
+om config set telemetry=false
+```
+
+Download counts are derived separately from GitHub Releases' own statistics — the
+app does not phone home to count downloads.
 
 ## Project layout
 

@@ -125,8 +125,11 @@ pub fn build_engine(cfg: &Config) -> Engine {
     builder.build()
 }
 
-/// open-media's Discord application id (placeholder until registered in Phase 6).
-const DISCORD_CLIENT_ID: &str = "0000000000000000000";
+/// open-media's registered Discord application id. Public by design — it is sent
+/// in the rich-presence IPC handshake and is not a secret (unlike a bot token).
+/// Forks wanting their own app name on the "Watching" card register their own app
+/// and swap this constant.
+const DISCORD_CLIENT_ID: &str = "1495240340636958811";
 
 /// Map the config's quality string onto a [`ScoringPrefs`] target.
 fn scoring_prefs(cfg: &Config) -> ScoringPrefs {

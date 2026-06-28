@@ -13,6 +13,7 @@ om-core = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
