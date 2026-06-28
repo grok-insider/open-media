@@ -41,6 +41,10 @@ pub struct PlayRequest {
     /// one. Threaded into the player's media-title; `None` degrades gracefully to
     /// just the `S01E01` coordinate. Always `None` for movies.
     pub episode_title: Option<String>,
+    /// Selected episode's runtime in minutes, when the metadata provider supplied
+    /// one. Forwarded (as seconds) to the [`Enricher`] so AniSkip can validate
+    /// skip intervals against the episode length; `None` disables that check.
+    pub episode_runtime_minutes: Option<u32>,
     pub include_uncached: bool,
 }
 
@@ -217,10 +221,13 @@ impl Engine {
             .map(|p| p.position_secs)
             .filter(|s| *s > 5);
 
-        // 3. Skip windows (best-effort — anime, via the enricher).
+        // 3. Skip windows (best-effort — anime, via the enricher). Forward the
+        //    episode runtime (minutes → seconds) when known so AniSkip can validate
+        //    intervals against the episode length.
+        let episode_length_secs = req.episode_runtime_minutes.map(|m| m * 60);
         let skip = match &self.enricher {
             Some(e) => e
-                .skip_times(&req.media.ids, episode)
+                .skip_times(&req.media.ids, episode, episode_length_secs)
                 .await
                 .unwrap_or_default(),
             None => SkipTimes::default(),
