@@ -26,6 +26,7 @@ query ($search: String) {
       description(asHtml: false)
       coverImage { large }
       status format genres
+      nextAiringEpisode { episode }
     }
   }
 }"#;
@@ -39,6 +40,7 @@ query ($id: Int) {
     description(asHtml: false)
     coverImage { large }
     status format genres
+    nextAiringEpisode { episode }
     streamingEpisodes { title thumbnail url }
   }
 }"#;
@@ -164,7 +166,7 @@ impl MetadataProvider for AniListProvider {
 
     async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
         let media = self.fetch_media(ids).await?;
-        let count = media.episodes.unwrap_or(0);
+        let count = media.effective_episode_count();
 
         // AniList exposes per-episode title + thumbnail only via
         // `streamingEpisodes`, whose entries are NOT guaranteed to be 1:1 with
@@ -270,7 +272,19 @@ struct AniListMedia {
     #[serde(default)]
     genres: Vec<String>,
     #[serde(default)]
+    next_airing_episode: Option<NextAiringEpisode>,
+    #[serde(default)]
     streaming_episodes: Vec<StreamingEpisode>,
+}
+
+/// AniList's `nextAiringEpisode.episode` is the number of the *next* episode to
+/// air (1-based), so for a currently-airing show with `episodes: null`, the
+/// count of already-aired episodes is `episode - 1`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NextAiringEpisode {
+    #[serde(default)]
+    episode: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +335,28 @@ struct CoverImage {
 }
 
 impl AniListMedia {
+    /// The number of watchable episodes.
+    ///
+    /// Finished shows report `episodes` directly. Currently-airing shows leave
+    /// `episodes: null`, so fall back to `nextAiringEpisode.episode - 1` (the
+    /// count of episodes that have *already* aired). When neither is known we
+    /// assume a single episode rather than zero, so the episode list is never
+    /// empty for a real title.
+    fn effective_episode_count(&self) -> u32 {
+        if let Some(n) = self.episodes {
+            return n;
+        }
+        if let Some(next) = self
+            .next_airing_episode
+            .as_ref()
+            .and_then(|n| n.episode)
+            .filter(|&e| e > 0)
+        {
+            return next - 1;
+        }
+        1
+    }
+
     fn into_media(self) -> Media {
         let mut ids = IdSet::default().with_anilist(self.id);
         if let Some(mal) = self.id_mal {
@@ -425,6 +461,36 @@ mod tests {
     }
 
     #[test]
+    fn airing_anime_derives_episode_count_from_next_airing_episode() {
+        // Currently-airing show: `episodes` is null, but episode 5 is up next,
+        // so 4 episodes have already aired.
+        let json = serde_json::json!({
+            "id": 1,
+            "title": { "romaji": "Airing Show" },
+            "episodes": null,
+            "status": "RELEASING",
+            "format": "TV",
+            "nextAiringEpisode": { "episode": 5 },
+        });
+        let media: AniListMedia = serde_json::from_value(json).unwrap();
+        assert_eq!(media.episodes, None);
+        assert_eq!(media.effective_episode_count(), 4);
+    }
+
+    #[test]
+    fn missing_episode_data_falls_back_to_single_episode() {
+        // Neither a known count nor a next-airing hint → assume one episode so
+        // the list is never empty.
+        let json = serde_json::json!({
+            "id": 1,
+            "title": { "romaji": "Unknown" },
+            "episodes": null,
+        });
+        let media: AniListMedia = serde_json::from_value(json).unwrap();
+        assert_eq!(media.effective_episode_count(), 1);
+    }
+
+    #[test]
     fn title_falls_back_to_romaji_when_no_english() {
         let json = serde_json::json!({
             "id": 1,
@@ -487,7 +553,7 @@ mod tests {
             ]
         });
         let media: AniListMedia = serde_json::from_value(json).unwrap();
-        let count = media.episodes.unwrap_or(0);
+        let count = media.effective_episode_count();
         let mut enrich: HashMap<u32, &StreamingEpisode> = HashMap::new();
         for se in &media.streaming_episodes {
             if let Some(n) = se.title.as_deref().and_then(parse_episode_number) {
