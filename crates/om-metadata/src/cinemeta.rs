@@ -198,6 +198,7 @@ impl MetadataProvider for CinemetaProvider {
                 overview: non_empty(v.overview.or(v.description)),
                 runtime_minutes: None,
                 rating: v.rating.as_deref().and_then(|r| r.parse().ok()),
+                still: non_empty(v.thumbnail),
             })
             .collect();
         // Cinemeta's `videos` can arrive slightly out of order; present them by
@@ -335,6 +336,8 @@ struct VideoEntry {
     first_aired: Option<String>,
     #[serde(default)]
     rating: Option<String>,
+    #[serde(default)]
+    thumbnail: Option<String>,
 }
 
 /// Parse a leading 4-digit year from a `releaseInfo` like `"2014"` or
@@ -446,6 +449,7 @@ mod tests {
             released: None,
             first_aired: None,
             rating: None,
+            thumbnail: None,
         }
     }
 }

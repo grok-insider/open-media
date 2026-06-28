@@ -26,6 +26,9 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 const PANEL_MIN_WIDTH: u16 = 100;
 /// Width of the Sources side panel.
 const PANEL_WIDTH: u16 = 34;
+/// Width of the Episodes detail side panel (a touch wider — it holds wrapped
+/// synopsis text).
+const EPISODE_PANEL_WIDTH: u16 = 40;
 
 /// Which screen is active.
 #[derive(PartialEq)]
@@ -759,6 +762,7 @@ fn fallback_episodes(season: u32, count: u32) -> Vec<Episode> {
             overview: None,
             runtime_minutes: None,
             rating: None,
+            still: None,
         })
         .collect()
 }
@@ -938,18 +942,140 @@ fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
+    // Split off a passive detail panel when there's room; otherwise the list
+    // takes the full width (narrow terminals aren't squeezed).
+    let show_panel = area.width >= PANEL_MIN_WIDTH;
+    let (list_area, panel_area) = if show_panel {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(EPISODE_PANEL_WIDTH)])
+                .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
     let items: Vec<ListItem> = app
         .episodes
         .iter()
-        .map(|ep| {
-            let label = match &ep.title {
+        .map(|ep| ListItem::new(episode_row(ep)))
+        .collect();
+    render_list(f, list_area, "Episodes", items, &app.episodes_state, true);
+
+    if let Some(panel) = panel_area {
+        draw_episode_panel(f, app, panel);
+    }
+}
+
+/// One list line per episode: `E01 · Title`, falling back to the air date and
+/// then to the bare coordinate when a provider couldn't supply a title.
+fn episode_row(ep: &Episode) -> String {
+    match &ep.title {
+        Some(t) if !t.is_empty() => format!("E{:02} · {t}", ep.number),
+        _ => match &ep.air_date {
+            Some(d) if !d.is_empty() => format!("E{:02}   ({d})", ep.number),
+            _ => format!("E{:02}", ep.number),
+        },
+    }
+}
+
+/// Passive detail panel for the highlighted episode: series context on top,
+/// then the selected episode's title, air date, runtime, rating, and synopsis.
+/// Follows the list cursor; it is not keyboard-focusable.
+fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
+    let sel = app.episodes_state.selected().unwrap_or(0);
+    let ep = app.episodes.get(sel);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let label = |s: &str| Span::styled(s.to_string(), Style::new().fg(Color::DarkGray));
+
+    // --- Series context (from the parent Media) ---
+    if let Some(m) = &app.media {
+        lines.push(Line::from(Span::styled(
+            m.title.clone(),
+            Style::new().fg(Color::Cyan).bold(),
+        )));
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(y) = m.year {
+            meta.push(y.to_string());
+        }
+        if let Some(s) = m.score.filter(|s| *s > 0.0) {
+            meta.push(format!("★ {s:.1}"));
+        }
+        if let (Some(sc), Some(ec)) = (m.season_count, m.episode_count) {
+            meta.push(format!("{sc}S · {ec}E"));
+        } else if let Some(ec) = m.episode_count {
+            meta.push(format!("{ec}E"));
+        }
+        if !meta.is_empty() {
+            lines.push(Line::from(label(&meta.join("   "))));
+        }
+        if !m.genres.is_empty() {
+            lines.push(Line::from(label(&m.genres.join(", "))));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // --- Selected episode ---
+    match ep {
+        Some(ep) => {
+            let title = match &ep.title {
                 Some(t) if !t.is_empty() => format!("E{:02} · {t}", ep.number),
                 _ => format!("E{:02}", ep.number),
             };
-            ListItem::new(label)
-        })
-        .collect();
-    render_list(f, area, "Episodes", items, &app.episodes_state, true);
+            lines.push(Line::from(Span::styled(title, Style::new().bold())));
+
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(d) = &ep.air_date {
+                if !d.is_empty() {
+                    facts.push(format!("Aired {d}"));
+                }
+            }
+            if let Some(r) = ep.runtime_minutes {
+                facts.push(format!("{r} min"));
+            }
+            // Treat a 0.0 rating as "unrated" — Cinemeta returns "0" for
+            // episodes it has no score for, and `★ 0.0` reads as misleading.
+            if let Some(rt) = ep.rating.filter(|r| *r > 0.0) {
+                facts.push(format!("★ {rt:.1}"));
+            }
+            if !facts.is_empty() {
+                lines.push(Line::from(label(&facts.join("   "))));
+            }
+
+            // Placeholder for the still/thumbnail until image rendering lands
+            // (Part C); show whichever URL we have so the data is visible.
+            if let Some(url) = ep
+                .still
+                .as_deref()
+                .or(app.media.as_ref().and_then(|m| m.poster.as_deref()))
+            {
+                lines.push(Line::from(label(&format!("⌷ {}", truncate(url, 34)))));
+            }
+
+            if let Some(o) = &ep.overview {
+                if !o.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(o.clone()));
+                }
+            } else {
+                lines.push(Line::from(""));
+                lines.push(Line::from(label("No synopsis available.")));
+            }
+        }
+        None => lines.push(Line::from(label("No episode selected."))),
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::new().fg(Color::DarkGray))
+                    .title("Episode"),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_sources_screen(f: &mut Frame, app: &App, area: Rect) {

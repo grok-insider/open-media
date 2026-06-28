@@ -162,6 +162,7 @@ impl MetadataProvider for TmdbProvider {
                 overview: non_empty(e.overview),
                 runtime_minutes: e.runtime,
                 rating: e.vote_average,
+                still: e.still_path.map(|p| format!("{IMAGE_BASE}{p}")),
             })
             .collect())
     }
@@ -305,6 +306,8 @@ struct EpisodeDetail {
     runtime: Option<u32>,
     #[serde(default)]
     vote_average: Option<f32>,
+    #[serde(default)]
+    still_path: Option<String>,
 }
 
 impl TmdbDetail {

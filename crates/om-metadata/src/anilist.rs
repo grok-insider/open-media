@@ -3,6 +3,8 @@
 //! Search/details are public (no token). The token-gated mutations (progress
 //! tracking) live in `om-track`, not here.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use om_core::error::{CoreError, CoreResult};
 use om_core::model::{Episode, IdSet, Media, MediaKind, Season};
@@ -37,6 +39,7 @@ query ($id: Int) {
     description(asHtml: false)
     coverImage { large }
     status format genres
+    streamingEpisodes { title thumbnail url }
   }
 }"#;
 
@@ -98,6 +101,19 @@ impl AniListProvider {
             message: "missing data field".into(),
         })
     }
+
+    /// Fetch the raw `Media` object (keeping `streamingEpisodes`, which
+    /// `into_media` drops) so callers can enrich per-episode data.
+    async fn fetch_media(&self, ids: &IdSet) -> CoreResult<AniListMedia> {
+        let id = ids
+            .anilist
+            .ok_or_else(|| CoreError::NotFound("anilist id required for details".into()))?;
+        let data = self
+            .query(DETAIL_QUERY, serde_json::json!({ "id": id }))
+            .await?;
+        data.media
+            .ok_or_else(|| CoreError::NotFound("anilist media".into()))
+    }
 }
 
 impl Default for AniListProvider {
@@ -133,16 +149,7 @@ impl MetadataProvider for AniListProvider {
     }
 
     async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
-        let id = ids
-            .anilist
-            .ok_or_else(|| CoreError::NotFound("anilist id required for details".into()))?;
-        let data = self
-            .query(DETAIL_QUERY, serde_json::json!({ "id": id }))
-            .await?;
-        let media = data
-            .media
-            .ok_or_else(|| CoreError::NotFound("anilist media".into()))?;
-        Ok(media.into_media())
+        Ok(self.fetch_media(ids).await?.into_media())
     }
 
     async fn seasons(&self, ids: &IdSet) -> CoreResult<Vec<Season>> {
@@ -156,20 +163,58 @@ impl MetadataProvider for AniListProvider {
     }
 
     async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
-        let media = self.details(ids).await?;
-        let count = media.episode_count.unwrap_or(0);
+        let media = self.fetch_media(ids).await?;
+        let count = media.episodes.unwrap_or(0);
+
+        // AniList exposes per-episode title + thumbnail only via
+        // `streamingEpisodes`, whose entries are NOT guaranteed to be 1:1 with
+        // episode numbers (free-form titles, gaps, duplicates, no number
+        // field). So we build the canonical `1..=count` range and best-effort
+        // enrich each from the streaming entry whose leading number matches —
+        // never by blind index — leaving unmatched episodes bare.
+        let mut enrich: HashMap<u32, &StreamingEpisode> = HashMap::new();
+        for se in &media.streaming_episodes {
+            if let Some(n) = se.title.as_deref().and_then(parse_episode_number) {
+                enrich.entry(n).or_insert(se);
+            }
+        }
+
         Ok((1..=count)
-            .map(|n| Episode {
-                season,
-                number: n,
-                title: None,
-                air_date: None,
-                overview: None,
-                runtime_minutes: None,
-                rating: None,
+            .map(|n| {
+                let se = enrich.get(&n);
+                Episode {
+                    season,
+                    number: n,
+                    title: se.and_then(|s| s.clean_title()),
+                    air_date: None,
+                    overview: None,
+                    runtime_minutes: None,
+                    rating: None,
+                    still: se.and_then(|s| non_empty(s.thumbnail.clone())),
+                }
             })
             .collect())
     }
+}
+
+/// Parse the leading episode number out of an AniList streaming-episode title
+/// such as `"Episode 12 - The Journey's End"`, `"12. Title"`, or `"Ep. 3"`.
+/// Returns `None` when no plausible leading number is present (e.g. specials,
+/// OVAs, or recap titles), so those entries are simply not matched.
+fn parse_episode_number(title: &str) -> Option<u32> {
+    let t = title.trim();
+    // Strip a leading "Episode"/"Ep"/"E" word if present, then take the first
+    // run of digits.
+    let rest = t
+        .strip_prefix("Episode")
+        .or_else(|| t.strip_prefix("episode"))
+        .or_else(|| t.strip_prefix("Ep."))
+        .or_else(|| t.strip_prefix("Ep"))
+        .or_else(|| t.strip_prefix("EP"))
+        .unwrap_or(t)
+        .trim_start_matches(['.', ' ', '-', '#', ':']);
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 // --- GraphQL response shapes ---
@@ -222,6 +267,39 @@ struct AniListMedia {
     status: Option<String>,
     #[serde(default)]
     genres: Vec<String>,
+    #[serde(default)]
+    streaming_episodes: Vec<StreamingEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamingEpisode {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    url: Option<String>,
+}
+
+impl StreamingEpisode {
+    /// The episode title with a leading `"Episode N - "` / `"N. "` prefix
+    /// stripped, since the episode number is shown separately in the UI.
+    fn clean_title(&self) -> Option<String> {
+        let raw = self.title.as_deref()?.trim();
+        let stripped = match raw.find([':', '-', '.', '–']) {
+            // Only strip when the part before the separator looks like an
+            // episode marker (contains a digit), so real titles like
+            // "Re:Zero" or "Bake-mono" aren't mangled.
+            Some(i) if raw[..i].chars().any(|c| c.is_ascii_digit()) => raw[i + 1..].trim(),
+            _ => raw,
+        };
+        non_empty(Some(stripped.to_string()))
+    }
+}
+
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.trim().is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,5 +388,92 @@ mod tests {
         });
         let media: AniListMedia = serde_json::from_value(json).unwrap();
         assert_eq!(media.into_media().title, "Romaji Only");
+    }
+
+    #[test]
+    fn parses_leading_episode_number_from_varied_titles() {
+        assert_eq!(parse_episode_number("Episode 12 - The End"), Some(12));
+        assert_eq!(parse_episode_number("episode 3"), Some(3));
+        assert_eq!(parse_episode_number("Ep. 5: Title"), Some(5));
+        assert_eq!(parse_episode_number("Ep 7"), Some(7));
+        assert_eq!(parse_episode_number("1. The Beginning"), Some(1));
+        assert_eq!(parse_episode_number("  14  "), Some(14));
+        // No plausible leading number → not matched (specials, recaps).
+        assert_eq!(parse_episode_number("OVA - Special"), None);
+        assert_eq!(parse_episode_number("Recap"), None);
+        assert_eq!(parse_episode_number(""), None);
+    }
+
+    #[test]
+    fn clean_title_strips_episode_prefix_but_not_real_titles() {
+        let se = |t: &str| StreamingEpisode {
+            title: Some(t.to_string()),
+            thumbnail: None,
+            url: None,
+        };
+        assert_eq!(
+            se("Episode 12 - The Journey's End")
+                .clean_title()
+                .as_deref(),
+            Some("The Journey's End")
+        );
+        assert_eq!(
+            se("3. A New Dawn").clean_title().as_deref(),
+            Some("A New Dawn")
+        );
+        // No digit before the separator → leave the title intact.
+        assert_eq!(se("Re:Zero").clean_title().as_deref(), Some("Re:Zero"));
+        assert_eq!(
+            se("Bake-mono Tale").clean_title().as_deref(),
+            Some("Bake-mono Tale")
+        );
+    }
+
+    #[test]
+    fn episodes_enrich_by_matched_number_not_index() {
+        // Streaming entries out of order, with a gap (no ep 2) and a special.
+        let json = serde_json::json!({
+            "id": 1,
+            "title": { "romaji": "Show" },
+            "episodes": 3,
+            "streamingEpisodes": [
+                { "title": "Episode 3 - Third", "thumbnail": "https://t/3.jpg" },
+                { "title": "Episode 1 - First", "thumbnail": "https://t/1.jpg" },
+                { "title": "Special - Recap", "thumbnail": "https://t/x.jpg" }
+            ]
+        });
+        let media: AniListMedia = serde_json::from_value(json).unwrap();
+        let count = media.episodes.unwrap_or(0);
+        let mut enrich: HashMap<u32, &StreamingEpisode> = HashMap::new();
+        for se in &media.streaming_episodes {
+            if let Some(n) = se.title.as_deref().and_then(parse_episode_number) {
+                enrich.entry(n).or_insert(se);
+            }
+        }
+        let eps: Vec<Episode> = (1..=count)
+            .map(|n| {
+                let se = enrich.get(&n);
+                Episode {
+                    season: 1,
+                    number: n,
+                    title: se.and_then(|s| s.clean_title()),
+                    air_date: None,
+                    overview: None,
+                    runtime_minutes: None,
+                    rating: None,
+                    still: se.and_then(|s| non_empty(s.thumbnail.clone())),
+                }
+            })
+            .collect();
+
+        assert_eq!(eps.len(), 3);
+        // Ep 1 matched by number despite being second in the list.
+        assert_eq!(eps[0].title.as_deref(), Some("First"));
+        assert_eq!(eps[0].still.as_deref(), Some("https://t/1.jpg"));
+        // Ep 2 has no streaming entry → bare.
+        assert_eq!(eps[1].title, None);
+        assert_eq!(eps[1].still, None);
+        // Ep 3 matched.
+        assert_eq!(eps[2].title.as_deref(), Some("Third"));
     }
 }
