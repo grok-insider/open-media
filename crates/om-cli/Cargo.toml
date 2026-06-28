@@ -23,6 +23,7 @@ om-sources = { workspace = true }
 om-debrid = { workspace = true }
 om-stream = { workspace = true }
 om-player = { workspace = true }
+om-subs = { workspace = true }
 om-track = { workspace = true }
 om-history = { workspace = true }
 

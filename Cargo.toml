@@ -37,6 +37,7 @@ om-sources = { path = "crates/om-sources", version = "0.2.0" }
 om-debrid = { path = "crates/om-debrid", version = "0.2.0" }
 om-stream = { path = "crates/om-stream", version = "0.2.0" }
 om-player = { path = "crates/om-player", version = "0.2.0" }
+om-subs = { path = "crates/om-subs", version = "0.2.0" }
 om-track = { path = "crates/om-track", version = "0.2.0" }
 om-history = { path = "crates/om-history", version = "0.2.0" }
 om-app = { path = "crates/om-app", version = "0.2.0" }
