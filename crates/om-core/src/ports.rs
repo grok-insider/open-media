@@ -46,6 +46,19 @@ pub trait MetadataProvider: Send + Sync {
 
     /// List episodes within a season.
     async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>>;
+
+    /// The absolute-numbering offset for this title: the number of episodes that
+    /// aired in prior, continuously-numbered seasons of the same franchise.
+    ///
+    /// AniList models each season as its own flat-numbered entry, but some
+    /// release groups number a sequel continuously (S2E01 published as `… - 21`
+    /// when S1 had 20 episodes). For those, `absolute_episode = offset + episode`
+    /// recovers the on-disk number. The default is `Ok(None)` — only providers
+    /// that expose a franchise relation graph (AniList) override it; the rest
+    /// disable absolute matching by returning nothing.
+    async fn episode_offset(&self, _ids: &IdSet) -> CoreResult<Option<u32>> {
+        Ok(None)
+    }
 }
 
 /// What a [`SourceProvider`] is being asked to find.
@@ -55,6 +68,12 @@ pub struct SourceQuery {
     /// `None` for movies; `Some` for episodic content.
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    /// The episode's *absolute* (franchise-continuous) number, when known —
+    /// `offset + episode`, where the offset is the episode count of all prior
+    /// seasons (see [`MetadataProvider::episode_offset`]). Lets a source provider
+    /// also match a sequel release that numbers continuously (S2E01 as `… - 21`).
+    /// `None` for movies, season 1, and providers without a relation graph.
+    pub absolute_episode: Option<u32>,
     /// Include candidates that are *not* cached on the debrid service.
     pub include_uncached: bool,
 }

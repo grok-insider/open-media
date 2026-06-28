@@ -164,6 +164,85 @@ async fn anilist_search_maps_anime_with_mal_bridge() {
     assert_eq!(m.score, Some(8.9));
 }
 
+/// Absolute-numbering offset: a season-2 entry whose relation graph has a TV
+/// `PREQUEL` (S1, 20 episodes) yields an offset of 20, walking the chain until a
+/// season with no further TV prequel.
+#[tokio::test]
+async fn anilist_episode_offset_sums_tv_prequels() {
+    let server = MockServer::start().await;
+
+    // DETAIL_QUERY for the S2 entry (id 2): its PREQUEL is S1 (id 1, 20 eps, TV).
+    // A non-TV ADAPTATION edge and a SEQUEL edge must be ignored.
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#"{"id":2}"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "Media": {
+                "id": 2,
+                "title": { "romaji": "Eminence in Shadow 2nd Season" },
+                "episodes": 12,
+                "format": "TV",
+                "relations": { "edges": [
+                    { "relationType": "PREQUEL", "node": { "id": 1, "format": "TV", "episodes": 20 } },
+                    { "relationType": "SEQUEL",  "node": { "id": 3, "format": "TV", "episodes": 12 } },
+                    { "relationType": "ADAPTATION", "node": { "id": 9, "format": "MANGA", "episodes": null } }
+                ] }
+            } }
+        })))
+        .mount(&server)
+        .await;
+
+    // RELATIONS_QUERY for S1 (id 1): no TV prequel → the walk stops here.
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#"{"id":1}"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "Media": {
+                "id": 1,
+                "episodes": 20,
+                "format": "TV",
+                "relations": { "edges": [
+                    { "relationType": "SEQUEL", "node": { "id": 2, "format": "TV", "episodes": 12 } }
+                ] }
+            } }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = AniListProvider::with_base_url(server.uri());
+    let offset = provider
+        .episode_offset(&IdSet::default().with_anilist(2))
+        .await
+        .unwrap();
+    assert_eq!(offset, Some(20), "S1's 20 episodes are the S2 offset");
+}
+
+/// A true season 1 (no TV prequel in its relation graph) has no offset, so
+/// absolute matching stays disabled (`None`, not `Some(0)`).
+#[tokio::test]
+async fn anilist_episode_offset_none_without_prequel() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "Media": {
+                "id": 1,
+                "title": { "romaji": "Standalone Show" },
+                "episodes": 12,
+                "format": "TV",
+                "relations": { "edges": [
+                    { "relationType": "ADAPTATION", "node": { "id": 9, "format": "MANGA", "episodes": null } }
+                ] }
+            } }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = AniListProvider::with_base_url(server.uri());
+    let offset = provider
+        .episode_offset(&IdSet::default().with_anilist(1))
+        .await
+        .unwrap();
+    assert_eq!(offset, None);
+}
+
 #[tokio::test]
 async fn anilist_stays_out_of_movie_searches() {
     // No mock needed: AniList must not even hit the network for a movie filter.

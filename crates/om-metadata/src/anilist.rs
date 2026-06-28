@@ -42,8 +42,24 @@ query ($id: Int) {
     status format genres
     nextAiringEpisode { episode }
     streamingEpisodes { title thumbnail url }
+    relations { edges { relationType node { id format episodes } } }
   }
 }"#;
+
+/// Trimmed detail query used while walking the prequel chain: we only need the
+/// relation graph and episode counts, not titles/descriptions/streaming data.
+const RELATIONS_QUERY: &str = r#"
+query ($id: Int) {
+  Media(id: $id, type: ANIME) {
+    id episodes format
+    relations { edges { relationType node { id format episodes } } }
+  }
+}"#;
+
+/// Hop cap when following `PREQUEL` edges, so a malformed or cyclic relation
+/// graph can never spin the walk forever. Five hops covers even long franchises
+/// (a 5th-season sequel summing its four predecessors).
+const PREQUEL_HOP_CAP: u8 = 5;
 
 /// AniList-backed metadata provider (anime only).
 pub struct AniListProvider {
@@ -66,7 +82,11 @@ impl AniListProvider {
         }
     }
 
-    async fn query(&self, query: &str, variables: serde_json::Value) -> CoreResult<GqlData> {
+    async fn query<T: for<'de> Deserialize<'de>>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> CoreResult<T> {
         let body = serde_json::json!({ "query": query, "variables": variables });
         let resp = self
             .client
@@ -82,7 +102,7 @@ impl AniListProvider {
                 message: format!("HTTP {status}"),
             });
         }
-        let parsed: GqlResponse = resp.json().await.map_err(|e| CoreError::Parse {
+        let parsed: GqlResponse<T> = resp.json().await.map_err(|e| CoreError::Parse {
             what: "anilist response".into(),
             message: e.to_string(),
         })?;
@@ -110,12 +130,71 @@ impl AniListProvider {
         let id = ids
             .anilist
             .ok_or_else(|| CoreError::NotFound("anilist id required for details".into()))?;
-        let data = self
+        let data: GqlData = self
             .query(DETAIL_QUERY, serde_json::json!({ "id": id }))
             .await?;
         data.media
             .ok_or_else(|| CoreError::NotFound("anilist media".into()))
     }
+
+    /// Fetch just the relation graph + episode count for an id, used while
+    /// hopping back through the prequel chain (no titles/streaming data needed).
+    async fn fetch_relations(&self, id: i32) -> CoreResult<RelationMedia> {
+        let data: RelationData = self
+            .query(RELATIONS_QUERY, serde_json::json!({ "id": id }))
+            .await?;
+        data.media
+            .ok_or_else(|| CoreError::NotFound("anilist media".into()))
+    }
+
+    /// Sum the episode counts of every prior `TV` `PREQUEL` in this title's
+    /// franchise — the absolute-numbering offset for the entry whose immediate TV
+    /// prequel is `first`.
+    ///
+    /// Walks `PREQUEL` edges backwards from `first`, adding each prequel's episode
+    /// count and continuing from that prequel, bounded by [`PREQUEL_HOP_CAP`]. A
+    /// prequel whose own episode count is unknown contributes 0 but the walk still
+    /// continues through it. The caller passes `None` (→ result `None`) when there
+    /// is no TV prequel at all (a true season 1), so absolute matching stays off
+    /// rather than treating an offset of 0 specially.
+    async fn prequel_offset(&self, first: Option<RelationNode>) -> CoreResult<Option<u32>> {
+        let Some(first) = first else {
+            return Ok(None);
+        };
+        let mut total: u32 = 0;
+        let mut next = Some(first);
+        let mut hops = 0u8;
+        while let Some(node) = next {
+            total = total.saturating_add(node.episodes.unwrap_or(0));
+            hops += 1;
+            // Stop before exceeding the hop cap or when the node has no id to
+            // recurse into (we already counted its episodes above).
+            let Some(id) = node.id.filter(|_| hops < PREQUEL_HOP_CAP) else {
+                break;
+            };
+            // A network hiccup mid-chain shouldn't poison the whole offset; take
+            // what we have so far rather than failing the lookup.
+            match self.fetch_relations(id).await {
+                Ok(media) => next = media.tv_prequel().cloned(),
+                Err(e) => {
+                    tracing::debug!(error = %e, id, "anilist prequel hop failed; using partial offset");
+                    break;
+                }
+            }
+        }
+        Ok(Some(total))
+    }
+}
+
+/// Pick the TV `PREQUEL` node (most episodes wins) from a connection — shared by
+/// [`AniListMedia`] details and the trimmed [`RelationMedia`].
+fn pick_tv_prequel(conn: &MediaConnection) -> Option<&RelationNode> {
+    conn.edges
+        .iter()
+        .filter(|e| e.relation_type.as_deref() == Some("PREQUEL"))
+        .filter_map(|e| e.node.as_ref())
+        .filter(|n| n.format.as_deref() == Some("TV"))
+        .max_by_key(|n| n.episodes.unwrap_or(0))
 }
 
 impl Default for AniListProvider {
@@ -136,7 +215,7 @@ impl MetadataProvider for AniListProvider {
         if matches!(kind, Some(MediaKind::Movie) | Some(MediaKind::Series)) {
             return Ok(Vec::new());
         }
-        let data = self
+        let data: GqlData = self
             .query(SEARCH_QUERY, serde_json::json!({ "search": query }))
             .await?;
         let page = data.page.ok_or_else(|| CoreError::Parse {
@@ -197,6 +276,13 @@ impl MetadataProvider for AniListProvider {
             })
             .collect())
     }
+
+    /// Σ episodes of all prior `TV` `PREQUEL`s — the absolute-numbering offset for
+    /// this AniList entry. `None` (default) for a title with no TV prequel.
+    async fn episode_offset(&self, ids: &IdSet) -> CoreResult<Option<u32>> {
+        let media = self.fetch_media(ids).await?;
+        self.prequel_offset(media.tv_prequel().cloned()).await
+    }
 }
 
 /// Parse the leading episode number out of an AniList streaming-episode title
@@ -222,11 +308,17 @@ fn parse_episode_number(title: &str) -> Option<u32> {
 // --- GraphQL response shapes ---
 
 #[derive(Debug, Deserialize)]
-struct GqlResponse {
-    #[serde(default)]
-    data: Option<GqlData>,
+struct GqlResponse<T> {
+    #[serde(default = "none")]
+    data: Option<T>,
     #[serde(default)]
     errors: Option<Vec<GqlError>>,
+}
+
+/// `#[serde(default)]` on a generic `Option<T>` field needs `T: Default`, which
+/// we don't want to require; this gives the field a `T`-free default instead.
+fn none<T>() -> Option<T> {
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +332,14 @@ struct GqlData {
     page: Option<Page>,
     #[serde(rename = "Media", default)]
     media: Option<AniListMedia>,
+}
+
+/// The `data` shape for [`RELATIONS_QUERY`] — a trimmed `Media` with no required
+/// title, so a relations-only response deserializes cleanly.
+#[derive(Debug, Deserialize)]
+struct RelationData {
+    #[serde(rename = "Media", default)]
+    media: Option<RelationMedia>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +375,69 @@ struct AniListMedia {
     next_airing_episode: Option<NextAiringEpisode>,
     #[serde(default)]
     streaming_episodes: Vec<StreamingEpisode>,
+    #[serde(default)]
+    relations: Option<MediaConnection>,
+}
+
+/// AniList's `relations` connection: related franchise entries (prequels,
+/// sequels, side stories, …) reached via directional [`MediaEdge`]s.
+#[derive(Debug, Deserialize)]
+struct MediaConnection {
+    #[serde(default)]
+    edges: Vec<MediaEdge>,
+}
+
+/// One edge in the relation graph. `relation_type` is the relation of `node`
+/// *to the queried media* — so for an S2 entry, its S1 prequel is the edge whose
+/// `relation_type` is `PREQUEL`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaEdge {
+    #[serde(default)]
+    relation_type: Option<String>,
+    #[serde(default)]
+    node: Option<RelationNode>,
+}
+
+/// The lightweight `node` carried by a relation edge — just enough to identify a
+/// prior TV season and count its episodes, and to keep walking the chain.
+#[derive(Debug, Clone, Deserialize)]
+struct RelationNode {
+    #[serde(default)]
+    id: Option<i32>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    episodes: Option<u32>,
+}
+
+impl AniListMedia {
+    /// The single TV `PREQUEL` of this entry, if any.
+    ///
+    /// Only `TV` prequels count toward absolute numbering: movies, OVAs, ONAs and
+    /// specials are not part of the franchise's continuous episode count, and the
+    /// edge must be `PREQUEL` (directional — a `SEQUEL` edge points the other
+    /// way). When AniList lists more than one TV prequel (rare; e.g. a recap
+    /// re-edit), the one with the most episodes is chosen as the true predecessor.
+    fn tv_prequel(&self) -> Option<&RelationNode> {
+        self.relations.as_ref().and_then(pick_tv_prequel)
+    }
+}
+
+/// The trimmed media shape returned by [`RELATIONS_QUERY`] — no required title,
+/// so it deserializes from a response that omits everything but ids/episodes/
+/// relations.
+#[derive(Debug, Deserialize)]
+struct RelationMedia {
+    #[serde(default)]
+    relations: Option<MediaConnection>,
+}
+
+impl RelationMedia {
+    /// The single TV `PREQUEL` of this entry, if any (see [`pick_tv_prequel`]).
+    fn tv_prequel(&self) -> Option<&RelationNode> {
+        self.relations.as_ref().and_then(pick_tv_prequel)
+    }
 }
 
 /// AniList's `nextAiringEpisode.episode` is the number of the *next* episode to
