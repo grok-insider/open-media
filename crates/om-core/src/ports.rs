@@ -215,7 +215,17 @@ pub trait Tracker: Send + Sync {
 #[async_trait]
 pub trait Enricher: Send + Sync {
     /// Opening/ending intervals for a given episode.
-    async fn skip_times(&self, ids: &IdSet, episode: u32) -> CoreResult<SkipTimes>;
+    ///
+    /// `episode_length_secs` is the episode's runtime in **seconds** when known;
+    /// AniSkip uses it to validate that returned skip intervals fall within the
+    /// episode. Pass `None` when the runtime is unknown — adapters then disable
+    /// that validation (AniSkip's `episodeLength=0`) rather than guessing.
+    async fn skip_times(
+        &self,
+        ids: &IdSet,
+        episode: u32,
+        episode_length_secs: Option<u32>,
+    ) -> CoreResult<SkipTimes>;
 
     /// Episode numbers that are filler/recap (so the engine can skip them).
     async fn filler_episodes(&self, ids: &IdSet) -> CoreResult<Vec<u32>>;

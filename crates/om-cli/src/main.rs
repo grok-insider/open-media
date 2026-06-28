@@ -228,15 +228,17 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         (None, None)
     };
 
-    // 4. Best-effort episode title for the player's media-title.
-    let episode_title = match (req_season, req_episode) {
+    // 4. Best-effort episode title + runtime for the player's media-title and
+    //    AniSkip interval validation.
+    let (episode_title, episode_runtime_minutes) = match (req_season, req_episode) {
         (Some(s), Some(e)) => engine
             .episodes(&media.ids, s)
             .await
             .ok()
             .and_then(|eps| eps.into_iter().find(|ep| ep.number == e))
-            .and_then(|ep| ep.title),
-        _ => None,
+            .map(|ep| (ep.title, ep.runtime_minutes))
+            .unwrap_or((None, None)),
+        _ => (None, None),
     };
 
     // 5. Find + rank sources.
@@ -245,6 +247,7 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         season: req_season,
         episode: req_episode,
         episode_title,
+        episode_runtime_minutes,
         include_uncached: cfg.providers.show_uncached,
     };
     let candidates = engine.find_sources(&req).await?;
