@@ -13,10 +13,13 @@
 //! - [`stream`] — [`SourceCandidate`] (a found file) and [`Playback`] (a resolved,
 //!   player-openable URL), plus [`Quality`]/[`CacheState`].
 //! - [`tracking`] — [`SkipTimes`], [`WatchProgress`], [`ListStatus`], [`Activity`].
+//! - [`subtitle`] — [`SubtitleQuery`] (a metadata-only search) and [`SubtitleTrack`]
+//!   (a decoded, player-ready subtitle).
 //! - [`title`] — pure human-facing title formatting (mpv media-title + presence).
 //! - [`ports`] — the trait boundaries: [`MetadataProvider`], [`SourceProvider`],
 //!   [`DebridProvider`], [`StreamResolver`], [`Player`]/[`PlaybackControl`],
-//!   [`Tracker`], [`Enricher`], [`HistoryStore`], [`PresenceReporter`].
+//!   [`Tracker`], [`Enricher`], [`HistoryStore`], [`PresenceReporter`],
+//!   [`SubtitleProvider`].
 //! - [`scoring`] — pure, tested candidate ranking.
 //!
 //! See `docs/ARCHITECTURE.md` for how these compose into the playback pipeline.
@@ -36,6 +39,8 @@
 //! [`WatchProgress`]: tracking::WatchProgress
 //! [`ListStatus`]: tracking::ListStatus
 //! [`Activity`]: tracking::Activity
+//! [`SubtitleQuery`]: subtitle::SubtitleQuery
+//! [`SubtitleTrack`]: subtitle::SubtitleTrack
 //! [`MetadataProvider`]: ports::MetadataProvider
 //! [`SourceProvider`]: ports::SourceProvider
 //! [`DebridProvider`]: ports::DebridProvider
@@ -46,13 +51,17 @@
 //! [`Enricher`]: ports::Enricher
 //! [`HistoryStore`]: ports::HistoryStore
 //! [`PresenceReporter`]: ports::PresenceReporter
+//! [`SubtitleProvider`]: ports::SubtitleProvider
 
 pub mod error;
 pub mod model;
 pub mod ports;
 pub mod scoring;
 pub mod stream;
+pub mod subtitle;
 pub mod title;
 pub mod tracking;
 
 pub use error::{CoreError, CoreResult};
+pub use ports::SubtitleProvider;
+pub use subtitle::{SubtitleQuery, SubtitleTrack};

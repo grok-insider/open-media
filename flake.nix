@@ -36,9 +36,17 @@
             inherit version;
             src = ./.;
 
-            # No git dependencies in the workspace, so the lockfile alone is
-            # enough — no outputHashes needed.
-            cargoLock.lockFile = ./Cargo.lock;
+            # om-subs pulls the open-subtitle engine (the `os-*` crates) over git,
+            # so the lockfile alone is not enough: Nix needs a fixed-output hash for
+            # the vendored git source. All `os-*` crates share ONE git source
+            # (same repo + tag/rev), so a single outputHashes entry — keyed by any
+            # one crate from that source — covers them all.
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "os-core-0.2.0" = "sha256-KLur3feP5v6wuiXddRpppMYaGSdtvlQaHF9llcpvTA0=";
+              };
+            };
 
             # Build only the binary crate (and its deps), not the whole workspace.
             cargoBuildFlags = [ "-p" "om-cli" ];
