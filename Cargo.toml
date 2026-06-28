@@ -8,6 +8,7 @@ members = [
     "crates/om-debrid",
     "crates/om-stream",
     "crates/om-player",
+    "crates/om-subs",
     "crates/om-track",
     "crates/om-history",
     "crates/om-app",
