@@ -178,6 +178,8 @@ pub struct Episode {
     pub overview: Option<String>,
     pub runtime_minutes: Option<u32>,
     pub rating: Option<f32>,
+    /// Episode still/thumbnail image URL (for terminals with image protocols).
+    pub still: Option<String>,
 }
 
 impl Episode {
