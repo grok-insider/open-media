@@ -1,0 +1,30 @@
+[package]
+name = "om-subs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "SubtitleProvider adapter wrapping the open-subtitle engine (OpenSubtitles, SubDL, Jimaku, ...)."
+
+[dependencies]
+om-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# The open-subtitle engine, pinned to a release tag. These are sibling-workspace
+# crates fetched over git (no crates.io publish); the tag keeps the build
+# reproducible. om-subs is the only place that names them — the rest of
+# open-media stays behind the SubtitleProvider port.
+os-core = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-config = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-compose = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-engine = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

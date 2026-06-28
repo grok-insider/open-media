@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use crate::error::CoreResult;
 use crate::model::{Episode, IdSet, Media, MediaKind, Season};
 use crate::stream::{Playback, SourceCandidate};
+use crate::subtitle::{SubtitleQuery, SubtitleTrack};
 use crate::tracking::{Activity, ListStatus, SkipTimes, WatchProgress};
 
 /// Discovers and describes media (TMDB, AniList).
@@ -263,6 +264,21 @@ pub trait HistoryStore: Send + Sync {
         episode: u32,
     ) -> CoreResult<Option<WatchProgress>>;
     fn recent(&self, limit: usize) -> CoreResult<Vec<WatchProgress>>;
+}
+
+/// Finds external subtitles for a media item (OpenSubtitles, …).
+///
+/// Metadata-only by design: open-media plays a stream URL, not a local file, so a
+/// provider searches by title + season/episode ([`SubtitleQuery`]) rather than by
+/// file hash, and returns decoded [`SubtitleTrack`]s. Like the other discovery
+/// ports, multiple providers can run concurrently and have their results merged.
+///
+/// [`SubtitleQuery`]: crate::subtitle::SubtitleQuery
+/// [`SubtitleTrack`]: crate::subtitle::SubtitleTrack
+#[async_trait]
+pub trait SubtitleProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn fetch(&self, query: &SubtitleQuery) -> CoreResult<Vec<SubtitleTrack>>;
 }
 
 /// Reports a "now watching" activity to a presence service (Discord RPC).

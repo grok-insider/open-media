@@ -6,6 +6,11 @@ name: guard master
 # protection can require a check but can't express "only this branch may merge",
 # so this job is that check: it fails any PR into `master` whose head is not
 # `dev`. Add it to master's required status checks to make it blocking.
+#
+# Exception: release-plz opens its automated release PR from a `release-plz-*`
+# branch straight into `master` (it bumps the version + regenerates CHANGELOG.md).
+# That is a sanctioned, machine-generated path, so it is allowlisted here —
+# otherwise no release could ever merge.
 
 on:
   pull_request:
@@ -16,14 +21,17 @@ jobs:
     name: only dev into master
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the PR head branch is dev
+      - name: Verify the PR head branch is dev (or release-plz)
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          if [ "$HEAD_REF" = "dev" ]; then
-            echo "OK: PR into master comes from 'dev'."
-          else
-            echo "::error::PRs into 'master' must come from 'dev' (got '$HEAD_REF')."
-            echo "Land your work in 'dev' first, then open a single 'dev -> master' PR."
-            exit 1
-          fi
+          case "$HEAD_REF" in
+            dev|release-plz-*)
+              echo "OK: PR into master comes from '$HEAD_REF'."
+              ;;
+            *)
+              echo "::error::PRs into 'master' must come from 'dev' (got '$HEAD_REF')."
+              echo "Land your work in 'dev' first, then open a single 'dev -> master' PR."
+              exit 1
+              ;;
+          esac

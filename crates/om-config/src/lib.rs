@@ -32,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub behavior: Behavior,
     #[serde(default)]
+    pub subtitles: Subtitles,
+    #[serde(default)]
     pub ui: Ui,
 }
 
@@ -185,6 +187,30 @@ impl Default for Behavior {
             resume: true,
             complete_threshold: default_complete_threshold(),
             discord_presence: false,
+        }
+    }
+}
+
+/// External subtitle auto-fetch (open-subtitle). Off by default — it adds a
+/// network round-trip before playback, so it is opt-in.
+///
+/// `Default` is implemented by hand (not derived) so it matches the
+/// `#[serde(default = ...)]` field defaults; a test asserts the two agree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subtitles {
+    /// Fetch external subtitles before launching the player and pass them in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preferred subtitle language tags, most-wanted first (e.g. `["en", "ja"]`).
+    #[serde(default = "default_subtitle_languages")]
+    pub languages: Vec<String>,
+}
+
+impl Default for Subtitles {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            languages: default_subtitle_languages(),
         }
     }
 }
@@ -352,6 +378,9 @@ fn default_stream_port() -> u16 {
 fn default_complete_threshold() -> f32 {
     0.85
 }
+fn default_subtitle_languages() -> Vec<String> {
+    vec!["en".to_string()]
+}
 fn default_theme() -> String {
     "auto".to_string()
 }
@@ -498,6 +527,28 @@ tmdb_api_key = "abc"
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert!(back.behavior.autoplay_next);
+    }
+
+    #[test]
+    fn subtitles_default_and_roundtrip() {
+        // Defaults on an empty document match the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.subtitles.enabled);
+        assert_eq!(cfg.subtitles.languages, vec!["en".to_string()]);
+        assert_eq!(cfg.subtitles.enabled, Subtitles::default().enabled);
+        assert_eq!(cfg.subtitles.languages, Subtitles::default().languages);
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.subtitles.enabled = true;
+        c.subtitles.languages = vec!["ja".into(), "en".into()];
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.subtitles.enabled);
+        assert_eq!(
+            back.subtitles.languages,
+            vec!["ja".to_string(), "en".to_string()]
+        );
     }
 
     #[test]
