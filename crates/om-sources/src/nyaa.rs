@@ -17,11 +17,14 @@ use reqwest::Client;
 use crate::tags::{parse_release_name, parse_size_to_bytes};
 
 const DEFAULT_BASE: &str = "https://nyaa.si";
+/// nyaa.si category for English-translated anime.
+const DEFAULT_CATEGORY: &str = "1_2";
 
 /// Direct nyaa.si RSS source (anime only).
 pub struct NyaaSource {
     client: Client,
     base_url: String,
+    category: String,
 }
 
 impl NyaaSource {
@@ -29,6 +32,17 @@ impl NyaaSource {
         Self {
             client: Client::new(),
             base_url: DEFAULT_BASE.to_string(),
+            category: DEFAULT_CATEGORY.to_string(),
+        }
+    }
+
+    /// Build a source for a specific nyaa category (the `c=` RSS parameter, e.g.
+    /// `"1_2"` for English-translated anime, `"1_3"` for raw/untranslated).
+    pub fn with_category(category: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: DEFAULT_BASE.to_string(),
+            category: category.into(),
         }
     }
 
@@ -36,6 +50,7 @@ impl NyaaSource {
         Self {
             client: Client::new(),
             base_url: base_url.into(),
+            category: DEFAULT_CATEGORY.to_string(),
         }
     }
 
@@ -87,10 +102,10 @@ impl SourceProvider for NyaaSource {
     async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
         let (qtext, base, ordinal) = Self::plan_query(query);
         let q = urlencoding::encode(&qtext).into_owned();
-        // c=1_2 = English-translated anime, sorted by seeders desc.
+        // c defaults to 1_2 (English-translated anime), sorted by seeders desc.
         let url = format!(
-            "{}/?page=rss&q={q}&c=1_2&f=0&s=seeders&o=desc",
-            self.base_url
+            "{}/?page=rss&q={q}&c={}&f=0&s=seeders&o=desc",
+            self.base_url, self.category
         );
         tracing::debug!(%url, ordinal, "nyaa rss request");
 
@@ -197,13 +212,13 @@ pub fn parse_rss(xml: &str) -> CoreResult<Vec<SourceCandidate>> {
     let mut cur: Option<RawItem> = None;
     let mut field: Option<Field> = None;
 
-    let err = |e: quick_xml::Error| CoreError::Parse {
+    let err = |e: &dyn std::fmt::Display| CoreError::Parse {
         what: "nyaa rss".into(),
         message: e.to_string(),
     };
 
     loop {
-        match reader.read_event().map_err(err)? {
+        match reader.read_event().map_err(|e| err(&e))? {
             Event::Eof => break,
             Event::Start(e) => match local_name(e.name().as_ref()).as_str() {
                 "item" => cur = Some(RawItem::default()),
@@ -213,7 +228,7 @@ pub fn parse_rss(xml: &str) -> CoreResult<Vec<SourceCandidate>> {
                 "size" if cur.is_some() => field = Some(Field::Size),
                 _ => {}
             },
-            Event::Text(t) => assign(&mut cur, field, &t.unescape().map_err(err)?),
+            Event::Text(t) => assign(&mut cur, field, &t.xml_content().map_err(|e| err(&e))?),
             Event::CData(c) => assign(&mut cur, field, &String::from_utf8_lossy(c.as_ref())),
             Event::End(e) => {
                 if local_name(e.name().as_ref()) == "item" {

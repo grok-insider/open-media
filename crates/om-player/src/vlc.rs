@@ -49,6 +49,9 @@ impl Player for VlcPlayer {
         if let Some(title) = &opts.title {
             cmd.arg(format!("--meta-title={title}"));
         }
+        if let Some(secs) = opts.start_at_secs {
+            cmd.arg(format!("--start-time={secs}"));
+        }
         for a in &self.args {
             cmd.arg(a);
         }

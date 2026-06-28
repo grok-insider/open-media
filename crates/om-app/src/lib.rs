@@ -41,6 +41,10 @@ pub struct PlayRequest {
     /// one. Threaded into the player's media-title; `None` degrades gracefully to
     /// just the `S01E01` coordinate. Always `None` for movies.
     pub episode_title: Option<String>,
+    /// Selected episode's runtime in minutes, when the metadata provider supplied
+    /// one. Forwarded (as seconds) to the [`Enricher`] so AniSkip can validate
+    /// skip intervals against the episode length; `None` disables that check.
+    pub episode_runtime_minutes: Option<u32>,
     pub include_uncached: bool,
 }
 
@@ -93,7 +97,13 @@ impl Engine {
         let mut last_err = None;
         for provider in &self.metadata {
             match provider.details(ids).await {
-                Ok(media) => return Ok(media),
+                // The answering provider only knows its own id dialect; fold in
+                // the ids discovered during search so cross-provider ids (e.g. a
+                // mal id from AniList) survive into the hydrated result.
+                Ok(mut media) => {
+                    media.ids.merge(ids);
+                    return Ok(media);
+                }
                 Err(e) => last_err = Some(e),
             }
         }
@@ -211,10 +221,13 @@ impl Engine {
             .map(|p| p.position_secs)
             .filter(|s| *s > 5);
 
-        // 3. Skip windows (best-effort — anime, via the enricher).
+        // 3. Skip windows (best-effort — anime, via the enricher). Forward the
+        //    episode runtime (minutes → seconds) when known so AniSkip can validate
+        //    intervals against the episode length.
+        let episode_length_secs = req.episode_runtime_minutes.map(|m| m * 60);
         let skip = match &self.enricher {
             Some(e) => e
-                .skip_times(&req.media.ids, episode)
+                .skip_times(&req.media.ids, episode, episode_length_secs)
                 .await
                 .unwrap_or_default(),
             None => SkipTimes::default(),
@@ -567,6 +580,48 @@ mod tests {
     async fn search_without_providers_errors() {
         let engine = Engine::builder().build();
         assert!(engine.search("x", None).await.is_err());
+    }
+
+    // A metadata provider whose `details` answers with only the ids it knows
+    // (here: anilist), dropping any others the caller already discovered.
+    struct PartialDetailsMeta;
+
+    #[async_trait]
+    impl MetadataProvider for PartialDetailsMeta {
+        fn name(&self) -> &str {
+            "partial"
+        }
+        async fn search(&self, _query: &str, _kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+            Ok(vec![])
+        }
+        async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+            // Note: no mal id — the provider only speaks anilist.
+            Ok(media_with_ids(
+                "Frieren",
+                IdSet::default().with_anilist(154587),
+            ))
+        }
+        async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+            Ok(vec![])
+        }
+        async fn episodes(&self, _ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn details_merges_input_ids_into_result() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(PartialDetailsMeta))
+            .build();
+        // Caller carries a mal id discovered during search; the provider's
+        // result lacks it and must not drop it.
+        let media = engine
+            .details(&IdSet::default().with_anilist(154587).with_mal(52991))
+            .await
+            .unwrap();
+        assert_eq!(media.ids.mal, Some(52991));
+        assert_eq!(media.ids.anilist, Some(154587));
     }
 
     fn media_with_ids(title: &str, ids: IdSet) -> Media {

@@ -46,7 +46,7 @@ om-app = { path = "crates/om-app", version = "0.2.0" }
 # contract stays I/O-free and the workspace builds fast.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "0.9"
 thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
@@ -55,13 +55,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-dirs = "5"
+dirs = "6"
 # HTTP + parsing for the network adapters.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"
 futures = "0.3"
 regex = "1"
-quick-xml = { version = "0.36", features = ["serialize"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
 # Test-only: in-process mock HTTP server for adapter e2e/integration tests.
 wiremock = "0.6"
 

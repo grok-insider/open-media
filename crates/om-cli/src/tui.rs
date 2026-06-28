@@ -17,7 +17,10 @@ use om_core::model::{Episode, Media, MediaKind, Season};
 use om_core::stream::{CacheState, Quality, SourceCandidate};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_image::Image;
 use tokio::sync::mpsc;
+
+use crate::stills::{StillMsg, Stills};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -26,6 +29,15 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 const PANEL_MIN_WIDTH: u16 = 100;
 /// Width of the Sources side panel.
 const PANEL_WIDTH: u16 = 34;
+/// Width of the Episodes detail side panel (a touch wider — it holds wrapped
+/// synopsis text).
+const EPISODE_PANEL_WIDTH: u16 = 40;
+/// Rows reserved at the top of the episode panel for the still image.
+const STILL_ROWS: u16 = 11;
+/// Target cell box `(cols, rows)` the still is resized to fit. Width matches the
+/// panel interior (border-inset); `Resize::Fit` keeps the aspect ratio within
+/// this, so landscape stills won't use the full height.
+const STILL_TARGET_CELLS: (u16, u16) = (EPISODE_PANEL_WIDTH - 2, STILL_ROWS);
 
 /// Which screen is active.
 #[derive(PartialEq)]
@@ -317,6 +329,9 @@ struct App {
     sel_season: Option<u32>,
     sel_episode: Option<u32>,
     sel_episode_title: Option<String>,
+    /// Selected episode's runtime (minutes), forwarded to AniSkip for interval
+    /// validation. `None` for movies/unknown.
+    sel_episode_runtime: Option<u32>,
 
     candidates: Vec<SourceCandidate>,
     candidates_state: ListState,
@@ -332,6 +347,11 @@ struct App {
     languages: Vec<String>,
     providers: Vec<String>,
 
+    /// Terminal-image rendering for episode stills / posters (kitty/sixel/
+    /// iTerm2, or unicode half-blocks). Holds the detected picker + still cache.
+    stills: Stills,
+    still_tx: mpsc::UnboundedSender<StillMsg>,
+
     tx: mpsc::UnboundedSender<Msg>,
 }
 
@@ -340,6 +360,8 @@ impl App {
         engine: Arc<Engine>,
         cfg: Config,
         tx: mpsc::UnboundedSender<Msg>,
+        stills: Stills,
+        still_tx: mpsc::UnboundedSender<StillMsg>,
         initial_query: Option<String>,
     ) -> Self {
         let filters = SourceFilters::from_cfg(&cfg.ui.sources);
@@ -362,6 +384,7 @@ impl App {
             sel_season: None,
             sel_episode: None,
             sel_episode_title: None,
+            sel_episode_runtime: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
             cfg,
@@ -371,6 +394,8 @@ impl App {
             visible: Vec::new(),
             languages: Vec::new(),
             providers: Vec::new(),
+            stills,
+            still_tx,
             tx,
         }
     }
@@ -409,6 +434,29 @@ impl App {
         let sel = self.candidates_state.selected()?;
         let idx = *self.visible.get(sel)?;
         self.candidates.get(idx)
+    }
+
+    /// The image URL to show for the currently-highlighted episode: its own
+    /// still if it has one, else the series poster as a fallback.
+    fn current_still_url(&self) -> Option<&str> {
+        let ep = self.episodes.get(self.episodes_state.selected()?)?;
+        ep.still
+            .as_deref()
+            .or(self.media.as_ref().and_then(|m| m.poster.as_deref()))
+    }
+
+    /// Ask the still loader to fetch the image for the selected episode. Cheap
+    /// to call every frame: it only acts on the Episodes screen when images are
+    /// supported, and the loader ignores URLs already loading/ready/failed.
+    fn request_visible_still(&mut self) {
+        if self.screen != Screen::Episodes || !self.stills.enabled() {
+            return;
+        }
+        let Some(url) = self.current_still_url().map(str::to_string) else {
+            return;
+        };
+        self.stills
+            .request(&url, STILL_TARGET_CELLS, self.still_tx.clone());
     }
 
     fn handle_msg(&mut self, msg: Msg) {
@@ -473,10 +521,17 @@ impl App {
 pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> anyhow::Result<()> {
     let engine = Arc::new(engine);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut app = App::new(engine, cfg, tx, initial_query);
+    let (still_tx, mut still_rx) = mpsc::unbounded_channel();
 
+    // Enter the alternate screen *before* probing terminal graphics support:
+    // `Stills::detect` briefly reads/writes stdio, which must happen after the
+    // alt-screen switch but before we start consuming key events.
     let mut term = setup_terminal()?;
-    let result = run_loop(&mut term, &mut app, &mut rx).await;
+    let stills = Stills::detect();
+
+    let mut app = App::new(engine, cfg, tx, stills, still_tx, initial_query);
+
+    let result = run_loop(&mut term, &mut app, &mut rx, &mut still_rx).await;
     restore_terminal(&mut term)?;
 
     // Persist the Sources panel's filter/sort selections for next time.
@@ -491,6 +546,7 @@ async fn run_loop(
     term: &mut Term,
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
+    still_rx: &mut mpsc::UnboundedReceiver<StillMsg>,
 ) -> anyhow::Result<()> {
     loop {
         term.draw(|f| draw(f, app))?;
@@ -505,6 +561,13 @@ async fn run_loop(
         while let Ok(msg) = rx.try_recv() {
             app.handle_msg(msg);
         }
+        // Apply any finished still loads, then request the still for the
+        // currently-selected episode (idempotent — the cache debounces it).
+        while let Ok(msg) = still_rx.try_recv() {
+            app.stills.apply(msg);
+        }
+        app.request_visible_still();
+
         if app.should_quit {
             return Ok(());
         }
@@ -693,6 +756,7 @@ fn select_result(app: &mut App) {
     app.sel_season = None;
     app.sel_episode = None;
     app.sel_episode_title = None;
+    app.sel_episode_runtime = None;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
@@ -700,7 +764,7 @@ fn select_result(app: &mut App) {
         let media = engine.details(&media.ids).await.unwrap_or(media);
         if media.kind == MediaKind::Movie {
             // Movies have no coordinates or episode title.
-            send_sources(&engine, &tx, media, None, None, None).await;
+            send_sources(&engine, &tx, media, None, None, None, None).await;
             return;
         }
         // Episodic: list seasons. >1 → picker; otherwise jump straight to the
@@ -759,6 +823,7 @@ fn fallback_episodes(season: u32, count: u32) -> Vec<Episode> {
             overview: None,
             runtime_minutes: None,
             rating: None,
+            still: None,
         })
         .collect()
 }
@@ -774,16 +839,23 @@ fn select_episode(app: &mut App) {
     app.sel_season = Some(ep.season);
     app.sel_episode = Some(ep.number);
     app.sel_episode_title = ep.title.clone();
+    app.sel_episode_runtime = ep.runtime_minutes;
     app.busy = true;
     app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
     let tx = app.tx.clone();
-    let (season, episode, title) = (Some(ep.season), Some(ep.number), ep.title);
+    let (season, episode, title, runtime) = (
+        Some(ep.season),
+        Some(ep.number),
+        ep.title,
+        ep.runtime_minutes,
+    );
     tokio::spawn(async move {
-        send_sources(&engine, &tx, media, season, episode, title).await;
+        send_sources(&engine, &tx, media, season, episode, title, runtime).await;
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_sources(
     engine: &Arc<Engine>,
     tx: &mpsc::UnboundedSender<Msg>,
@@ -791,12 +863,14 @@ async fn send_sources(
     season: Option<u32>,
     episode: Option<u32>,
     episode_title: Option<String>,
+    episode_runtime_minutes: Option<u32>,
 ) {
     let req = PlayRequest {
         media: media.clone(),
         season,
         episode,
         episode_title,
+        episode_runtime_minutes,
         include_uncached: true,
     };
     let _ = match engine.find_sources(&req).await {
@@ -817,6 +891,7 @@ fn play_selected(app: &mut App) {
     let season = app.sel_season;
     let episode = app.sel_episode;
     let episode_title = app.sel_episode_title.clone();
+    let episode_runtime_minutes = app.sel_episode_runtime;
     app.busy = true;
     app.status = format!("Playing {}…", media.display_title());
 
@@ -828,6 +903,7 @@ fn play_selected(app: &mut App) {
             season,
             episode,
             episode_title,
+            episode_runtime_minutes,
             include_uncached: true,
         };
         let _ = tx.send(Msg::Status("Resolving + launching player…".into()));
@@ -938,18 +1014,164 @@ fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
+    // Split off a passive detail panel when there's room; otherwise the list
+    // takes the full width (narrow terminals aren't squeezed).
+    let show_panel = area.width >= PANEL_MIN_WIDTH;
+    let (list_area, panel_area) = if show_panel {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(EPISODE_PANEL_WIDTH)])
+                .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
     let items: Vec<ListItem> = app
         .episodes
         .iter()
-        .map(|ep| {
-            let label = match &ep.title {
+        .map(|ep| ListItem::new(episode_row(ep)))
+        .collect();
+    render_list(f, list_area, "Episodes", items, &app.episodes_state, true);
+
+    if let Some(panel) = panel_area {
+        draw_episode_panel(f, app, panel);
+    }
+}
+
+/// One list line per episode: `E01 · Title`, falling back to the air date and
+/// then to the bare coordinate when a provider couldn't supply a title.
+fn episode_row(ep: &Episode) -> String {
+    match &ep.title {
+        Some(t) if !t.is_empty() => format!("E{:02} · {t}", ep.number),
+        _ => match &ep.air_date {
+            Some(d) if !d.is_empty() => format!("E{:02}   ({d})", ep.number),
+            _ => format!("E{:02}", ep.number),
+        },
+    }
+}
+
+/// Passive detail panel for the highlighted episode: series context on top,
+/// then the selected episode's title, air date, runtime, rating, and synopsis.
+/// Follows the list cursor; it is not keyboard-focusable.
+fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
+    let sel = app.episodes_state.selected().unwrap_or(0);
+    let ep = app.episodes.get(sel);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let label = |s: &str| Span::styled(s.to_string(), Style::new().fg(Color::DarkGray));
+
+    // --- Series context (from the parent Media) ---
+    if let Some(m) = &app.media {
+        lines.push(Line::from(Span::styled(
+            m.title.clone(),
+            Style::new().fg(Color::Cyan).bold(),
+        )));
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(y) = m.year {
+            meta.push(y.to_string());
+        }
+        if let Some(s) = m.score.filter(|s| *s > 0.0) {
+            meta.push(format!("★ {s:.1}"));
+        }
+        if let (Some(sc), Some(ec)) = (m.season_count, m.episode_count) {
+            meta.push(format!("{sc}S · {ec}E"));
+        } else if let Some(ec) = m.episode_count {
+            meta.push(format!("{ec}E"));
+        }
+        if !meta.is_empty() {
+            lines.push(Line::from(label(&meta.join("   "))));
+        }
+        if !m.genres.is_empty() {
+            lines.push(Line::from(label(&m.genres.join(", "))));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // --- Selected episode ---
+    match ep {
+        Some(ep) => {
+            let title = match &ep.title {
                 Some(t) if !t.is_empty() => format!("E{:02} · {t}", ep.number),
                 _ => format!("E{:02}", ep.number),
             };
-            ListItem::new(label)
-        })
-        .collect();
-    render_list(f, area, "Episodes", items, &app.episodes_state, true);
+            lines.push(Line::from(Span::styled(title, Style::new().bold())));
+
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(d) = &ep.air_date {
+                if !d.is_empty() {
+                    facts.push(format!("Aired {d}"));
+                }
+            }
+            if let Some(r) = ep.runtime_minutes {
+                facts.push(format!("{r} min"));
+            }
+            // Treat a 0.0 rating as "unrated" — Cinemeta returns "0" for
+            // episodes it has no score for, and `★ 0.0` reads as misleading.
+            if let Some(rt) = ep.rating.filter(|r| *r > 0.0) {
+                facts.push(format!("★ {rt:.1}"));
+            }
+            if !facts.is_empty() {
+                lines.push(Line::from(label(&facts.join("   "))));
+            }
+
+            if let Some(o) = &ep.overview {
+                if !o.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(o.clone()));
+                }
+            } else {
+                lines.push(Line::from(""));
+                lines.push(Line::from(label("No synopsis available.")));
+            }
+        }
+        None => lines.push(Line::from(label("No episode selected."))),
+    }
+
+    // Frame the panel, then split the interior into a still image on top and
+    // the text details below.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title("Episode");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (image_area, text_area) = if app.stills.enabled() && inner.height > STILL_ROWS + 2 {
+        let rows =
+            Layout::vertical([Constraint::Length(STILL_ROWS), Constraint::Min(0)]).split(inner);
+        (Some(rows[0]), rows[1])
+    } else {
+        (None, inner)
+    };
+
+    if let Some(img_area) = image_area {
+        draw_still(f, app, img_area);
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), text_area);
+}
+
+/// Render the still for the selected episode into `area`: the decoded image
+/// when ready, otherwise a centered status line (loading / unavailable).
+fn draw_still(f: &mut Frame, app: &App, area: Rect) {
+    let url = app.current_still_url();
+    if let Some(protocol) = url.and_then(|u| app.stills.ready(u)) {
+        // Cheap render of the already-resized+encoded protocol image.
+        f.render_widget(Image::new(protocol), area);
+        return;
+    }
+
+    let status = if url.is_some() {
+        "  loading image…"
+    } else {
+        "  no image"
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            status,
+            Style::new().fg(Color::DarkGray),
+        ))),
+        area,
+    );
 }
 
 fn draw_sources_screen(f: &mut Frame, app: &App, area: Rect) {
@@ -1152,7 +1374,7 @@ fn render_list(
         )
         .highlight_style(Style::new().bg(Color::DarkGray).fg(Color::White).bold())
         .highlight_symbol("▶ ");
-    let mut s = state.clone();
+    let mut s = *state;
     f.render_stateful_widget(list, area, &mut s);
 }
 

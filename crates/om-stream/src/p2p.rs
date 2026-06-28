@@ -96,19 +96,27 @@ impl P2pEngine {
     /// Add a magnet and return its local stream URL.
     pub async fn stream_magnet(&self, magnet: &str) -> CoreResult<Playback> {
         self.ensure_started().await?;
-        let mut guard = self.state.lock().await;
-        let state = guard.as_mut().expect("started");
 
-        // Tear down any previous stream first.
-        if let Some(prev) = state.active.take() {
-            let _ = state
-                .session
+        // Acquire the lock only long enough to clone the handles we need and to
+        // take ownership of any previous torrent id for teardown. The lengthy
+        // add+metadata wait below must NOT hold the state lock, otherwise
+        // concurrent `stream_magnet`/`cleanup` calls serialize behind the ~90s
+        // metadata timeout.
+        let (session, api, prev) = {
+            let mut guard = self.state.lock().await;
+            let state = guard.as_mut().expect("started");
+            let prev = state.active.take();
+            (state.session.clone(), state.api.clone(), prev)
+        };
+
+        // Tear down any previous stream first (lock released).
+        if let Some(prev) = prev {
+            let _ = session
                 .delete(prev.into(), self.cleanup_after_playback)
                 .await;
         }
 
-        let response = state
-            .session
+        let response = session
             .add_torrent(
                 AddTorrent::from_url(magnet),
                 Some(AddTorrentOptions {
@@ -127,21 +135,36 @@ impl P2pEngine {
             }
         };
 
-        // Wait for metadata (file list + sizes) to arrive.
+        // Wait for metadata (file list + sizes) to arrive. The lock is NOT held
+        // here, so other calls can proceed/clean up concurrently.
         let start = Instant::now();
         loop {
             if handle.stats().total_bytes > 0 {
                 break;
             }
             if start.elapsed() > METADATA_TIMEOUT {
-                let _ = state.session.delete(id.into(), true).await;
+                let _ = session.delete(id.into(), true).await;
                 return Err(CoreError::Timeout("p2p: metadata not received".into()));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let (file_index, file_name) = pick_video_file(&state.api, id)?;
-        state.active = Some(id);
+        let (file_index, file_name) = pick_video_file(&api, id)?;
+
+        // Re-acquire briefly to record the now-active torrent. If a concurrent
+        // call set a different active torrent while we were waiting, tear that
+        // one down so we don't leak it. The guard is dropped before the (short)
+        // delete await so we never hold the lock across an await.
+        let stale = {
+            let mut guard = self.state.lock().await;
+            let state = guard.as_mut().expect("started");
+            state.active.replace(id).filter(|&prev| prev != id)
+        };
+        if let Some(stale) = stale {
+            let _ = session
+                .delete(stale.into(), self.cleanup_after_playback)
+                .await;
+        }
 
         let url = format!(
             "http://127.0.0.1:{}/torrents/{}/stream/{}",
