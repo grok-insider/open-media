@@ -114,11 +114,31 @@ Still open:
 
 ---
 
-## Note: release workflow (in place)
+## Note: release workflow
 
-Releases are automated with **release-plz** (`release-plz.toml` +
-`.github/workflows/release.yml`); `v0.1.0` is tagged. **`CHANGELOG.md` is generated
-from Conventional Commits — do not hand-edit it.** Land each item above with a
-`fix:`/`feat:` (or `docs:`/`refactor:`/etc.) commit so the version bump and
-changelog entry are produced automatically. See `CONTRIBUTING.md` → Releases and
-`AGENTS.md` → Releasing & versioning.
+Releases use **release-plz** (`release-plz.toml` + `.github/workflows/release.yml`);
+`v0.3.0` is the current tag. Land work with `feat:`/`fix:` Conventional Commits so
+the version bump and changelog stay meaningful.
+
+### ⚠️ release-plz caveat (om-subs git dependency)
+
+`om-subs` git-depends on the open-subtitle engine. release-plz's **release-PR**
+(change-detection) step copies each crate into an isolated worktree and runs
+`cargo package` there, where the git source can't resolve → it fails with
+`Failed to find package "om-subs"`. The upstream fix (a source-dir fallback,
+[release-plz/release-plz#2789](https://github.com/release-plz/release-plz/pull/2789))
+is open/unmerged. Until it lands:
+
+- The **`release-plz PR` job is marked `continue-on-error: true`** (non-blocking);
+  it will show as failed but won't fail the workflow or block anything.
+- **Cut releases with a manual version bump:** edit `[workspace.package].version`
+  in the root `Cargo.toml` (all crates inherit it), update `Cargo.lock`, and
+  hand-write the new `CHANGELOG.md` section, in a `chore(release): X.Y.Z` commit
+  merged through `dev → master`. The **`release-plz release` job is unaffected**
+  and cuts the `vX.Y.Z` tag + GitHub Release + binary matrix on the master push.
+
+**Durable fix options** (when ready): wait for #2789 to merge upstream (then drop
+`continue-on-error`); or rename + publish the open-subtitle `os-*` libs under
+free crates.io names so `om-subs` uses normal version deps (the current names
+`os-core`/`os-engine`/`os-compose`/`os-config` are already taken); or vendor the
+open-subtitle crates in-tree. See `CONTRIBUTING.md` → Releases.
