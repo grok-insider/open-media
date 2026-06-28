@@ -9,6 +9,7 @@
 mod compose;
 mod login;
 mod stills;
+mod telemetry;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -65,7 +66,7 @@ enum ConfigAction {
     /// Set a key: `om config set tmdb_api_key=...`.
     Set {
         /// `key=value`. Keys: tmdb_api_key, real_debrid_token, anilist_token,
-        /// mal_token, debrid_provider, player_command.
+        /// mal_token, debrid_provider, player_command, telemetry.
         kv: String,
     },
 }
@@ -107,13 +108,14 @@ fn init_tracing(tui_mode: bool) {
 
 /// Default (no subcommand): the interactive TUI.
 async fn run_interactive() -> anyhow::Result<()> {
-    let cfg = match om_config::load() {
+    let mut cfg = match om_config::load() {
         Ok(c) => c,
         Err(_) => {
             println!("No configuration found. Run `om init` first.");
             return Ok(());
         }
     };
+    telemetry::startup(&mut cfg);
     let engine = compose::build_engine(&cfg);
     tui::run(engine, cfg, None).await
 }
@@ -125,7 +127,11 @@ fn cmd_init() -> anyhow::Result<()> {
         println!("Edit it directly, or use `om config set key=value`.");
         return Ok(());
     }
-    let cfg = om_config::Config::default();
+    let mut cfg = om_config::Config::default();
+    // Mint the stable install id now and mark the telemetry notice as shown, since
+    // we print it here — so the first real command does not repeat it.
+    cfg.ensure_install_id();
+    cfg.telemetry.notified = true;
     om_config::save(&cfg)?;
     println!("Created {}", path.display());
     println!();
@@ -136,6 +142,10 @@ fn cmd_init() -> anyhow::Result<()> {
     println!(
         "Get keys: https://real-debrid.com/apitoken  +  https://www.themoviedb.org/settings/api"
     );
+    println!();
+    println!("Anonymous usage analytics (OS, arch, version, a random id) are ON by");
+    println!("default to count active installs — never anything you watch. Opt out with:");
+    println!("  om config set telemetry=false");
     Ok(())
 }
 
@@ -213,6 +223,15 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
 
             println!("[ui]");
             println!("  theme                 = {}", cfg.ui.theme);
+
+            println!("[telemetry]");
+            println!("  enabled               = {}", cfg.telemetry.enabled);
+            // The install id is not a secret, but it is the analytics identifier;
+            // show only its presence, not the raw value.
+            println!(
+                "  install_id            = {}",
+                mask(&cfg.telemetry.install_id)
+            );
             Ok(())
         }
         ConfigAction::Set { kv } => {
@@ -240,6 +259,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 "autoplay_next" => cfg.behavior.autoplay_next = parse_bool(key, value)?,
                 "resume" => cfg.behavior.resume = parse_bool(key, value)?,
                 "discord_presence" => cfg.behavior.discord_presence = parse_bool(key, value)?,
+                "telemetry" => cfg.telemetry.enabled = parse_bool(key, value)?,
                 "cleanup_after_playback" => {
                     cfg.streaming.cleanup_after_playback = parse_bool(key, value)?
                 }
@@ -264,7 +284,8 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
 }
 
 async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
-    let cfg = load_or_hint()?;
+    let mut cfg = load_or_hint()?;
+    telemetry::startup(&mut cfg);
     let engine = compose::build_engine(&cfg);
     match engine.search(query, parse_kind(kind)).await {
         Ok(results) if results.is_empty() => {
@@ -288,7 +309,8 @@ async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
 async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> anyhow::Result<()> {
     use om_app::PlayRequest;
 
-    let cfg = load_or_hint()?;
+    let mut cfg = load_or_hint()?;
+    telemetry::startup(&mut cfg);
     let engine = compose::build_engine(&cfg);
 
     // 1. Search and take the best match.

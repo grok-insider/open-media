@@ -26,6 +26,7 @@ use crate::model::{Episode, IdSet, Media, MediaKind, Season};
 use crate::stream::{Playback, SourceCandidate};
 use crate::subtitle::{SubtitleQuery, SubtitleTrack};
 use crate::tracking::{Activity, ListStatus, SkipTimes, WatchProgress};
+use crate::usage::UsageInfo;
 
 /// Discovers and describes media (TMDB, AniList).
 ///
@@ -286,4 +287,15 @@ pub trait SubtitleProvider: Send + Sync {
 pub trait PresenceReporter: Send + Sync {
     async fn update(&self, activity: &Activity) -> CoreResult<()>;
     async fn clear(&self) -> CoreResult<()>;
+}
+
+/// Emits an anonymous [`UsageInfo`] snapshot for active-install analytics.
+///
+/// Contract: this is **best-effort and non-identifying**. Implementations must
+/// never block or fail the caller (a dead endpoint is a no-op, not an error), and
+/// must transmit only the fields in [`UsageInfo`] — never anything about what the
+/// user watches. The reporter is wired only when the user has telemetry enabled.
+#[async_trait]
+pub trait UsageReporter: Send + Sync {
+    async fn report(&self, info: &UsageInfo) -> CoreResult<()>;
 }
