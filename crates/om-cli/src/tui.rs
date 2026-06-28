@@ -39,6 +39,76 @@ const STILL_ROWS: u16 = 11;
 /// this, so landscape stills won't use the full height.
 const STILL_TARGET_CELLS: (u16, u16) = (EPISODE_PANEL_WIDTH - 2, STILL_ROWS);
 
+/// Semantic colors the TUI draws with. Replaces scattered `Color::*` literals
+/// so the palette can be swapped wholesale by `ui.theme`. Two presets exist:
+/// [`Theme::dark`] (the historical hardcoded look) and [`Theme::light`].
+#[derive(Clone, Copy)]
+struct Theme {
+    /// Headings, focused borders, primary highlights.
+    accent: Color,
+    /// Footer/status body text.
+    status: Color,
+    /// Secondary/label text and unfocused borders.
+    dim: Color,
+    /// Selection / highlight background.
+    selection_bg: Color,
+    /// Selection / highlight foreground.
+    selection_fg: Color,
+}
+
+impl Theme {
+    /// The original hardcoded palette — kept byte-for-byte so `dark`/`auto` is a
+    /// no-op for existing users.
+    fn dark() -> Self {
+        Self {
+            accent: Color::Cyan,
+            status: Color::Gray,
+            dim: Color::DarkGray,
+            selection_bg: Color::DarkGray,
+            selection_fg: Color::White,
+        }
+    }
+
+    /// A light palette: a deeper accent that reads on light backgrounds, darker
+    /// dim/secondary text, and a light selection band with dark text.
+    fn light() -> Self {
+        Self {
+            accent: Color::Blue,
+            status: Color::DarkGray,
+            dim: Color::Gray,
+            selection_bg: Color::Gray,
+            selection_fg: Color::Black,
+        }
+    }
+
+    /// Pick a preset from `cfg.ui.theme` (`"light"` → light; `"dark"`/`"auto"`/
+    /// anything else → dark). `"auto"` maps to dark for now; true
+    /// terminal-background detection is a follow-up.
+    fn from_cfg(theme: &str) -> Self {
+        match theme.trim().to_ascii_lowercase().as_str() {
+            "light" => Self::light(),
+            _ => Self::dark(),
+        }
+    }
+
+    /// Border color for a pane given its focus state.
+    fn border(&self, focused: bool) -> Color {
+        if focused {
+            self.accent
+        } else {
+            self.dim
+        }
+    }
+
+    /// The shared list highlight style (selection band).
+    fn highlight(&self) -> Style {
+        Style::new()
+            .bg(self.selection_bg)
+            .fg(self.selection_fg)
+            .bold()
+    }
+}
+
 /// Which screen is active.
 #[derive(PartialEq)]
 enum Screen {
@@ -336,6 +406,9 @@ struct App {
     candidates: Vec<SourceCandidate>,
     candidates_state: ListState,
 
+    /// Resolved color palette (from `cfg.ui.theme`).
+    theme: Theme,
+
     /// Sources side panel: filters/sort, focus, and the derived visible view.
     cfg: Config,
     focus: Focus,
@@ -365,6 +438,7 @@ impl App {
         initial_query: Option<String>,
     ) -> Self {
         let filters = SourceFilters::from_cfg(&cfg.ui.sources);
+        let theme = Theme::from_cfg(&cfg.ui.theme);
         let mut panel_state = ListState::default();
         panel_state.select(Some(0));
         Self {
@@ -387,6 +461,7 @@ impl App {
             sel_episode_runtime: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
+            theme,
             cfg,
             focus: Focus::List,
             filters,
@@ -939,7 +1014,7 @@ fn draw(f: &mut Frame, app: &App) {
     };
     f.render_widget(
         Paragraph::new(title)
-            .style(Style::new().fg(Color::Cyan).bold())
+            .style(Style::new().fg(app.theme.accent).bold())
             .block(Block::default().borders(Borders::ALL)),
         chunks[0],
     );
@@ -966,7 +1041,7 @@ fn draw(f: &mut Frame, app: &App) {
     let spin = if app.busy { "⏳ " } else { "" };
     f.render_widget(
         Paragraph::new(format!("{spin}{}", app.status))
-            .style(Style::new().fg(Color::Gray))
+            .style(Style::new().fg(app.theme.status))
             .block(Block::default().borders(Borders::ALL).title(hints)),
         chunks[2],
     );
@@ -995,7 +1070,15 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(format!("{badge} {}{year}", m.display_title()))
         })
         .collect();
-    render_list(f, area, "Results", items, &app.results_state, true);
+    render_list(
+        f,
+        &app.theme,
+        area,
+        "Results",
+        items,
+        &app.results_state,
+        true,
+    );
 }
 
 fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
@@ -1010,7 +1093,15 @@ fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(format!("{name}  ({} episodes)", s.episode_count))
         })
         .collect();
-    render_list(f, area, "Seasons", items, &app.seasons_state, true);
+    render_list(
+        f,
+        &app.theme,
+        area,
+        "Seasons",
+        items,
+        &app.seasons_state,
+        true,
+    );
 }
 
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
@@ -1031,7 +1122,15 @@ fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|ep| ListItem::new(episode_row(ep)))
         .collect();
-    render_list(f, list_area, "Episodes", items, &app.episodes_state, true);
+    render_list(
+        f,
+        &app.theme,
+        list_area,
+        "Episodes",
+        items,
+        &app.episodes_state,
+        true,
+    );
 
     if let Some(panel) = panel_area {
         draw_episode_panel(f, app, panel);
@@ -1058,13 +1157,13 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
     let ep = app.episodes.get(sel);
 
     let mut lines: Vec<Line> = Vec::new();
-    let label = |s: &str| Span::styled(s.to_string(), Style::new().fg(Color::DarkGray));
+    let label = |s: &str| Span::styled(s.to_string(), Style::new().fg(app.theme.dim));
 
     // --- Series context (from the parent Media) ---
     if let Some(m) = &app.media {
         lines.push(Line::from(Span::styled(
             m.title.clone(),
-            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(app.theme.accent).bold(),
         )));
         let mut meta: Vec<String> = Vec::new();
         if let Some(y) = m.year {
@@ -1131,7 +1230,7 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
     // the text details below.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::DarkGray))
+        .border_style(Style::new().fg(app.theme.dim))
         .title("Episode");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1168,7 +1267,7 @@ fn draw_still(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             status,
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(app.theme.dim),
         ))),
         area,
     );
@@ -1200,7 +1299,15 @@ fn draw_sources_list(f: &mut Frame, app: &App, area: Rect, show_panel: bool) {
         .collect();
     let focused = !show_panel || app.focus == Focus::List;
     let title = format!("Sources ({})", app.visible.len());
-    render_list(f, area, &title, items, &app.candidates_state, focused);
+    render_list(
+        f,
+        &app.theme,
+        area,
+        &title,
+        items,
+        &app.candidates_state,
+        focused,
+    );
 }
 
 /// One scannable line per candidate: cache · quality · size · seeders · provider
@@ -1258,16 +1365,12 @@ fn draw_filter_box(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, r)| {
             let mut item = ListItem::new(r.clone());
             if panel_focused && i == sel {
-                item = item.style(Style::new().bg(Color::DarkGray).fg(Color::White).bold());
+                item = item.style(app.theme.highlight());
             }
             item
         })
         .collect();
-    let border = if panel_focused {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
+    let border = app.theme.border(panel_focused);
     f.render_widget(
         List::new(items).block(
             Block::default()
@@ -1334,7 +1437,7 @@ fn draw_details_box(f: &mut Frame, app: &App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::new().fg(Color::DarkGray))
+                    .border_style(Style::new().fg(app.theme.dim))
                     .title("Details"),
             )
             .wrap(Wrap { trim: true }),
@@ -1354,17 +1457,14 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn render_list(
     f: &mut Frame,
+    theme: &Theme,
     area: Rect,
     title: &str,
     items: Vec<ListItem>,
     state: &ListState,
     focused: bool,
 ) {
-    let border = if focused {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
+    let border = theme.border(focused);
     let list = List::new(items)
         .block(
             Block::default()
@@ -1372,7 +1472,7 @@ fn render_list(
                 .border_style(Style::new().fg(border))
                 .title(title.to_string()),
         )
-        .highlight_style(Style::new().bg(Color::DarkGray).fg(Color::White).bold())
+        .highlight_style(theme.highlight())
         .highlight_symbol("▶ ");
     let mut s = *state;
     f.render_stateful_widget(list, area, &mut s);
