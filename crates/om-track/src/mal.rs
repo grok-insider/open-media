@@ -75,8 +75,7 @@ impl Tracker for MalTracker {
     }
 
     async fn set_status(&self, ids: &IdSet, status: ListStatus) -> CoreResult<()> {
-        self.update(ids, &[("status", status_str(status).to_string())])
-            .await
+        self.update(ids, &status_form(status)).await
     }
 
     async fn rate(&self, ids: &IdSet, score: f32) -> CoreResult<()> {
@@ -96,6 +95,19 @@ fn status_str(status: ListStatus) -> &'static str {
     }
 }
 
+/// Build the form fields for a `my_list_status` update.
+///
+/// MAL has no distinct "rewatching" status; the v2 API models a rewatch as
+/// `status=watching` plus `is_rewatching=true`. Set the flag so a repeat is not
+/// silently collapsed into a first watch.
+fn status_form(status: ListStatus) -> Vec<(&'static str, String)> {
+    let mut form = vec![("status", status_str(status).to_string())];
+    if matches!(status, ListStatus::Repeating) {
+        form.push(("is_rewatching", "true".to_string()));
+    }
+    form
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +117,26 @@ mod tests {
         assert_eq!(status_str(ListStatus::Watching), "watching");
         assert_eq!(status_str(ListStatus::Planning), "plan_to_watch");
         assert_eq!(status_str(ListStatus::Paused), "on_hold");
+    }
+
+    #[test]
+    fn repeating_sets_is_rewatching_flag() {
+        let form = status_form(ListStatus::Repeating);
+        assert_eq!(form[0], ("status", "watching".to_string()));
+        assert!(
+            form.iter()
+                .any(|(k, v)| *k == "is_rewatching" && v == "true"),
+            "repeating status must set is_rewatching=true, got {form:?}"
+        );
+    }
+
+    #[test]
+    fn plain_watching_does_not_set_is_rewatching() {
+        let form = status_form(ListStatus::Watching);
+        assert_eq!(form[0], ("status", "watching".to_string()));
+        assert!(
+            !form.iter().any(|(k, _)| *k == "is_rewatching"),
+            "plain watching must not set is_rewatching, got {form:?}"
+        );
     }
 }
