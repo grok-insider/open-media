@@ -197,13 +197,13 @@ pub fn parse_rss(xml: &str) -> CoreResult<Vec<SourceCandidate>> {
     let mut cur: Option<RawItem> = None;
     let mut field: Option<Field> = None;
 
-    let err = |e: quick_xml::Error| CoreError::Parse {
+    let err = |e: &dyn std::fmt::Display| CoreError::Parse {
         what: "nyaa rss".into(),
         message: e.to_string(),
     };
 
     loop {
-        match reader.read_event().map_err(err)? {
+        match reader.read_event().map_err(|e| err(&e))? {
             Event::Eof => break,
             Event::Start(e) => match local_name(e.name().as_ref()).as_str() {
                 "item" => cur = Some(RawItem::default()),
@@ -213,7 +213,7 @@ pub fn parse_rss(xml: &str) -> CoreResult<Vec<SourceCandidate>> {
                 "size" if cur.is_some() => field = Some(Field::Size),
                 _ => {}
             },
-            Event::Text(t) => assign(&mut cur, field, &t.unescape().map_err(err)?),
+            Event::Text(t) => assign(&mut cur, field, &t.xml_content().map_err(|e| err(&e))?),
             Event::CData(c) => assign(&mut cur, field, &String::from_utf8_lossy(c.as_ref())),
             Event::End(e) => {
                 if local_name(e.name().as_ref()) == "item" {
