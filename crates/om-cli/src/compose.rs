@@ -43,7 +43,9 @@ pub fn build_engine(cfg: &Config) -> Engine {
     // --- Source providers ---
     builder = builder.add_source(Arc::new(TorrentioSource::new(torrentio_config_string(cfg))));
     if cfg.providers.nyaa_direct {
-        builder = builder.add_source(Arc::new(NyaaSource::new()));
+        builder = builder.add_source(Arc::new(NyaaSource::with_category(
+            cfg.providers.nyaa_category.clone(),
+        )));
     }
 
     // --- Debrid + resolver (debrid optional → P2P fallback) ---
