@@ -19,6 +19,7 @@ use om_metadata::{AniListProvider, CinemetaProvider, TmdbProvider};
 use om_player::{MpvPlayer, VlcPlayer};
 use om_sources::{NyaaSource, TorrentioSource};
 use om_stream::{HybridResolver, P2pEngine};
+use om_subs::OpenSubtitleAdapter;
 use om_track::{AniListTracker, AniSkipEnricher, CompositeTracker, DiscordPresence, MalTracker};
 
 /// Build the fully-wired [`Engine`] for the given config.
@@ -102,6 +103,23 @@ pub fn build_engine(cfg: &Config) -> Engine {
     // --- Presence ---
     if cfg.behavior.discord_presence {
         builder = builder.presence(Arc::new(DiscordPresence::new(DISCORD_CLIENT_ID)));
+    }
+
+    // --- Subtitles (open-subtitle, opt-in) ---
+    // Building the engine can fail on misconfiguration; like the history store,
+    // a failure disables the feature rather than aborting startup. The preferred
+    // languages are also threaded to the engine for the SubtitleQuery.
+    if cfg.subtitles.enabled {
+        match OpenSubtitleAdapter::new(cfg.subtitles.languages.clone()) {
+            Ok(adapter) => {
+                builder = builder
+                    .subtitles(Arc::new(adapter))
+                    .subtitle_languages(cfg.subtitles.languages.clone());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "subtitle provider disabled (engine build failed)");
+            }
+        }
     }
 
     builder.build()

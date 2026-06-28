@@ -25,10 +25,11 @@ use om_core::error::{CoreError, CoreResult};
 use om_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use om_core::ports::{
     Chapter, Enricher, HistoryStore, MetadataProvider, PlayOptions, PlaybackControl, Player,
-    PresenceReporter, SourceProvider, SourceQuery, StreamResolver, Tracker,
+    PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
 };
 use om_core::scoring::{self, ScoringPrefs};
 use om_core::stream::{Playback, SourceCandidate};
+use om_core::subtitle::{SubtitleQuery, SubtitleTrack};
 use om_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 /// A request to play something, resolved into coordinates the engine understands.
@@ -58,6 +59,10 @@ pub struct Engine {
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
+    subtitles: Option<Arc<dyn SubtitleProvider>>,
+    /// Preferred subtitle languages (most-wanted first) for the [`SubtitleQuery`].
+    /// Empty when no provider is wired or none are configured.
+    subtitle_languages: Vec<String>,
     prefs: ScoringPrefs,
     /// Fraction watched at which an episode counts as complete (e.g. 0.85).
     complete_threshold: f32,
@@ -312,9 +317,20 @@ impl Engine {
             None => SkipTimes::default(),
         };
 
-        // 4. Launch the player with title + resume. The media-title carries the
-        //    series name, the S01E01 coordinate, and the episode title when known
-        //    (see `om_core::title`); movies get just the name (+ year).
+        // 4. External subtitles (best-effort — anime/series/movies, via the
+        //    subtitle provider). Fetched tracks are written to temp `.srt`/`.vtt`
+        //    files and handed to the player as `--sub-file=PATH` args. Any failure
+        //    (no provider, lookup error, write error) degrades to no subtitles and
+        //    must never block playback. The temp files are cleaned up after exit.
+        let subtitle_files = self.fetch_subtitle_files(req).await;
+        let sub_args: Vec<String> = subtitle_files
+            .iter()
+            .map(|p| format!("--sub-file={}", p.display()))
+            .collect();
+
+        // 5. Launch the player with title + resume + subtitles. The media-title
+        //    carries the series name, the S01E01 coordinate, and the episode title
+        //    when known (see `om_core::title`); movies get just the name (+ year).
         let opts = PlayOptions {
             title: Some(om_core::title::media_title(
                 &req.media,
@@ -323,14 +339,22 @@ impl Engine {
                 req.episode_title.as_deref(),
             )),
             start_at_secs: resume,
-            extra_args: Vec::new(),
+            extra_args: sub_args,
         };
-        let mut session = player.play(&playback, &opts).await?;
+        let session = player.play(&playback, &opts).await;
+        // Even if launch fails, drop the temp subtitle files we wrote.
+        let mut session = match session {
+            Ok(s) => s,
+            Err(e) => {
+                cleanup_subtitle_files(&subtitle_files);
+                return Err(e);
+            }
+        };
 
         let last_pos = Arc::new(AtomicU32::new(resume.unwrap_or(0)));
         let last_dur = Arc::new(AtomicU32::new(0));
 
-        // 5. Monitor over the IPC channel while the player runs. The monitor
+        // 6. Monitor over the IPC channel while the player runs. The monitor
         //    future runs forever; `select!` cancels it the moment the player
         //    exits, so it doubles as the "until playback ends" signal.
         let ctx = MonitorCtx {
@@ -355,17 +379,21 @@ impl Engine {
             last_pos.clone(),
             last_dur.clone(),
         );
-        tokio::select! {
-            r = session.wait() => { r?; }
-            _ = monitor => {}
-        }
+        let wait_result = tokio::select! {
+            r = session.wait() => r,
+            _ = monitor => Ok(()),
+        };
 
-        // 6. Teardown any transient P2P state.
+        // 7. Teardown: remove the temp subtitle files and any transient P2P
+        //    state. Done before propagating a `wait` error so a player crash
+        //    never leaks temp files.
+        cleanup_subtitle_files(&subtitle_files);
         if let Some(resolver) = &self.resolver {
             resolver.cleanup().await;
         }
+        wait_result?;
 
-        // 7. Mark complete + sync the tracker if we got far enough (best-effort).
+        // 8. Mark complete + sync the tracker if we got far enough (best-effort).
         let pos = last_pos.load(Ordering::Relaxed);
         let dur = last_dur.load(Ordering::Relaxed);
         let completed = dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold;
@@ -454,6 +482,76 @@ impl Engine {
             .ok()?
             .into_iter()
             .find(|c| c.is_resolvable())
+    }
+
+    /// Fetch external subtitles for the request and materialize each returned
+    /// track to a temp file, returning the paths to hand the player as
+    /// `--sub-file=` args.
+    ///
+    /// Best-effort end to end: returns an empty vec when no [`SubtitleProvider`]
+    /// is wired, the provider errors, or a track can't be written — playback must
+    /// never be blocked by subtitles. Errors are logged at `debug`. The caller is
+    /// responsible for deleting the files via [`cleanup_subtitle_files`] after the
+    /// player exits.
+    async fn fetch_subtitle_files(&self, req: &PlayRequest) -> Vec<std::path::PathBuf> {
+        let Some(provider) = &self.subtitles else {
+            return Vec::new();
+        };
+
+        let query = SubtitleQuery {
+            media: req.media.clone(),
+            season: req.season,
+            episode: req.episode,
+            languages: self.subtitle_languages.clone(),
+        };
+
+        let tracks = match provider.fetch(&query).await {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                tracing::debug!(error = %e, "subtitle fetch failed; continuing without subtitles");
+                return Vec::new();
+            }
+        };
+
+        let mut paths = Vec::new();
+        for (idx, track) in tracks.iter().enumerate() {
+            match write_subtitle_track(idx, track) {
+                Ok(path) => paths.push(path),
+                Err(e) => {
+                    tracing::debug!(error = %e, "writing subtitle temp file failed; skipping track");
+                }
+            }
+        }
+        paths
+    }
+}
+
+/// Write a single [`SubtitleTrack`] to a uniquely-named temp file and return its
+/// path. The name is process/instance-unique (pid + nanos + index) so concurrent
+/// or repeated playbacks never collide, mirroring the mpv IPC socket naming.
+fn write_subtitle_track(idx: usize, track: &SubtitleTrack) -> std::io::Result<std::path::PathBuf> {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Default to `srt` when the format is blank; both mpv and vlc key the parser
+    // off the extension.
+    let ext = if track.format.is_empty() {
+        "srt"
+    } else {
+        track.format.as_str()
+    };
+    let path = std::env::temp_dir().join(format!("om-sub-{pid}-{nanos}-{idx}.{ext}"));
+    std::fs::write(&path, &track.text)?;
+    Ok(path)
+}
+
+/// Delete temp subtitle files after playback. Best-effort: a missing/locked file
+/// is ignored — these live under the OS temp dir and are reaped anyway.
+fn cleanup_subtitle_files(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -609,6 +707,8 @@ pub struct EngineBuilder {
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
+    subtitles: Option<Arc<dyn SubtitleProvider>>,
+    subtitle_languages: Vec<String>,
     prefs: ScoringPrefs,
     complete_threshold: f32,
     skip_filler: bool,
@@ -647,6 +747,19 @@ impl EngineBuilder {
     }
     pub fn presence(mut self, p: Arc<dyn PresenceReporter>) -> Self {
         self.presence = Some(p);
+        self
+    }
+    /// External subtitle provider (optional). When set, [`Engine::play`] fetches
+    /// subtitles before launching the player and passes them as `--sub-file=`.
+    pub fn subtitles(mut self, s: Arc<dyn SubtitleProvider>) -> Self {
+        self.subtitles = Some(s);
+        self
+    }
+    /// Preferred subtitle languages (most-wanted first, e.g. `["en", "ja"]`) used
+    /// for the subtitle search. Default empty; only meaningful with a
+    /// [`subtitles`](Self::subtitles) provider wired.
+    pub fn subtitle_languages(mut self, languages: Vec<String>) -> Self {
+        self.subtitle_languages = languages;
         self
     }
     pub fn scoring_prefs(mut self, prefs: ScoringPrefs) -> Self {
@@ -688,6 +801,8 @@ impl EngineBuilder {
             enricher: self.enricher,
             history: self.history,
             presence: self.presence,
+            subtitles: self.subtitles,
+            subtitle_languages: self.subtitle_languages,
             prefs: self.prefs,
             complete_threshold: if self.complete_threshold > 0.0 {
                 self.complete_threshold
@@ -1311,5 +1426,152 @@ mod tests {
 
         // resume on (the default) → the saved 120s becomes the start seek.
         assert_eq!(*start.lock().unwrap(), Some(Some(120)));
+    }
+
+    // ---- subtitle auto-fetch -------------------------------------------------
+    //
+    // A fake provider returns canned tracks; a player captures the `extra_args`
+    // it was handed so the test can assert each track became a `--sub-file=`
+    // pointing at a real temp file. After `play` returns, the temp files must be
+    // gone (best-effort cleanup ran).
+
+    use om_core::ports::SubtitleProvider;
+    use om_core::subtitle::{SubtitleQuery, SubtitleTrack};
+
+    /// A subtitle provider returning a fixed set of tracks, recording the query it
+    /// was asked (so the test can assert the languages were threaded through).
+    struct FakeSubs {
+        tracks: Vec<SubtitleTrack>,
+        seen_langs: Arc<Mutex<Option<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl SubtitleProvider for FakeSubs {
+        fn name(&self) -> &str {
+            "fake-subs"
+        }
+        async fn fetch(&self, query: &SubtitleQuery) -> CoreResult<Vec<SubtitleTrack>> {
+            *self.seen_langs.lock().unwrap() = Some(query.languages.clone());
+            Ok(self.tracks.clone())
+        }
+    }
+
+    /// A subtitle provider that always errors — proves playback continues with no
+    /// subtitles when the fetch fails.
+    struct FailingSubs;
+
+    #[async_trait]
+    impl SubtitleProvider for FailingSubs {
+        fn name(&self) -> &str {
+            "failing-subs"
+        }
+        async fn fetch(&self, _query: &SubtitleQuery) -> CoreResult<Vec<SubtitleTrack>> {
+            Err(CoreError::Network("boom".into()))
+        }
+    }
+
+    /// A player that records the `extra_args` it was handed, then exits at once.
+    struct ArgsCapturePlayer {
+        args: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Player for ArgsCapturePlayer {
+        fn name(&self) -> &str {
+            "args-capture"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            _playback: &Playback,
+            opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            *self.args.lock().unwrap() = opts.extra_args.clone();
+            Ok(Box::new(InstantSession))
+        }
+    }
+
+    fn sub_track(format: &str, text: &str) -> SubtitleTrack {
+        SubtitleTrack {
+            language: "en".into(),
+            format: format.into(),
+            text: text.into(),
+            title: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn subtitles_become_sub_file_args_and_are_cleaned_up() {
+        let args = Arc::new(Mutex::new(Vec::new()));
+        let seen_langs = Arc::new(Mutex::new(None));
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(ArgsCapturePlayer { args: args.clone() }))
+            .subtitles(Arc::new(FakeSubs {
+                tracks: vec![sub_track("srt", "1\n00:00:01,000 --> 00:00:02,000\nHi\n")],
+                seen_langs: seen_langs.clone(),
+            }))
+            .subtitle_languages(vec!["en".into(), "ja".into()])
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // One track → one --sub-file arg, pointing at a real .srt path.
+        let captured = args.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        let path = captured[0]
+            .strip_prefix("--sub-file=")
+            .expect("arg is a --sub-file=");
+        assert!(path.ends_with(".srt"), "extension follows the track format");
+        // The configured languages were threaded into the query.
+        assert_eq!(
+            seen_langs.lock().unwrap().clone(),
+            Some(vec!["en".to_string(), "ja".to_string()])
+        );
+        // Cleanup ran after the player exited.
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "temp subtitle file removed after playback"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_subtitle_provider_means_no_extra_args() {
+        let args = Arc::new(Mutex::new(vec!["sentinel".to_string()]));
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(ArgsCapturePlayer { args: args.clone() }))
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // The player was handed an empty extra_args (overwrote the sentinel).
+        assert!(args.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subtitle_fetch_error_does_not_block_playback() {
+        let args = Arc::new(Mutex::new(vec!["sentinel".to_string()]));
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(ArgsCapturePlayer { args: args.clone() }))
+            .subtitles(Arc::new(FailingSubs))
+            .subtitle_languages(vec!["en".into()])
+            .build();
+
+        // Playback still succeeds; no subtitle args were added.
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+        assert!(args.lock().unwrap().is_empty());
     }
 }
