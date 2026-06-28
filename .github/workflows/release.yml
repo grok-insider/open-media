@@ -33,6 +33,14 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    # release-plz runs `cargo package` per crate to detect changes, which fetches
+    # the crates.io index + deps. That network step is flaky on hosted runners
+    # (observed: HTTP/2 framing "Connection reset by peer" mid-download). Make
+    # cargo retry transient failures and fetch git deps via the system git CLI
+    # (sturdier than the built-in HTTP/2 transport for resets).
+    env:
+      CARGO_NET_RETRY: "10"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     concurrency:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
