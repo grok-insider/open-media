@@ -17,8 +17,9 @@ use crate::map_net;
 const DEFAULT_BASE: &str = "https://graphql.anilist.co";
 
 const SEARCH_QUERY: &str = r#"
-query ($search: String) {
-  Page(perPage: 15) {
+query ($search: String, $page: Int, $perPage: Int) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo { hasNextPage }
     media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
       id idMal
       title { romaji english native }
@@ -30,6 +31,15 @@ query ($search: String) {
     }
   }
 }"#;
+
+/// Results requested per AniList search page. Raised from the original 15 to
+/// give ranking a deeper candidate pool in one round-trip.
+const SEARCH_PER_PAGE: u32 = 30;
+
+/// Upper bound on AniList search pages fetched per query, so a broad term can't
+/// fan out into many round-trips. Two pages (`SEARCH_PER_PAGE` each) is ample
+/// depth for ranking.
+const MAX_SEARCH_PAGES: u32 = 2;
 
 const DETAIL_QUERY: &str = r#"
 query ($id: Int) {
@@ -215,18 +225,31 @@ impl MetadataProvider for AniListProvider {
         if matches!(kind, Some(MediaKind::Movie) | Some(MediaKind::Series)) {
             return Ok(Vec::new());
         }
-        let data: GqlData = self
-            .query(SEARCH_QUERY, serde_json::json!({ "search": query }))
-            .await?;
-        let page = data.page.ok_or_else(|| CoreError::Parse {
-            what: "anilist search".into(),
-            message: "missing Page".into(),
-        })?;
-        Ok(page
-            .media
-            .into_iter()
-            .map(AniListMedia::into_media)
-            .collect())
+        // Fetch a bounded number of pages and merge, so ranking has more than a
+        // single page of candidates. We stop early once AniList reports no
+        // further page (`hasNextPage`), and never exceed `MAX_SEARCH_PAGES`.
+        let mut media = Vec::new();
+        for page_no in 1..=MAX_SEARCH_PAGES {
+            let data: GqlData = self
+                .query(
+                    SEARCH_QUERY,
+                    serde_json::json!({
+                        "search": query,
+                        "page": page_no,
+                        "perPage": SEARCH_PER_PAGE,
+                    }),
+                )
+                .await?;
+            let page = data.page.ok_or_else(|| CoreError::Parse {
+                what: "anilist search".into(),
+                message: "missing Page".into(),
+            })?;
+            media.extend(page.media);
+            if !page.page_info.map(|p| p.has_next_page).unwrap_or(false) {
+                break;
+            }
+        }
+        Ok(media.into_iter().map(AniListMedia::into_media).collect())
     }
 
     async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
@@ -346,6 +369,17 @@ struct RelationData {
 struct Page {
     #[serde(default)]
     media: Vec<AniListMedia>,
+    #[serde(rename = "pageInfo", default)]
+    page_info: Option<PageInfo>,
+}
+
+/// AniList `Page.pageInfo` — we only need `hasNextPage` to decide whether to
+/// fetch another page.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    #[serde(default)]
+    has_next_page: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -562,6 +596,69 @@ impl AniListMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// One AniList `Page` response with `n` media (sequential ids offset by
+    /// `start`) and a `hasNextPage` flag.
+    fn anilist_page(start: i32, n: i32, has_next: bool) -> serde_json::Value {
+        let media: Vec<_> = (0..n)
+            .map(|i| {
+                let id = start + i;
+                serde_json::json!({
+                    "id": id,
+                    "title": { "romaji": format!("Show {id}") },
+                    "episodes": 12,
+                    "format": "TV"
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "data": { "Page": { "pageInfo": { "hasNextPage": has_next }, "media": media } }
+        })
+    }
+
+    #[tokio::test]
+    async fn search_merges_two_pages_when_more_exist() {
+        let server = MockServer::start().await;
+
+        // Page 1 reports hasNextPage → adapter fetches page 2 and merges.
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""page":1"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anilist_page(1, 30, true)))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""page":2"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anilist_page(100, 5, false)))
+            .mount(&server)
+            .await;
+
+        let provider = AniListProvider::with_base_url(server.uri());
+        let results = provider.search("x", None).await.unwrap();
+
+        assert_eq!(results.len(), 35, "30 from page 1 + 5 from page 2");
+        assert_eq!(results[0].ids.anilist, Some(1));
+        // First and last of the merged page-2 block (ids 100..=104).
+        assert_eq!(results[30].ids.anilist, Some(100));
+        assert_eq!(results[34].ids.anilist, Some(104));
+    }
+
+    #[tokio::test]
+    async fn search_stops_when_no_next_page() {
+        let server = MockServer::start().await;
+        // hasNextPage = false on page 1 → only one round-trip; a page-2 request
+        // would 404 (no mock) and fail the test if it happened.
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""page":1"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anilist_page(1, 4, false)))
+            .mount(&server)
+            .await;
+
+        let provider = AniListProvider::with_base_url(server.uri());
+        let results = provider.search("x", None).await.unwrap();
+        assert_eq!(results.len(), 4);
+    }
 
     #[test]
     fn maps_media_with_mal_bridge_and_score() {
