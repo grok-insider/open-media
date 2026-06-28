@@ -54,15 +54,15 @@ impl NyaaSource {
         }
     }
 
-    /// Build the nyaa search text plus the season context used to filter results.
+    /// Build the search context used to find + filter results.
     ///
-    /// Returns `(query_text, base, ordinal)`:
+    /// Returns `(base, ordinal)`:
     /// - `base` is the franchise name with any season suffix stripped, so the
     ///   query targets the whole franchise and the season filter (not the query)
     ///   does the precision work — which also fixes recall for sequels whose
     ///   release naming differs from AniList's ("2nd Season" vs "S2").
     /// - `ordinal` is which season the selected entry is (1 when unmarked).
-    fn plan_query(query: &SourceQuery) -> (String, String, u32) {
+    fn plan_query(query: &SourceQuery) -> (String, u32) {
         // Release groups (SubsPlease/Erai-raws) name files with the romaji title,
         // so prefer `original_title`; and drop any English subtitle after a colon
         // ("Frieren: Beyond Journey's End" → "Frieren") so the search matches nyaa
@@ -75,11 +75,43 @@ impl NyaaSource {
             .unwrap_or_else(|| query.media.display_title());
         let no_sub = raw.split(':').next().unwrap_or(raw).trim();
         let (base, ordinal) = crate::season::parse_title_season(no_sub);
-        let text = match query.episode {
+        (base, ordinal)
+    }
+
+    /// One RSS round-trip for `{base} {episode:02}` (or just `{base}` for a movie/
+    /// season-pack search), returning the parsed candidates.
+    async fn fetch(&self, base: &str, episode: Option<u32>) -> CoreResult<Vec<SourceCandidate>> {
+        let qtext = match episode {
             Some(ep) => format!("{base} {ep:02}"),
-            None => base.clone(),
+            None => base.to_string(),
         };
-        (text, base, ordinal)
+        let q = urlencoding::encode(&qtext).into_owned();
+        // c defaults to 1_2 (English-translated anime), sorted by seeders desc.
+        let url = format!(
+            "{}/?page=rss&q={q}&c={}&f=0&s=seeders&o=desc",
+            self.base_url, self.category
+        );
+        tracing::debug!(%url, "nyaa rss request");
+
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            if e.is_timeout() {
+                CoreError::Timeout(format!("nyaa: {e}"))
+            } else {
+                CoreError::Network(format!("nyaa: {e}"))
+            }
+        })?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(CoreError::Remote {
+                service: "nyaa".into(),
+                message: format!("HTTP {status}"),
+            });
+        }
+        let xml = resp
+            .text()
+            .await
+            .map_err(|e| CoreError::Network(format!("nyaa: {e}")))?;
+        parse_rss(&xml)
     }
 }
 
@@ -100,40 +132,36 @@ impl SourceProvider for NyaaSource {
     }
 
     async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
-        let (qtext, base, ordinal) = Self::plan_query(query);
-        let q = urlencoding::encode(&qtext).into_owned();
-        // c defaults to 1_2 (English-translated anime), sorted by seeders desc.
-        let url = format!(
-            "{}/?page=rss&q={q}&c={}&f=0&s=seeders&o=desc",
-            self.base_url, self.category
-        );
-        tracing::debug!(%url, ordinal, "nyaa rss request");
+        let (base, ordinal) = Self::plan_query(query);
 
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            if e.is_timeout() {
-                CoreError::Timeout(format!("nyaa: {e}"))
-            } else {
-                CoreError::Network(format!("nyaa: {e}"))
+        // The relative-episode search (`{base} {episode}`) is always issued. When
+        // the engine computed an absolute (franchise-continuous) number that
+        // differs — a sequel numbered `… - 21` instead of S2 `… - 01` — issue a
+        // second search for that number too, since the `… 01` query never returns
+        // the `… 21` files. Results are merged and deduped by infohash.
+        let absolute = query
+            .absolute_episode
+            .filter(|abs| Some(*abs) != query.episode);
+
+        let mut all = self.fetch(&base, query.episode).await?;
+        if let Some(abs) = absolute {
+            match self.fetch(&base, Some(abs)).await {
+                Ok(extra) => all.extend(extra),
+                // The primary search already succeeded; a failed secondary fetch
+                // is a missed-recall, not a reason to fail the whole lookup.
+                Err(e) => tracing::debug!(error = %e, abs, "nyaa absolute-episode fetch failed"),
             }
-        })?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(CoreError::Remote {
-                service: "nyaa".into(),
-                message: format!("HTTP {status}"),
-            });
+            dedup_by_infohash(&mut all);
         }
-        let xml = resp
-            .text()
-            .await
-            .map_err(|e| CoreError::Network(format!("nyaa: {e}")))?;
-        let all = parse_rss(&xml)?;
 
-        // Keep only releases for the requested season (AniList numbers each season
-        // from 1, so episode "01" otherwise matches every season's premiere).
+        // Keep only releases for the requested season. AniList numbers each season
+        // from 1, so episode "01" otherwise matches every season's premiere — a
+        // release is in-season when its title's season marker covers the ordinal,
+        // OR (absolute numbering) it carries no season marker yet its episode
+        // coordinate is exactly the absolute number (the `… - 21` sequel case).
         let filtered: Vec<SourceCandidate> = all
             .iter()
-            .filter(|c| crate::season::release_season(&c.title, &base).covers(ordinal))
+            .filter(|c| in_requested_season(&c.title, &base, ordinal, absolute))
             .cloned()
             .collect();
 
@@ -145,6 +173,38 @@ impl SourceProvider for NyaaSource {
         }
         Ok(filtered)
     }
+}
+
+/// Whether a release belongs to the requested season.
+///
+/// Primary signal is the title's season marker ([`release_season`]). The
+/// absolute-numbering escape hatch: a release with *no* season marker
+/// ([`SeasonMatch::None`]) whose parsed episode coordinate equals the absolute
+/// number is the requested sequel episode published continuously (`… - 21`).
+fn in_requested_season(title: &str, base: &str, ordinal: u32, absolute: Option<u32>) -> bool {
+    use crate::season::SeasonMatch;
+    let season = crate::season::release_season(title, base);
+    if season.covers(ordinal) {
+        return true;
+    }
+    // Only a marker-less release can be an absolute-numbered sequel; one that
+    // explicitly says S1/S3/etc. is not the requested season just because a
+    // number coincides.
+    match (absolute, season) {
+        (Some(abs), SeasonMatch::None) => crate::season::release_episode(title, base).covers(abs),
+        _ => false,
+    }
+}
+
+/// Drop candidates sharing an infohash, keeping the first occurrence (RSS is
+/// seeder-sorted, so the first is the best-seeded). Candidates without an
+/// infohash are always kept — there's nothing to dedup them by.
+fn dedup_by_infohash(items: &mut Vec<SourceCandidate>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|c| match &c.info_hash {
+        Some(h) => seen.insert(h.to_ascii_lowercase()),
+        None => true,
+    });
 }
 
 /// One raw RSS `<item>` accumulated during the event walk.

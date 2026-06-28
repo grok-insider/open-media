@@ -142,10 +142,12 @@ impl Engine {
     /// concurrently, merge, and rank them with [`scoring`]. Providers that do not
     /// support the media kind (e.g. nyaa for a live-action movie) are skipped.
     pub async fn find_sources(&self, req: &PlayRequest) -> CoreResult<Vec<SourceCandidate>> {
+        let absolute_episode = self.absolute_episode(req).await;
         let query = SourceQuery {
             media: req.media.clone(),
             season: req.season,
             episode: req.episode,
+            absolute_episode,
             include_uncached: req.include_uncached,
         };
 
@@ -168,6 +170,33 @@ impl Engine {
 
         scoring::rank(&mut candidates, &self.prefs);
         Ok(candidates)
+    }
+
+    /// Compute the episode's *absolute* (franchise-continuous) number, when a
+    /// metadata provider knows the prior-seasons offset.
+    ///
+    /// Only meaningful for anime with an episode coordinate: AniList numbers each
+    /// season from 1, but some release groups number a sequel continuously (S2E01
+    /// as `… - 21`). `offset + episode` recovers that on-disk number so a source
+    /// provider can also match the absolute-numbered release. Returns `None` for
+    /// movies, when no provider exposes an offset (the default), or when the
+    /// offset query fails — absolute matching is a best-effort *addition*, never a
+    /// reason to fail the whole lookup. The first provider returning `Some` wins.
+    async fn absolute_episode(&self, req: &PlayRequest) -> Option<u32> {
+        if req.media.kind != MediaKind::Anime {
+            return None;
+        }
+        let episode = req.episode?;
+        for provider in &self.metadata {
+            match provider.episode_offset(&req.media.ids).await {
+                Ok(Some(offset)) => return Some(offset + episode),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(provider = provider.name(), error = %e, "episode_offset failed")
+                }
+            }
+        }
+        None
     }
 
     /// Resolve a chosen candidate into a player-openable [`Playback`].
