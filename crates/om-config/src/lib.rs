@@ -86,6 +86,10 @@ pub struct Providers {
     /// Also query nyaa.si directly (anime), in addition to Torrentio's `nyaasi`.
     #[serde(default = "default_true")]
     pub nyaa_direct: bool,
+    /// nyaa.si category for direct queries (the `c=` RSS parameter). Defaults to
+    /// `"1_2"` (English-translated anime); `"1_3"` is raw/untranslated.
+    #[serde(default = "default_nyaa_category")]
+    pub nyaa_category: String,
     /// Quality preference: `"best" | "2160p" | "1080p" | "720p" | "480p"`.
     #[serde(default = "default_quality")]
     pub quality: String,
@@ -100,6 +104,7 @@ impl Default for Providers {
             cinemeta: true,
             torrentio_providers: default_torrentio_providers(),
             nyaa_direct: true,
+            nyaa_category: default_nyaa_category(),
             quality: default_quality(),
             show_uncached: false,
         }
@@ -298,6 +303,9 @@ fn default_true() -> bool {
 fn default_quality() -> String {
     "best".to_string()
 }
+fn default_nyaa_category() -> String {
+    "1_2".to_string()
+}
 fn default_player() -> String {
     "mpv".to_string()
 }
@@ -384,6 +392,24 @@ tmdb_api_key = "abc"
         assert_eq!(back.ui.sources.language, "English");
         assert_eq!(back.ui.sources.provider, "1337x");
         assert!(back.ui.sources.cached_only);
+    }
+
+    #[test]
+    fn nyaa_category_default_and_roundtrip() {
+        // Default on an empty document matches the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.providers.nyaa_category, "1_2");
+        assert_eq!(
+            cfg.providers.nyaa_category,
+            Providers::default().nyaa_category
+        );
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.providers.nyaa_category = "1_3".into();
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.providers.nyaa_category, "1_3");
     }
 
     #[test]
