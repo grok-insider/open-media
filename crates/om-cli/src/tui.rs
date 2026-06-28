@@ -17,7 +17,10 @@ use om_core::model::{Episode, Media, MediaKind, Season};
 use om_core::stream::{CacheState, Quality, SourceCandidate};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_image::Image;
 use tokio::sync::mpsc;
+
+use crate::stills::{StillMsg, Stills};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -29,6 +32,12 @@ const PANEL_WIDTH: u16 = 34;
 /// Width of the Episodes detail side panel (a touch wider — it holds wrapped
 /// synopsis text).
 const EPISODE_PANEL_WIDTH: u16 = 40;
+/// Rows reserved at the top of the episode panel for the still image.
+const STILL_ROWS: u16 = 11;
+/// Target cell box `(cols, rows)` the still is resized to fit. Width matches the
+/// panel interior (border-inset); `Resize::Fit` keeps the aspect ratio within
+/// this, so landscape stills won't use the full height.
+const STILL_TARGET_CELLS: (u16, u16) = (EPISODE_PANEL_WIDTH - 2, STILL_ROWS);
 
 /// Which screen is active.
 #[derive(PartialEq)]
@@ -335,6 +344,11 @@ struct App {
     languages: Vec<String>,
     providers: Vec<String>,
 
+    /// Terminal-image rendering for episode stills / posters (kitty/sixel/
+    /// iTerm2, or unicode half-blocks). Holds the detected picker + still cache.
+    stills: Stills,
+    still_tx: mpsc::UnboundedSender<StillMsg>,
+
     tx: mpsc::UnboundedSender<Msg>,
 }
 
@@ -343,6 +357,8 @@ impl App {
         engine: Arc<Engine>,
         cfg: Config,
         tx: mpsc::UnboundedSender<Msg>,
+        stills: Stills,
+        still_tx: mpsc::UnboundedSender<StillMsg>,
         initial_query: Option<String>,
     ) -> Self {
         let filters = SourceFilters::from_cfg(&cfg.ui.sources);
@@ -374,6 +390,8 @@ impl App {
             visible: Vec::new(),
             languages: Vec::new(),
             providers: Vec::new(),
+            stills,
+            still_tx,
             tx,
         }
     }
@@ -412,6 +430,29 @@ impl App {
         let sel = self.candidates_state.selected()?;
         let idx = *self.visible.get(sel)?;
         self.candidates.get(idx)
+    }
+
+    /// The image URL to show for the currently-highlighted episode: its own
+    /// still if it has one, else the series poster as a fallback.
+    fn current_still_url(&self) -> Option<&str> {
+        let ep = self.episodes.get(self.episodes_state.selected()?)?;
+        ep.still
+            .as_deref()
+            .or(self.media.as_ref().and_then(|m| m.poster.as_deref()))
+    }
+
+    /// Ask the still loader to fetch the image for the selected episode. Cheap
+    /// to call every frame: it only acts on the Episodes screen when images are
+    /// supported, and the loader ignores URLs already loading/ready/failed.
+    fn request_visible_still(&mut self) {
+        if self.screen != Screen::Episodes || !self.stills.enabled() {
+            return;
+        }
+        let Some(url) = self.current_still_url().map(str::to_string) else {
+            return;
+        };
+        self.stills
+            .request(&url, STILL_TARGET_CELLS, self.still_tx.clone());
     }
 
     fn handle_msg(&mut self, msg: Msg) {
@@ -476,10 +517,17 @@ impl App {
 pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> anyhow::Result<()> {
     let engine = Arc::new(engine);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut app = App::new(engine, cfg, tx, initial_query);
+    let (still_tx, mut still_rx) = mpsc::unbounded_channel();
 
+    // Enter the alternate screen *before* probing terminal graphics support:
+    // `Stills::detect` briefly reads/writes stdio, which must happen after the
+    // alt-screen switch but before we start consuming key events.
     let mut term = setup_terminal()?;
-    let result = run_loop(&mut term, &mut app, &mut rx).await;
+    let stills = Stills::detect();
+
+    let mut app = App::new(engine, cfg, tx, stills, still_tx, initial_query);
+
+    let result = run_loop(&mut term, &mut app, &mut rx, &mut still_rx).await;
     restore_terminal(&mut term)?;
 
     // Persist the Sources panel's filter/sort selections for next time.
@@ -494,6 +542,7 @@ async fn run_loop(
     term: &mut Term,
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
+    still_rx: &mut mpsc::UnboundedReceiver<StillMsg>,
 ) -> anyhow::Result<()> {
     loop {
         term.draw(|f| draw(f, app))?;
@@ -508,6 +557,13 @@ async fn run_loop(
         while let Ok(msg) = rx.try_recv() {
             app.handle_msg(msg);
         }
+        // Apply any finished still loads, then request the still for the
+        // currently-selected episode (idempotent — the cache debounces it).
+        while let Ok(msg) = still_rx.try_recv() {
+            app.stills.apply(msg);
+        }
+        app.request_visible_still();
+
         if app.should_quit {
             return Ok(());
         }
@@ -1042,16 +1098,6 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(label(&facts.join("   "))));
             }
 
-            // Placeholder for the still/thumbnail until image rendering lands
-            // (Part C); show whichever URL we have so the data is visible.
-            if let Some(url) = ep
-                .still
-                .as_deref()
-                .or(app.media.as_ref().and_then(|m| m.poster.as_deref()))
-            {
-                lines.push(Line::from(label(&format!("⌷ {}", truncate(url, 34)))));
-            }
-
             if let Some(o) = &ep.overview {
                 if !o.is_empty() {
                     lines.push(Line::from(""));
@@ -1065,15 +1111,49 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
         None => lines.push(Line::from(label("No episode selected."))),
     }
 
+    // Frame the panel, then split the interior into a still image on top and
+    // the text details below.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title("Episode");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (image_area, text_area) = if app.stills.enabled() && inner.height > STILL_ROWS + 2 {
+        let rows =
+            Layout::vertical([Constraint::Length(STILL_ROWS), Constraint::Min(0)]).split(inner);
+        (Some(rows[0]), rows[1])
+    } else {
+        (None, inner)
+    };
+
+    if let Some(img_area) = image_area {
+        draw_still(f, app, img_area);
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), text_area);
+}
+
+/// Render the still for the selected episode into `area`: the decoded image
+/// when ready, otherwise a centered status line (loading / unavailable).
+fn draw_still(f: &mut Frame, app: &App, area: Rect) {
+    let url = app.current_still_url();
+    if let Some(protocol) = url.and_then(|u| app.stills.ready(u)) {
+        // Cheap render of the already-resized+encoded protocol image.
+        f.render_widget(Image::new(protocol), area);
+        return;
+    }
+
+    let status = if url.is_some() {
+        "  loading image…"
+    } else {
+        "  no image"
+    };
     f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::new().fg(Color::DarkGray))
-                    .title("Episode"),
-            )
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(Line::from(Span::styled(
+            status,
+            Style::new().fg(Color::DarkGray),
+        ))),
         area,
     );
 }
@@ -1278,7 +1358,7 @@ fn render_list(
         )
         .highlight_style(Style::new().bg(Color::DarkGray).fg(Color::White).bold())
         .highlight_symbol("▶ ");
-    let mut s = state.clone();
+    let mut s = *state;
     f.render_stateful_widget(list, area, &mut s);
 }
 

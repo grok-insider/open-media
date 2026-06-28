@@ -7,6 +7,7 @@
 //! [`Engine`]: om_app::Engine
 
 mod compose;
+mod stills;
 mod tui;
 
 use clap::{Parser, Subcommand};
