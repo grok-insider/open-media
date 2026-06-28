@@ -40,6 +40,7 @@ member entry in the root `Cargo.toml`. Crate prefix is `om-`.
 | `crates/om-player` | mpv launch + JSON-IPC control plane; vlc launch-only. | `Player`, `PlaybackControl`, `PlaySession` |
 | `crates/om-track` | AniList/MAL trackers (+ composite dual-write), AniSkip/Jikan enricher, Discord presence. | `Tracker`, `Enricher`, `PresenceReporter` |
 | `crates/om-history` | SQLite watch-progress store for resume + recents. | `HistoryStore` |
+| `crates/om-telemetry` | Anonymous, opt-out active-install ping (version/OS/arch/random id). **Never carries anything about what is watched.** | `UsageReporter` |
 | `crates/om-app` | Application use-cases + the `Engine` that composes ports. **Depends only on `om-core`.** | — (consumes ports) |
 | `crates/om-cli` | The `om` binary: arg parsing, the **composition root** (`compose.rs`), and the ratatui TUI. | — (wires adapters) |
 
@@ -64,7 +65,12 @@ om-cli ──▶ om-app ──▶ om-core ◀── every adapter crate
 1. **Ports** (`om-core::ports`) are small, focused, object-safe `async` traits:
    `MetadataProvider`, `SourceProvider`, `DebridProvider`, `StreamResolver`,
    `Player`/`PlaybackControl`, `Tracker`, `Enricher`, `HistoryStore`,
-   `PresenceReporter`.
+   `PresenceReporter`, `UsageReporter`.
+
+   **Privacy invariant (`UsageReporter`):** usage telemetry must only ever carry
+   the fields in `UsageInfo` (app version, OS, arch, a random install id). It must
+   **never** transmit anything about what a user watches — titles, queries, source
+   names, tokens, or history. Do not extend the payload with content-derived data.
 2. **Adapters** implement a port each. They map their concrete errors into
    `CoreError` at the boundary.
 3. **`Engine`** (`om-app`) holds `Arc<dyn Port>` fields and implements the

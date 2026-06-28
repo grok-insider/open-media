@@ -11,6 +11,7 @@ members = [
     "crates/om-subs",
     "crates/om-track",
     "crates/om-history",
+    "crates/om-telemetry",
     "crates/om-app",
     "crates/om-cli",
 ]
@@ -40,6 +41,7 @@ om-player = { path = "crates/om-player", version = "0.3.0" }
 om-subs = { path = "crates/om-subs", version = "0.3.0" }
 om-track = { path = "crates/om-track", version = "0.3.0" }
 om-history = { path = "crates/om-history", version = "0.3.0" }
+om-telemetry = { path = "crates/om-telemetry", version = "0.3.0" }
 om-app = { path = "crates/om-app", version = "0.3.0" }
 
 # --- Shared third-party deps (versions pinned once here; see ARCHITECTURE.md) ---
@@ -58,6 +60,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+# Random per-install id for anonymous usage analytics (UUID v4).
+uuid = { version = "1", features = ["v4"] }
 # HTTP + parsing for the network adapters.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"

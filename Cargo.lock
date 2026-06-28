@@ -2361,6 +2361,7 @@ dependencies = [
  "om-sources",
  "om-stream",
  "om-subs",
+ "om-telemetry",
  "om-track",
  "ratatui",
  "ratatui-image",
@@ -2380,6 +2381,7 @@ dependencies = [
  "om-core",
  "serde",
  "toml 0.9.12+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]
@@ -2484,6 +2486,20 @@ dependencies = [
  "os-engine",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "om-telemetry"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "om-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]

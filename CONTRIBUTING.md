@@ -27,7 +27,13 @@ v0.4).
 3. **Map errors at the boundary.** Adapters convert concrete errors into the right
    `CoreError` variant. Callers branch on category, not on backend.
 4. **No secrets in code, logs, or tests.** Tokens come only from `om-config` and
-   are masked on display.
+   are masked on display. Public *identifiers* are not secrets: the Discord
+   application id (`compose.rs`) is sent in the presence handshake by design and is
+   correctly hardcoded, not a config secret.
+5. **Telemetry privacy invariant.** The `UsageReporter` payload (`om-telemetry`)
+   must only ever carry `UsageInfo` — app version, OS, arch, a random install id.
+   Never add anything about what a user watches (titles, queries, source names,
+   tokens, history). Telemetry is opt-out (`telemetry=false`) and best-effort.
 
 ## Before you push
 

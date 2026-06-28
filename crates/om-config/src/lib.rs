@@ -35,6 +35,8 @@ pub struct Config {
     pub subtitles: Subtitles,
     #[serde(default)]
     pub ui: Ui,
+    #[serde(default)]
+    pub telemetry: Telemetry,
 }
 
 /// All secret material. The only place tokens live.
@@ -271,6 +273,37 @@ impl Default for SourcesUi {
     }
 }
 
+/// Anonymous usage analytics. **On by default** (opt-out) so the project can
+/// estimate how many active installs exist (DAU/MAU). The only data ever sent is
+/// the app version, host OS/arch, and the random [`install_id`](Telemetry::install_id);
+/// **never** anything about what is watched (no titles, queries, tokens, or
+/// history). Disable any time with `om config set telemetry=false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Telemetry {
+    /// Send the anonymous usage ping once per launch. Default `true` (opt-out).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Random per-install id (UUID v4). Empty until generated once via
+    /// [`Config::ensure_install_id`]; persisted so the count is by install, not by
+    /// launch. Carries no PII.
+    #[serde(default)]
+    pub install_id: String,
+    /// Set once the first-run telemetry notice has been shown, so it prints only
+    /// the first time. Default `false`.
+    #[serde(default)]
+    pub notified: bool,
+}
+
+impl Default for Telemetry {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            install_id: String::new(),
+            notified: false,
+        }
+    }
+}
+
 impl Config {
     /// Whether search can return movies/series. Keyless via Cinemeta by default,
     /// or via a configured TMDB key. (Anime always works through AniList.)
@@ -288,6 +321,20 @@ impl Config {
     /// the two never disagree.
     pub fn has_real_debrid(&self) -> bool {
         self.has_debrid() && self.credentials.debrid_provider == "real-debrid"
+    }
+
+    /// Ensure a telemetry install id exists, generating a random UUID v4 the first
+    /// time. Returns `true` if a new id was generated (i.e. the caller should
+    /// persist the config). Idempotent: a non-empty id is left untouched. The id
+    /// is generated even when telemetry is disabled — it is not transmitted unless
+    /// the user opts in, and pre-generating keeps the file stable.
+    pub fn ensure_install_id(&mut self) -> bool {
+        if self.telemetry.install_id.is_empty() {
+            self.telemetry.install_id = uuid::Uuid::new_v4().to_string();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -313,6 +360,12 @@ pub fn load() -> CoreResult<Config> {
         .map_err(|e| CoreError::Storage(format!("reading {}: {e}", path.display())))?;
     let mut cfg: Config = toml::from_str(&text).map_err(|e| CoreError::Config(e.to_string()))?;
     apply_env_overrides(&mut cfg);
+    // Backfill a stable install id for configs created before telemetry existed,
+    // persisting it so the analytics count is by install rather than by launch. A
+    // write failure here is non-fatal: the in-memory id still works for this run.
+    if cfg.ensure_install_id() {
+        let _ = save(&cfg);
+    }
     Ok(cfg)
 }
 
@@ -549,6 +602,42 @@ tmdb_api_key = "abc"
             back.subtitles.languages,
             vec!["ja".to_string(), "en".to_string()]
         );
+    }
+
+    #[test]
+    fn telemetry_default_on_and_roundtrip() {
+        // On by default (opt-out) on an empty document, matching the manual Default.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.telemetry.enabled);
+        assert!(!cfg.telemetry.notified);
+        assert!(cfg.telemetry.install_id.is_empty());
+        assert_eq!(cfg.telemetry.enabled, Telemetry::default().enabled);
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.telemetry.enabled = false;
+        c.telemetry.notified = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(!back.telemetry.enabled);
+        assert!(back.telemetry.notified);
+    }
+
+    #[test]
+    fn ensure_install_id_generates_once_and_is_stable() {
+        let mut cfg = Config::default();
+        assert!(cfg.telemetry.install_id.is_empty());
+
+        // First call mints a uuid and signals a write is needed.
+        assert!(cfg.ensure_install_id());
+        let id = cfg.telemetry.install_id.clone();
+        assert!(!id.is_empty());
+        // It parses as a UUID (v4).
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+
+        // Second call is a no-op: same id, no write needed.
+        assert!(!cfg.ensure_install_id());
+        assert_eq!(cfg.telemetry.install_id, id);
     }
 
     #[test]
