@@ -5,7 +5,7 @@ use om_core::ports::{Enricher, Tracker};
 use om_core::tracking::ListStatus;
 use om_track::{AniListTracker, AniSkipEnricher, MalTracker};
 use serde_json::json;
-use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -25,7 +25,7 @@ async fn aniskip_parses_op_and_ed() {
 
     let enricher = AniSkipEnricher::with_bases(server.uri(), server.uri());
     let skip = enricher
-        .skip_times(&IdSet::default().with_mal(52991), 1)
+        .skip_times(&IdSet::default().with_mal(52991), 1, None)
         .await
         .unwrap();
 
@@ -33,6 +33,37 @@ async fn aniskip_parses_op_and_ed() {
     assert_eq!(op.start, 85); // rounded from 84.5
     assert_eq!(op.end, 174);
     assert_eq!(skip.ending.unwrap().start, 1320);
+}
+
+/// When the caller knows the episode runtime, it must be forwarded to AniSkip as
+/// `episodeLength` (seconds) so the API can validate intervals against the
+/// episode length — rather than the `0` sentinel that disables that check.
+#[tokio::test]
+async fn aniskip_sends_real_episode_length_when_known() {
+    let server = MockServer::start().await;
+    // The mock only responds when `episodeLength=1440` (24 min × 60) is present;
+    // a request still hardcoding `0` would 404 and fail the assertions below.
+    Mock::given(method("GET"))
+        .and(path("/v1/skip-times/52991/1"))
+        .and(query_param("episodeLength", "1440"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "found": true,
+            "results": [
+                { "interval": { "startTime": 0.0, "endTime": 90.0 }, "skipType": "op" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let enricher = AniSkipEnricher::with_bases(server.uri(), server.uri());
+    let skip = enricher
+        .skip_times(&IdSet::default().with_mal(52991), 1, Some(1440))
+        .await
+        .unwrap();
+
+    let op = skip.opening.expect("opening interval present");
+    assert_eq!(op.start, 0);
+    assert_eq!(op.end, 90);
 }
 
 #[tokio::test]
@@ -44,7 +75,7 @@ async fn aniskip_not_found_is_empty_not_error() {
         .await;
     let enricher = AniSkipEnricher::with_bases(server.uri(), server.uri());
     let skip = enricher
-        .skip_times(&IdSet::default().with_mal(1), 1)
+        .skip_times(&IdSet::default().with_mal(1), 1, None)
         .await
         .unwrap();
     assert!(skip.is_empty());
@@ -54,7 +85,7 @@ async fn aniskip_not_found_is_empty_not_error() {
 async fn aniskip_requires_mal_id() {
     let enricher = AniSkipEnricher::with_bases("http://127.0.0.1:1", "http://127.0.0.1:1");
     assert!(enricher
-        .skip_times(&IdSet::default().with_anilist(5), 1)
+        .skip_times(&IdSet::default().with_anilist(5), 1, None)
         .await
         .is_err());
 }
