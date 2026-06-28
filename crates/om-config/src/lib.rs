@@ -279,7 +279,35 @@ pub fn load() -> CoreResult<Config> {
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|e| CoreError::Storage(format!("reading {}: {e}", path.display())))?;
-    toml::from_str(&text).map_err(|e| CoreError::Config(e.to_string()))
+    let mut cfg: Config = toml::from_str(&text).map_err(|e| CoreError::Config(e.to_string()))?;
+    apply_env_overrides(&mut cfg);
+    Ok(cfg)
+}
+
+/// Apply `OPEN_MEDIA_*` credential overrides from the environment onto a parsed
+/// config. An env var only overrides when present **and** non-empty, so an
+/// accidentally-exported empty var never blanks a configured token. Table-driven
+/// so adding a key is one row. Never logs a value.
+fn apply_env_overrides(cfg: &mut Config) {
+    let overrides: [(&str, &mut String); 4] = [
+        ("OPEN_MEDIA_TMDB_API_KEY", &mut cfg.credentials.tmdb_api_key),
+        (
+            "OPEN_MEDIA_REAL_DEBRID_TOKEN",
+            &mut cfg.credentials.real_debrid_token,
+        ),
+        (
+            "OPEN_MEDIA_ANILIST_TOKEN",
+            &mut cfg.credentials.anilist_token,
+        ),
+        ("OPEN_MEDIA_MAL_TOKEN", &mut cfg.credentials.mal_token),
+    ];
+    for (var, slot) in overrides {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                *slot = val;
+            }
+        }
+    }
 }
 
 /// Serialize and write the config file, creating parent dirs as needed.
@@ -346,6 +374,42 @@ fn default_torrentio_providers() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-global env, since `set_var`/`remove_var`
+    /// race across the test binary's threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn env_override_wins_when_set() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut cfg = Config::default();
+        cfg.credentials.tmdb_api_key = "from-file".into();
+
+        // env access is serialized by ENV_LOCK; the var is removed before the lock
+        // is released so no other test observes it.
+        std::env::set_var("OPEN_MEDIA_TMDB_API_KEY", "from-env");
+        apply_env_overrides(&mut cfg);
+        std::env::remove_var("OPEN_MEDIA_TMDB_API_KEY");
+
+        assert_eq!(cfg.credentials.tmdb_api_key, "from-env");
+    }
+
+    #[test]
+    fn empty_env_does_not_blank_configured_token() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut cfg = Config::default();
+        cfg.credentials.real_debrid_token = "configured".into();
+
+        // serialized by ENV_LOCK; removed before releasing the lock.
+        std::env::set_var("OPEN_MEDIA_REAL_DEBRID_TOKEN", "");
+        apply_env_overrides(&mut cfg);
+        std::env::remove_var("OPEN_MEDIA_REAL_DEBRID_TOKEN");
+
+        assert_eq!(cfg.credentials.real_debrid_token, "configured");
+    }
 
     #[test]
     fn minimal_config_deserializes() {
