@@ -52,6 +52,13 @@ pub fn score_candidate(c: &SourceCandidate, prefs: &ScoringPrefs) -> i64 {
         CacheState::Uncached if prefs.prefer_cached => score -= 5_000,
         _ => {}
     }
+    // Unconditional cached tiebreak: even when the user does not strongly prefer
+    // cached, an instantly-available source should edge out an otherwise-equal
+    // uncached one. Kept tiny (< every other weight, and far below the
+    // prefer_cached bonus) so it only decides genuine ties.
+    if c.cache == CacheState::Cached {
+        score += 50;
+    }
 
     // 2. Quality rank, plus an exact-target bonus.
     score += (c.quality.rank() as i64) * 1_000;
@@ -168,6 +175,24 @@ mod tests {
         // Both cached; 1080p target bonus puts it first.
         assert_eq!(list[0].quality, Quality::P1080);
         assert_eq!(list[2].cache, CacheState::Uncached);
+        assert_eq!(recommended_index(&list, &prefs), Some(0));
+    }
+
+    #[test]
+    fn cached_breaks_ties_when_not_preferred() {
+        let prefs = ScoringPrefs {
+            prefer_cached: false,
+            target_quality: None,
+            ..Default::default()
+        };
+        // Two otherwise-identical candidates: only the cache state differs.
+        let cached = candidate(Quality::P1080, CacheState::Cached, Some(10));
+        let uncached = candidate(Quality::P1080, CacheState::Uncached, Some(10));
+        assert!(score_candidate(&cached, &prefs) > score_candidate(&uncached, &prefs));
+
+        let mut list = vec![uncached, cached];
+        rank(&mut list, &prefs);
+        assert_eq!(list[0].cache, CacheState::Cached);
         assert_eq!(recommended_index(&list, &prefs), Some(0));
     }
 
