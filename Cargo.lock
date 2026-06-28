@@ -2360,6 +2360,7 @@ dependencies = [
  "om-player",
  "om-sources",
  "om-stream",
+ "om-subs",
  "om-track",
  "ratatui",
  "ratatui-image",
