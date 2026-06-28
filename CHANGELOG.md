@@ -4,26 +4,20 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0](https://github.com/grok-insider/open-media/compare/v0.2.0...v0.3.0) - 2026-06-28
+## 0.3.0
 
-### Added
-
-- *(sources)* make nyaa category configurable ([#14](https://github.com/grok-insider/open-media/pull/14))
-- render episode stills as terminal images in the detail panel
-- show episode titles, air dates, stills and a detail sidebar
-- *(config)* apply OPEN_MEDIA_* env overrides on load ([#8](https://github.com/grok-insider/open-media/pull/8))
-
-### Fixed
-
-- *(track)* pass real episode runtime to AniSkip when known ([#15](https://github.com/grok-insider/open-media/pull/15))
-- *(core)* give cached sources a small unconditional score tiebreak ([#9](https://github.com/grok-insider/open-media/pull/9))
-- *(metadata)* derive airing anime episode count from nextAiringEpisode ([#18](https://github.com/grok-insider/open-media/pull/18))
-- *(metadata)* map AniList MOVIE format to Movie kind ([#6](https://github.com/grok-insider/open-media/pull/6))
-- *(sources)* correct release-tag parsing nits (bit-depth, audio, providers, cache flags, GiB) ([#13](https://github.com/grok-insider/open-media/pull/13))
-- *(stream)* dont hold p2p state lock across metadata wait ([#12](https://github.com/grok-insider/open-media/pull/12))
-- *(player)* pass resume position to vlc via --start-time ([#11](https://github.com/grok-insider/open-media/pull/11))
-- *(track)* set MAL is_rewatching for repeating status ([#10](https://github.com/grok-insider/open-media/pull/10))
-- *(app)* merge input ids into details result ([#7](https://github.com/grok-insider/open-media/pull/7))
+- Added Nyaa category configuration option for filtering sources.
+- Added support for `OPEN_MEDIA_*` environment variables to override configuration settings.
+- Added terminal image rendering for episode stills in the detail panel (Kitty, Sixel, iTerm2, or half-block fallback).
+- Added episode detail sidebar showing title, air date, runtime, rating, still, and synopsis.
+- Fixed anime episode count derivation when using AniList nextAiringEpisode data.
+- Fixed VLC resume position by passing `--start-time` correctly.
+- Fixed MAL re-watching status when repeating a show.
+- Fixed AniSkip validation by sending the actual episode runtime.
+- Fixed release-tag parsing for bit-depth, audio, providers, cache flags, and GiB units.
+- Fixed cached source scoring to break ties in favor of cached releases.
+- Fixed input IDs not being merged into details results.
+- Fixed metadata mapping of AniList MOVIE format to the correct Movie kind.
 
 ## 0.2.0
 
