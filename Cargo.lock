@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "om-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "om-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2333,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "om-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "om-core",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "om-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2352,7 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "om-debrid"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "om-history"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "om-core",
  "rusqlite",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "om-metadata"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "om-player"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "om-sources"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "om-stream"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "librqbit",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "om-track"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
