@@ -61,6 +61,10 @@ pub struct Engine {
     prefs: ScoringPrefs,
     /// Fraction watched at which an episode counts as complete (e.g. 0.85).
     complete_threshold: f32,
+    /// Skip filler/recap episodes when advancing (anime, via the [`Enricher`]).
+    skip_filler: bool,
+    /// Auto-advance to the next episode after a completed episodic playback.
+    autoplay_next: bool,
 }
 
 impl Engine {
@@ -226,6 +230,43 @@ impl Engine {
     /// [`Playback`]: om_core::stream::Playback
     /// [`PlaybackControl`]: om_core::ports::PlaybackControl
     pub async fn play(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<()> {
+        // Single-shot playback of the chosen candidate.
+        let completed = self.play_once(req, candidate).await?;
+
+        // Binge: when enabled and the episode was actually watched to completion,
+        // keep advancing to the next (non-filler) episode until we run out of
+        // episodes, sources, or the viewer quits early. An owned loop (not
+        // recursion) keeps the stack flat across an arbitrarily long binge.
+        if !self.autoplay_next || !req.media.kind.is_episodic() || !completed {
+            return Ok(());
+        }
+
+        // Filler/recap episode numbers, fetched at most once for the whole binge.
+        let filler = self.filler_episodes(&req.media.ids).await;
+
+        let mut current = req.clone();
+        loop {
+            let Some(next) = self.next_request(&current, &filler).await else {
+                break;
+            };
+            let Some(candidate) = self.pick_candidate(&next).await else {
+                // No playable source for the next episode — stop rather than skip
+                // a gap silently; the viewer can resume manually.
+                break;
+            };
+            if !self.play_once(&next, &candidate).await? {
+                break; // quit / low-progress exit ends the binge.
+            }
+            current = next;
+        }
+        Ok(())
+    }
+
+    /// Resolve a chosen candidate and play it through once. Returns whether the
+    /// episode crossed [`Self::complete_threshold`] (i.e. was actually watched to
+    /// the end, as opposed to a quit at low progress) — the binge loop uses this
+    /// to decide whether to advance.
+    async fn play_once(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<bool> {
         let player = self
             .player
             .as_ref()
@@ -318,7 +359,8 @@ impl Engine {
         // 7. Mark complete + sync the tracker if we got far enough (best-effort).
         let pos = last_pos.load(Ordering::Relaxed);
         let dur = last_dur.load(Ordering::Relaxed);
-        if dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold {
+        let completed = dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold;
+        if completed {
             if let Some(tracker) = &self.tracker {
                 if let Err(e) = tracker.update_progress(&req.media.ids, episode).await {
                     tracing::warn!(error = %e, "tracker progress update failed");
@@ -329,7 +371,80 @@ impl Engine {
             let _ = presence.clear().await;
         }
 
-        Ok(())
+        Ok(completed)
+    }
+
+    /// Filler/recap episode numbers to skip when bingeing, or an empty set when
+    /// `skip_filler` is off, no [`Enricher`] is wired, or the lookup fails.
+    /// Best-effort: a filler-list failure must never abort a binge.
+    async fn filler_episodes(&self, ids: &IdSet) -> Vec<u32> {
+        if !self.skip_filler {
+            return Vec::new();
+        }
+        match &self.enricher {
+            Some(e) => e.filler_episodes(ids).await.unwrap_or_else(|err| {
+                tracing::debug!(error = %err, "filler_episodes lookup failed");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        }
+    }
+
+    /// Build the [`PlayRequest`] for the next episode after `current`, skipping
+    /// `filler` numbers and stopping at the season's last episode. Returns `None`
+    /// when there is no next episode (end of season / non-episodic / no coordinate).
+    ///
+    /// The season's episode list is fetched fresh so the per-episode title and
+    /// runtime travel with the request (the player's media-title + AniSkip
+    /// interval validation depend on them).
+    async fn next_request(&self, current: &PlayRequest, filler: &[u32]) -> Option<PlayRequest> {
+        let season = current.season.unwrap_or(1);
+        let episode = current.episode?;
+
+        // Upper bound: the season's real episode list, else the season pack's
+        // count, else the media-level total. Without any bound we refuse to
+        // advance past the current episode (better than looping forever).
+        let episodes = self.episodes(&current.media.ids, season).await.ok();
+        let last = episodes
+            .as_ref()
+            .filter(|e| !e.is_empty())
+            .map(|e| e.iter().map(|ep| ep.number).max().unwrap_or(episode))
+            .or(current.media.episode_count)?;
+
+        // Walk forward past any filler/recap numbers, staying within the season.
+        let mut next = episode + 1;
+        while filler.contains(&next) {
+            next += 1;
+        }
+        if next > last {
+            return None;
+        }
+
+        // Carry the next episode's title/runtime when the season list knows them.
+        let (episode_title, episode_runtime_minutes) = episodes
+            .and_then(|eps| eps.into_iter().find(|ep| ep.number == next))
+            .map(|ep| (ep.title, ep.runtime_minutes))
+            .unwrap_or((None, None));
+
+        Some(PlayRequest {
+            media: current.media.clone(),
+            season: Some(season),
+            episode: Some(next),
+            episode_title,
+            episode_runtime_minutes,
+            include_uncached: current.include_uncached,
+        })
+    }
+
+    /// Find + rank sources for a request and return the top resolvable candidate,
+    /// reusing the same ranking [`Engine::find_sources`] applies. `None` when the
+    /// lookup fails or nothing is resolvable.
+    async fn pick_candidate(&self, req: &PlayRequest) -> Option<SourceCandidate> {
+        self.find_sources(req)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|c| c.is_resolvable())
     }
 }
 
@@ -487,6 +602,8 @@ pub struct EngineBuilder {
     presence: Option<Arc<dyn PresenceReporter>>,
     prefs: ScoringPrefs,
     complete_threshold: f32,
+    skip_filler: bool,
+    autoplay_next: bool,
 }
 
 impl EngineBuilder {
@@ -531,6 +648,18 @@ impl EngineBuilder {
         self.complete_threshold = threshold;
         self
     }
+    /// Skip filler/recap episodes when auto-advancing (default false). Only has an
+    /// effect when an [`Enricher`] is also wired.
+    pub fn skip_filler(mut self, skip: bool) -> Self {
+        self.skip_filler = skip;
+        self
+    }
+    /// Auto-advance to the next episode after a completed episodic playback
+    /// (binge mode; default false).
+    pub fn autoplay_next(mut self, enabled: bool) -> Self {
+        self.autoplay_next = enabled;
+        self
+    }
 
     pub fn build(self) -> Engine {
         Engine {
@@ -548,6 +677,8 @@ impl EngineBuilder {
             } else {
                 0.85
             },
+            skip_filler: self.skip_filler,
+            autoplay_next: self.autoplay_next,
         }
     }
 }
@@ -557,6 +688,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use om_core::model::{Episode, IdSet, Season};
+    use om_core::ports::{PlayOptions, PlaySession};
+    use om_core::stream::{CacheState, Playback, PlaybackOrigin, Quality, SourceCandidate};
+    use std::sync::Mutex;
 
     // A fake metadata provider proves the app layer works against the *port*,
     // with zero network and no concrete adapter crate in scope (DIP).
@@ -695,5 +829,332 @@ mod tests {
         ];
         let out = dedup_by_imdb(items);
         assert_eq!(out.len(), 2);
+    }
+
+    // ---- Binge / auto-advance ------------------------------------------------
+    //
+    // These fakes exercise the play→advance loop with zero I/O. The episode
+    // number flows end-to-end through the chain so the player can record exactly
+    // which episodes were binged: the source provider stamps the requested
+    // episode into the candidate title, the resolver copies it into the
+    // `Playback.file_name`, and the fake player parses + records it.
+
+    /// Episodic metadata with a fixed-size single season (numbers `1..=count`).
+    struct SeasonMeta {
+        count: u32,
+    }
+
+    #[async_trait]
+    impl MetadataProvider for SeasonMeta {
+        fn name(&self) -> &str {
+            "season-meta"
+        }
+        async fn search(&self, _q: &str, _k: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+            Ok(vec![])
+        }
+        async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+            Err(CoreError::NotImplemented("season-meta.details"))
+        }
+        async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+            Ok(vec![Season {
+                number: 1,
+                episode_count: self.count,
+                name: None,
+            }])
+        }
+        async fn episodes(&self, _ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+            Ok((1..=self.count)
+                .map(|n| Episode {
+                    season,
+                    number: n,
+                    title: Some(format!("Episode {n}")),
+                    air_date: None,
+                    overview: None,
+                    runtime_minutes: Some(24),
+                    rating: None,
+                    still: None,
+                })
+                .collect())
+        }
+    }
+
+    /// One always-resolvable candidate per request, tagged with the episode so the
+    /// rest of the chain can carry it through to the player.
+    struct StampSource;
+
+    #[async_trait]
+    impl SourceProvider for StampSource {
+        fn name(&self) -> &str {
+            "stamp"
+        }
+        async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+            let ep = query.episode.unwrap_or(0);
+            Ok(vec![SourceCandidate {
+                provider: "stamp".into(),
+                title: format!("ep={ep}"),
+                quality: Quality::P1080,
+                size_bytes: 1,
+                seeders: Some(1),
+                info_hash: Some("0".repeat(40)),
+                magnet: None,
+                direct_url: None,
+                file_index: None,
+                cache: CacheState::Cached,
+                tags: Default::default(),
+            }])
+        }
+    }
+
+    /// Copies the candidate title (the `ep=N` stamp) into the playback file name.
+    struct EchoResolver;
+
+    #[async_trait]
+    impl StreamResolver for EchoResolver {
+        async fn resolve(&self, candidate: &SourceCandidate) -> CoreResult<Playback> {
+            Ok(Playback {
+                url: "http://localhost/stream".into(),
+                origin: PlaybackOrigin::LocalP2p,
+                file_name: candidate.title.clone(),
+            })
+        }
+    }
+
+    /// A player that "completes" instantly: it records the episode number parsed
+    /// from the playback file name, then its session reports a watched position
+    /// (>= threshold) and exits. The control reports position synchronously so the
+    /// monitor stores it on its first tick, before `wait()` resolves.
+    struct RecordingPlayer {
+        played: Arc<Mutex<Vec<u32>>>,
+        /// fraction watched to report (controls "completed").
+        fraction: f32,
+    }
+
+    #[async_trait]
+    impl Player for RecordingPlayer {
+        fn name(&self) -> &str {
+            "recording"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            playback: &Playback,
+            _opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            let ep = playback
+                .file_name
+                .strip_prefix("ep=")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            self.played.lock().unwrap().push(ep);
+            Ok(Box::new(RecordingSession {
+                control: Arc::new(RecordingControl {
+                    pos: (100.0 * self.fraction) as u32,
+                    dur: 100,
+                }),
+            }))
+        }
+    }
+
+    struct RecordingSession {
+        control: Arc<RecordingControl>,
+    }
+
+    #[async_trait]
+    impl PlaySession for RecordingSession {
+        async fn wait(&mut self) -> CoreResult<()> {
+            // Outlive one monitor tick (1s) so progress is stored before exit.
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            Ok(())
+        }
+        fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
+            Some(self.control.clone())
+        }
+    }
+
+    struct RecordingControl {
+        pos: u32,
+        dur: u32,
+    }
+
+    #[async_trait]
+    impl PlaybackControl for RecordingControl {
+        async fn position(&self) -> CoreResult<Option<u32>> {
+            Ok(Some(self.pos))
+        }
+        async fn duration(&self) -> CoreResult<Option<u32>> {
+            Ok(Some(self.dur))
+        }
+        async fn is_paused(&self) -> CoreResult<Option<bool>> {
+            Ok(Some(false))
+        }
+        async fn seek_absolute(&self, _secs: u32) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn set_chapters(&self, _chapters: &[Chapter]) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn quit(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    /// An enricher that reports a fixed filler set (and no skip windows).
+    struct FillerEnricher {
+        filler: Vec<u32>,
+    }
+
+    #[async_trait]
+    impl Enricher for FillerEnricher {
+        async fn skip_times(
+            &self,
+            _ids: &IdSet,
+            _episode: u32,
+            _len: Option<u32>,
+        ) -> CoreResult<SkipTimes> {
+            Ok(SkipTimes::default())
+        }
+        async fn filler_episodes(&self, _ids: &IdSet) -> CoreResult<Vec<u32>> {
+            Ok(self.filler.clone())
+        }
+    }
+
+    fn episodic_media() -> Media {
+        Media {
+            kind: MediaKind::Anime,
+            ids: IdSet::default().with_anilist(1),
+            title: "Test Show".into(),
+            original_title: None,
+            year: None,
+            score: None,
+            overview: None,
+            poster: None,
+            genres: vec![],
+            status: None,
+            episode_count: None,
+            season_count: None,
+        }
+    }
+
+    fn play_request(media: Media) -> PlayRequest {
+        PlayRequest {
+            media,
+            season: Some(1),
+            episode: Some(1),
+            episode_title: None,
+            episode_runtime_minutes: None,
+            include_uncached: false,
+        }
+    }
+
+    fn resolvable_candidate() -> SourceCandidate {
+        SourceCandidate {
+            provider: "stamp".into(),
+            title: "ep=1".into(),
+            quality: Quality::P1080,
+            size_bytes: 1,
+            seeders: Some(1),
+            info_hash: Some("0".repeat(40)),
+            magnet: None,
+            direct_url: None,
+            file_index: None,
+            cache: CacheState::Cached,
+            tags: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn binge_advances_to_season_end_then_stops() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+            .add_source(Arc::new(StampSource))
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: played.clone(),
+                fraction: 0.95, // every episode completes → keep advancing.
+            }))
+            .autoplay_next(true)
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // Played E1 (initial) then auto-advanced E2, E3, and stopped at the
+        // season's last episode (no E4).
+        assert_eq!(*played.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn binge_disabled_does_not_advance() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+            .add_source(Arc::new(StampSource))
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: played.clone(),
+                fraction: 0.95,
+            }))
+            .autoplay_next(false)
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // Only the initial episode played; no auto-advance.
+        assert_eq!(*played.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn binge_stops_when_episode_not_completed() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+            .add_source(Arc::new(StampSource))
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: played.clone(),
+                fraction: 0.10, // quit at low progress → no advance.
+            }))
+            .autoplay_next(true)
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        assert_eq!(*played.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn binge_skips_filler_episodes() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(SeasonMeta { count: 4 }))
+            .add_source(Arc::new(StampSource))
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: played.clone(),
+                fraction: 0.95,
+            }))
+            .enricher(Arc::new(FillerEnricher { filler: vec![2, 3] }))
+            .skip_filler(true)
+            .autoplay_next(true)
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // E2 and E3 are filler → bridged over: E1 then E4.
+        assert_eq!(*played.lock().unwrap(), vec![1, 4]);
     }
 }
