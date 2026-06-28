@@ -18,10 +18,15 @@ tracing = { workspace = true }
 # crates fetched over git (no crates.io publish); the tag keeps the build
 # reproducible. om-subs is the only place that names them — the rest of
 # open-media stays behind the SubtitleProvider port.
-os-core = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-config = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-compose = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-engine = { git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+#
+# The `version` alongside `git` is required so `cargo package` (which release-plz
+# runs for change detection) can verify the manifest — cargo demands a version
+# req on every dep when packaging. The `git`+`tag` source always wins for builds;
+# the version is never resolved from crates.io (these crates aren't published).
+os-core = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-config = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-compose = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+os-engine = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
