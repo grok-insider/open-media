@@ -82,6 +82,14 @@ version_group = "om"
 [[package]]
 name = "om-subs"
 version_group = "om"
+# om-subs has a *git* dependency (the open-subtitle engine), which release-plz
+# can't package in its isolated per-crate worktree ("Failed to find package
+# om-subs" — the git source doesn't resolve there). Exclude it from release-plz's
+# update/package change-detection. It still inherits the shared workspace version
+# (`version.workspace = true`) and ships inside the `om` binary, so nothing about
+# the single-version/one-release model changes — release-plz just doesn't try to
+# package this adapter standalone.
+release = false
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
 [[package]]
@@ -109,8 +117,10 @@ changelog_include = [
     "om-track",
     "om-history",
     "om-app",
-    "om-subs",
 ]
+# Note: om-subs is intentionally NOT in changelog_include — it's excluded from
+# release-plz processing (`release = false` above) because of its git dependency.
+# Its user-facing changes still surface via the normal commit scan on om-cli.
 
 # Preserve the curated changelog header (release-plz would otherwise substitute its
 # generic default). New version sections are inserted under `## [Unreleased]`.
