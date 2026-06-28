@@ -35,28 +35,19 @@ plus a `dev`-only-into-`master` CI guard (#19).
 
 ## P1 — correctness bugs still present
 
-### 1. Anime absolute episode numbering (season fix, Phase 2)
-- **Where:** `crates/om-sources/src/season.rs`, `nyaa.rs`; `crates/om-metadata/src/anilist.rs`; `crates/om-core/{ports.rs,stream.rs}`; `crates/om-app/src/lib.rs`.
-- **Problem:** some groups number a sequel continuously (S2E01 released as `… - 21`
-  when S1 had 20 eps). The season classifier keys off title markers, so an
-  absolute-numbered S2 release with no marker is treated as season 1 and won't
-  match an S2 pick (and the `… 01` query never fetches `… 21` anyway).
-- **Plan:**
-  1. AniList: add `relations { edges { relationType node { id format episodes } } }`
-     to the detail query; compute an episode **offset** = Σ episodes of prior
-     `TV` `PREQUEL`s (recurse with a small hop cap; verify shape vs live API).
-  2. `om-core`: add a defaulted `MetadataProvider::episode_offset(ids) -> Option<u32>`
-     (default `Ok(None)`; only AniList implements). Add `absolute_episode: Option<u32>`
-     to `SourceQuery`.
-  3. `om-app::find_sources`: for anime with an episode, set
-     `absolute_episode = offset + episode` from the first provider returning `Some`.
-  4. `nyaa`: extend the parser to also extract episode coverage (single / `01~20`
-     range / batch); accept a no-marker candidate whose episode == the absolute
-     number as the requested season; issue a **second RSS fetch** with the
-     absolute number and merge/dedup by infohash.
-- **Tests:** AniList relations→offset (fixture); nyaa e2e where S2E01 appears only
-  as `- 21` and is matched; an S1 search must NOT pick up `- 21`.
-- Also note (lower priority): singular `Season 1-5` batches are read as season 1
+> **#1 Anime absolute episode numbering (season fix, Phase 2) — done.** AniList
+> `DETAIL_QUERY` now fetches `relations { edges { relationType node { id format
+> episodes } } }`; `AniListProvider::episode_offset` sums prior `TV` `PREQUEL`
+> episode counts, walking the chain (hop cap 5). `MetadataProvider::episode_offset`
+> is a defaulted port method (`Ok(None)`; only AniList overrides). `SourceQuery`
+> carries `absolute_episode`; `om-app::find_sources` sets it to `offset + episode`
+> from the first provider returning `Some`. `om-sources::season::release_episode`
+> parses the episode coordinate, and `nyaa` issues a second RSS fetch on the
+> absolute number, accepts a marker-less release whose episode == the absolute
+> number as the requested season, and dedups by infohash. Tested: AniList
+> relations→offset (fixture), nyaa S2E01-as-`- 21` matched, S1 does not pick up
+> `- 21`.
+- Still open (lower priority): singular `Season 1-5` batches are read as season 1
   only (plural `Seasons 1-5` and `S01-S05` work); cross-arc/OVA chains unmodeled.
 
 > **#2 AniList anime-movie modeling — done** (PR #6): `format: MOVIE` → `Movie`.
