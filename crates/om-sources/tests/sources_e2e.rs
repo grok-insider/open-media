@@ -5,7 +5,7 @@ use om_core::ports::{SourceProvider, SourceQuery};
 use om_core::stream::{CacheState, Quality};
 use om_sources::{NyaaSource, TorrentioSource};
 use serde_json::json;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_contains};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn media(kind: MediaKind, ids: IdSet, title: &str) -> Media {
@@ -58,6 +58,7 @@ async fn torrentio_movie_parses_cached_and_uncached() {
         ),
         season: None,
         episode: None,
+        absolute_episode: None,
         include_uncached: true,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -105,6 +106,7 @@ async fn torrentio_series_uses_season_episode_path() {
         ),
         season: Some(1),
         episode: Some(1),
+        absolute_episode: None,
         include_uncached: false,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -126,6 +128,7 @@ async fn torrentio_without_imdb_returns_empty() {
         ),
         season: Some(1),
         episode: Some(1),
+        absolute_episode: None,
         include_uncached: false,
     };
     let out = src.find(&q).await.unwrap();
@@ -164,6 +167,7 @@ async fn nyaa_rss_search_returns_candidates() {
         ),
         season: Some(1),
         episode: Some(1),
+        absolute_episode: None,
         include_uncached: false,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -225,6 +229,7 @@ async fn nyaa_filters_out_wrong_season_releases() {
         media: m,
         season: Some(1),
         episode: Some(1),
+        absolute_episode: None,
         include_uncached: false,
     };
 
@@ -235,6 +240,159 @@ async fn nyaa_filters_out_wrong_season_releases() {
     assert!(candidates
         .iter()
         .all(|c| !c.title.contains("S2") && !c.title.contains("2nd Season")));
+}
+
+/// A continuously-numbered sequel: S2E01 is published on nyaa only as `… - 21`
+/// (S1 had 20 episodes), with no season marker. The engine supplies
+/// `absolute_episode = 21`; nyaa must issue a second search for `… 21` and accept
+/// the marker-less `- 21` release as the requested S2 episode.
+#[tokio::test]
+async fn nyaa_matches_absolute_numbered_sequel_episode() {
+    let server = MockServer::start().await;
+
+    // The relative-episode search (`… 01`) only returns the S1 premiere.
+    let rss_ep01 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! - 01 (1080p) [S1EP1].mkv</title>
+      <nyaa:seeders>500</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    // The absolute-episode search (`… 21`) returns the continuously-numbered S2
+    // premiere — no "S2"/"2nd Season" marker anywhere in the title.
+    let rss_ep21 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! - 21 (1080p) [ABSOLUTE].mkv</title>
+      <nyaa:seeders>400</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>2121212121212121212121212121212121212121</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .and(query_param_contains("q", "21"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_ep21))
+        .mount(&server)
+        .await;
+    // Fallback for the `… 01` search (and any other query): the S1-only feed.
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_ep01))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let mut m = media(
+        MediaKind::Anime,
+        IdSet::default().with_anilist(2),
+        "The Eminence in Shadow",
+    );
+    // S2's AniList entry carries the "2nd Season" romaji title → ordinal 2.
+    m.original_title = Some("Kage no Jitsuryokusha ni Naritakute! 2nd Season".into());
+    let q = SourceQuery {
+        media: m,
+        season: Some(2),
+        episode: Some(1),
+        // offset (S1 = 20 eps) + episode 1 = absolute 21.
+        absolute_episode: Some(21),
+        include_uncached: false,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+
+    // The marker-less `- 21` release is recognized as the requested S2 episode…
+    assert!(
+        candidates.iter().any(|c| c.title.contains("- 21")),
+        "absolute-numbered S2 release should be matched, got: {:?}",
+        candidates.iter().map(|c| &c.title).collect::<Vec<_>>()
+    );
+    // …and the S1 `- 01` premiere is NOT (it's season 1, not the requested S2).
+    assert!(
+        !candidates.iter().any(|c| c.title.contains("- 01")),
+        "S1 premiere must not leak into the S2 result"
+    );
+}
+
+/// The mirror of the above: a *season 1* search must not pull in a `… - 21`
+/// release. A true S1 (no prequel → `absolute_episode` is `None`) issues only the
+/// relative `… 01` search and never the second absolute `… 21` fetch, so the
+/// `- 21` file — served only on the `q=…21` query — never reaches the results.
+#[tokio::test]
+async fn nyaa_season_one_does_not_fetch_or_match_absolute_release() {
+    let server = MockServer::start().await;
+
+    // The `… 21` query is the ONLY place the absolute release is served. If S1
+    // wrongly issued the second fetch, this `- 21` item would appear.
+    let rss_ep21 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! - 21 (1080p) [ABSOLUTE].mkv</title>
+      <nyaa:seeders>400</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>2121212121212121212121212121212121212121</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    // Every other query (the `… 01` relative search) gets the S1 premiere only.
+    let rss_ep01 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Kage no Jitsuryokusha ni Naritakute! - 01 (1080p) [S1EP1].mkv</title>
+      <nyaa:seeders>500</nyaa:seeders><nyaa:size>1.3 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .and(query_param_contains("q", "21"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_ep21))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_ep01))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let mut m = media(
+        MediaKind::Anime,
+        IdSet::default().with_anilist(1),
+        "The Eminence in Shadow",
+    );
+    m.original_title = Some("Kage no Jitsuryokusha ni Naritakute!".into());
+    let q = SourceQuery {
+        media: m,
+        season: Some(1),
+        episode: Some(1),
+        // True season 1: no prior-seasons offset, so no absolute number.
+        absolute_episode: None,
+        include_uncached: false,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+
+    // The S1 premiere is returned, and the `- 21` absolute release is absent —
+    // S1 never issued the second fetch nor matched the marker-less `- 21`.
+    assert!(
+        candidates.iter().any(|c| c.title.contains("- 01")),
+        "S1 premiere should be present"
+    );
+    assert!(
+        !candidates.iter().any(|c| c.title.contains("- 21")),
+        "S1 search must not pick up the absolute-numbered `- 21` release"
+    );
 }
 
 #[tokio::test]
