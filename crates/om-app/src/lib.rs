@@ -65,6 +65,9 @@ pub struct Engine {
     skip_filler: bool,
     /// Auto-advance to the next episode after a completed episodic playback.
     autoplay_next: bool,
+    /// Seek to the saved position when starting playback. When `false`, history
+    /// is still recorded but playback always starts from the beginning.
+    resume: bool,
 }
 
 impl Engine {
@@ -283,13 +286,19 @@ impl Engine {
         let season = req.season.unwrap_or(1);
         let episode = req.episode.unwrap_or(1);
 
-        // 2. Resume position (best-effort — disabled if no history port).
+        // 2. Resume position (best-effort — disabled if no history port, or when
+        //    `resume` is off in config). `resume = false` gates only the
+        //    start-position seek; progress is still recorded by the monitor.
         let resume = self
-            .history
-            .as_ref()
-            .and_then(|h| h.resume(&media_key, season, episode).ok().flatten())
-            .map(|p| p.position_secs)
-            .filter(|s| *s > 5);
+            .resume
+            .then(|| {
+                self.history
+                    .as_ref()
+                    .and_then(|h| h.resume(&media_key, season, episode).ok().flatten())
+                    .map(|p| p.position_secs)
+                    .filter(|s| *s > 5)
+            })
+            .flatten();
 
         // 3. Skip windows (best-effort — anime, via the enricher). Forward the
         //    episode runtime (minutes → seconds) when known so AniSkip can validate
@@ -604,6 +613,7 @@ pub struct EngineBuilder {
     complete_threshold: f32,
     skip_filler: bool,
     autoplay_next: bool,
+    resume: Option<bool>,
 }
 
 impl EngineBuilder {
@@ -660,6 +670,13 @@ impl EngineBuilder {
         self.autoplay_next = enabled;
         self
     }
+    /// Seek to the saved resume position when starting playback (default true).
+    /// When `false`, playback always starts from the beginning, but progress is
+    /// still recorded to the [`HistoryStore`] for later sessions.
+    pub fn resume(mut self, enabled: bool) -> Self {
+        self.resume = Some(enabled);
+        self
+    }
 
     pub fn build(self) -> Engine {
         Engine {
@@ -679,6 +696,7 @@ impl EngineBuilder {
             },
             skip_filler: self.skip_filler,
             autoplay_next: self.autoplay_next,
+            resume: self.resume.unwrap_or(true),
         }
     }
 }
@@ -1156,5 +1174,142 @@ mod tests {
 
         // E2 and E3 are filler → bridged over: E1 then E4.
         assert_eq!(*played.lock().unwrap(), vec![1, 4]);
+    }
+
+    // ---- behavior.resume gating ---------------------------------------------
+    //
+    // A history store that always has a saved position, plus a player that
+    // captures the `start_at_secs` it was handed, isolate exactly what the
+    // `resume` flag controls: whether the saved position becomes a start seek.
+
+    /// History with a fixed saved position; records every `save` it receives so
+    /// the test can assert progress is still recorded when resume is off.
+    struct SavedHistory {
+        position: u32,
+        saved: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl HistoryStore for SavedHistory {
+        fn save(&self, progress: &WatchProgress) -> CoreResult<()> {
+            self.saved.lock().unwrap().push(progress.position_secs);
+            Ok(())
+        }
+        fn resume(
+            &self,
+            media_key: &str,
+            season: u32,
+            episode: u32,
+        ) -> CoreResult<Option<WatchProgress>> {
+            Ok(Some(WatchProgress {
+                media_key: media_key.into(),
+                season,
+                episode,
+                position_secs: self.position,
+                duration_secs: 1000,
+                updated_at: 0,
+            }))
+        }
+        fn recent(&self, _limit: usize) -> CoreResult<Vec<WatchProgress>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A player that records the `start_at_secs` it was asked to start at, then
+    /// exits immediately. Used to observe how the engine gated the resume seek.
+    struct StartCapturePlayer {
+        start: Arc<Mutex<Option<Option<u32>>>>,
+    }
+
+    #[async_trait]
+    impl Player for StartCapturePlayer {
+        fn name(&self) -> &str {
+            "start-capture"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            _playback: &Playback,
+            opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            *self.start.lock().unwrap() = Some(opts.start_at_secs);
+            Ok(Box::new(InstantSession))
+        }
+    }
+
+    /// A session with no control channel that exits at once: the play path runs
+    /// through to teardown without waiting on a monitor tick.
+    struct InstantSession;
+
+    #[async_trait]
+    impl PlaySession for InstantSession {
+        async fn wait(&mut self) -> CoreResult<()> {
+            Ok(())
+        }
+        fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
+            None
+        }
+    }
+
+    fn movie_request() -> PlayRequest {
+        PlayRequest {
+            media: media_with_ids("Interstellar", IdSet::default().with_imdb("tt0816692")),
+            season: None,
+            episode: None,
+            episode_title: None,
+            episode_runtime_minutes: None,
+            include_uncached: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_disabled_starts_from_zero_despite_saved_position() {
+        let start = Arc::new(Mutex::new(None));
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(StartCapturePlayer {
+                start: start.clone(),
+            }))
+            .history(Arc::new(SavedHistory {
+                position: 120,
+                saved: saved.clone(),
+            }))
+            .resume(false)
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // History has a 120s position, but resume is off → no start seek.
+        assert_eq!(*start.lock().unwrap(), Some(None));
+    }
+
+    #[tokio::test]
+    async fn resume_enabled_starts_from_saved_position() {
+        let start = Arc::new(Mutex::new(None));
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(StartCapturePlayer {
+                start: start.clone(),
+            }))
+            .history(Arc::new(SavedHistory {
+                position: 120,
+                saved: saved.clone(),
+            }))
+            .resume(true)
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        // resume on (the default) → the saved 120s becomes the start seek.
+        assert_eq!(*start.lock().unwrap(), Some(Some(120)));
     }
 }
