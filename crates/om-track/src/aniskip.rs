@@ -51,12 +51,21 @@ impl Default for AniSkipEnricher {
 
 #[async_trait]
 impl Enricher for AniSkipEnricher {
-    async fn skip_times(&self, ids: &IdSet, episode: u32) -> CoreResult<SkipTimes> {
+    async fn skip_times(
+        &self,
+        ids: &IdSet,
+        episode: u32,
+        episode_length_secs: Option<u32>,
+    ) -> CoreResult<SkipTimes> {
         let mal = ids
             .mal
             .ok_or_else(|| CoreError::NotFound("MAL id required for AniSkip".into()))?;
+        // AniSkip validates returned intervals against `episodeLength` (seconds);
+        // `0` is its sentinel for "unknown — skip that validation". Pass the real
+        // runtime when we have it so out-of-range intervals are filtered server-side.
+        let episode_length = episode_length_secs.unwrap_or(0);
         let url = format!(
-            "{}/v1/skip-times/{mal}/{episode}?types=op&types=ed&episodeLength=0",
+            "{}/v1/skip-times/{mal}/{episode}?types=op&types=ed&episodeLength={episode_length}",
             self.aniskip_base
         );
         let resp = self

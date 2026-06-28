@@ -329,6 +329,9 @@ struct App {
     sel_season: Option<u32>,
     sel_episode: Option<u32>,
     sel_episode_title: Option<String>,
+    /// Selected episode's runtime (minutes), forwarded to AniSkip for interval
+    /// validation. `None` for movies/unknown.
+    sel_episode_runtime: Option<u32>,
 
     candidates: Vec<SourceCandidate>,
     candidates_state: ListState,
@@ -381,6 +384,7 @@ impl App {
             sel_season: None,
             sel_episode: None,
             sel_episode_title: None,
+            sel_episode_runtime: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
             cfg,
@@ -752,6 +756,7 @@ fn select_result(app: &mut App) {
     app.sel_season = None;
     app.sel_episode = None;
     app.sel_episode_title = None;
+    app.sel_episode_runtime = None;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
@@ -759,7 +764,7 @@ fn select_result(app: &mut App) {
         let media = engine.details(&media.ids).await.unwrap_or(media);
         if media.kind == MediaKind::Movie {
             // Movies have no coordinates or episode title.
-            send_sources(&engine, &tx, media, None, None, None).await;
+            send_sources(&engine, &tx, media, None, None, None, None).await;
             return;
         }
         // Episodic: list seasons. >1 → picker; otherwise jump straight to the
@@ -834,16 +839,23 @@ fn select_episode(app: &mut App) {
     app.sel_season = Some(ep.season);
     app.sel_episode = Some(ep.number);
     app.sel_episode_title = ep.title.clone();
+    app.sel_episode_runtime = ep.runtime_minutes;
     app.busy = true;
     app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
     let tx = app.tx.clone();
-    let (season, episode, title) = (Some(ep.season), Some(ep.number), ep.title);
+    let (season, episode, title, runtime) = (
+        Some(ep.season),
+        Some(ep.number),
+        ep.title,
+        ep.runtime_minutes,
+    );
     tokio::spawn(async move {
-        send_sources(&engine, &tx, media, season, episode, title).await;
+        send_sources(&engine, &tx, media, season, episode, title, runtime).await;
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_sources(
     engine: &Arc<Engine>,
     tx: &mpsc::UnboundedSender<Msg>,
@@ -851,12 +863,14 @@ async fn send_sources(
     season: Option<u32>,
     episode: Option<u32>,
     episode_title: Option<String>,
+    episode_runtime_minutes: Option<u32>,
 ) {
     let req = PlayRequest {
         media: media.clone(),
         season,
         episode,
         episode_title,
+        episode_runtime_minutes,
         include_uncached: true,
     };
     let _ = match engine.find_sources(&req).await {
@@ -877,6 +891,7 @@ fn play_selected(app: &mut App) {
     let season = app.sel_season;
     let episode = app.sel_episode;
     let episode_title = app.sel_episode_title.clone();
+    let episode_runtime_minutes = app.sel_episode_runtime;
     app.busy = true;
     app.status = format!("Playing {}…", media.display_title());
 
@@ -888,6 +903,7 @@ fn play_selected(app: &mut App) {
             season,
             episode,
             episode_title,
+            episode_runtime_minutes,
             include_uncached: true,
         };
         let _ = tx.send(Msg::Status("Resolving + launching player…".into()));
