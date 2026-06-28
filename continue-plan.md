@@ -21,65 +21,47 @@ navigation + real episode lists; Sources filter/sort side panel (persisted to
 (`om-sources/src/season.rs` — explicit markers, multi-season ranges, roman
 numerals, bare-ordinal shorthand).
 
+**2026-06 roadmap batch (landed via `dev` → `master`):** AniList `MOVIE` format →
+`Movie` kind (#6); AniList airing-anime episode count from `nextAiringEpisode`
+(#18, re-land of #16); `Engine::details` merges cross-provider ids (#7);
+`OPEN_MEDIA_*` env overrides applied on load (#8); cached-source unconditional
+score tiebreak (#9); MAL `is_rewatching` for repeating status (#10); vlc resume
+via `--start-time` (#11); P2P state lock not held across the metadata wait (#12);
+release-tag parser nits — bit-depth/multi-audio/provider-guard/AD+PM+TB+/GiB
+(#13); configurable nyaa category (#14); real episode runtime → AniSkip (#15);
+plus a `dev`-only-into-`master` CI guard (#19).
+
 ---
 
 ## P1 — correctness bugs still present
 
-### 1. Anime absolute episode numbering (season fix, Phase 2)
-- **Where:** `crates/om-sources/src/season.rs`, `nyaa.rs`; `crates/om-metadata/src/anilist.rs`; `crates/om-core/{ports.rs,stream.rs}`; `crates/om-app/src/lib.rs`.
-- **Problem:** some groups number a sequel continuously (S2E01 released as `… - 21`
-  when S1 had 20 eps). The season classifier keys off title markers, so an
-  absolute-numbered S2 release with no marker is treated as season 1 and won't
-  match an S2 pick (and the `… 01` query never fetches `… 21` anyway).
-- **Plan:**
-  1. AniList: add `relations { edges { relationType node { id format episodes } } }`
-     to the detail query; compute an episode **offset** = Σ episodes of prior
-     `TV` `PREQUEL`s (recurse with a small hop cap; verify shape vs live API).
-  2. `om-core`: add a defaulted `MetadataProvider::episode_offset(ids) -> Option<u32>`
-     (default `Ok(None)`; only AniList implements). Add `absolute_episode: Option<u32>`
-     to `SourceQuery`.
-  3. `om-app::find_sources`: for anime with an episode, set
-     `absolute_episode = offset + episode` from the first provider returning `Some`.
-  4. `nyaa`: extend the parser to also extract episode coverage (single / `01~20`
-     range / batch); accept a no-marker candidate whose episode == the absolute
-     number as the requested season; issue a **second RSS fetch** with the
-     absolute number and merge/dedup by infohash.
-- **Tests:** AniList relations→offset (fixture); nyaa e2e where S2E01 appears only
-  as `- 21` and is matched; an S1 search must NOT pick up `- 21`.
-- Also note (lower priority): singular `Season 1-5` batches are read as season 1
+> **#1 Anime absolute episode numbering (season fix, Phase 2) — done.** AniList
+> `DETAIL_QUERY` now fetches `relations { edges { relationType node { id format
+> episodes } } }`; `AniListProvider::episode_offset` sums prior `TV` `PREQUEL`
+> episode counts, walking the chain (hop cap 5). `MetadataProvider::episode_offset`
+> is a defaulted port method (`Ok(None)`; only AniList overrides). `SourceQuery`
+> carries `absolute_episode`; `om-app::find_sources` sets it to `offset + episode`
+> from the first provider returning `Some`. `om-sources::season::release_episode`
+> parses the episode coordinate, and `nyaa` issues a second RSS fetch on the
+> absolute number, accepts a marker-less release whose episode == the absolute
+> number as the requested season, and dedups by infohash. Tested: AniList
+> relations→offset (fixture), nyaa S2E01-as-`- 21` matched, S1 does not pick up
+> `- 21`.
+- Still open (lower priority): singular `Season 1-5` batches are read as season 1
   only (plural `Seasons 1-5` and `S01-S05` work); cross-arc/OVA chains unmodeled.
 
-### 2. AniList mis-models anime movies & multi-cour seasons
-- **Where:** `crates/om-metadata/src/anilist.rs` (`AniListMedia` ~ln 206-225, `into_media` ~244, `seasons`/`episodes` 148-172).
-- **Problem:** the GraphQL query fetches `format` (TV/MOVIE/OVA/ONA/SPECIAL) but the
-  struct has **no `format` field**, so it's discarded — every entry maps to
-  `MediaKind::Anime` with `season_count: Some(1)`. Anime *movies* are mis-modeled
-  as episodic.
-- **Plan:** deserialize `format`; map MOVIE→`Movie` (or a movie flag) so the play
-  path skips season/episode coordinates for anime films.
+> **#2 AniList anime-movie modeling — done** (PR #6): `format: MOVIE` → `Movie`.
+> **#3 AniList airing episodes — done** (PR #18): falls back to
+> `nextAiringEpisode.episode - 1`. Still open: per-episode titles for anime
+> (the "anime episodes have no titles → `Series - S01E01`" gap) — moved to P3 below.
+> **#4 `Engine::details` id-merge — done** (PR #7).
 
-### 3. AniList airing shows yield zero episodes
-- **Where:** `anilist.rs::episodes` (160-171) — fabricates `1..=episode_count`.
-- **Problem:** currently-airing anime report `episodes: null` → `episode_count`
-  `None` → **empty** episode list. The TUI then falls back to 1 fabricated episode.
-- **Plan:** fall back to `nextAiringEpisode.episode - 1` (add to query) or a sane
-  minimum; consider a Jikan/AniList per-episode title fetch (also fills the
-  "anime episodes have no titles → `Series - S01E01`" gap).
-
-### 4. `Engine::details` drops cross-provider ids (no `IdSet::merge`)
-- **Where:** `crates/om-app/src/lib.rs::details` (~91-101).
-- **Problem:** `details` returns the answering provider's `Media` wholesale; ids
-  discovered during search (e.g. AniList's `mal`) are lost if a different provider
-  resolves details. `IdSet::merge` exists and is used in search dedup (ln 417) but
-  not here.
-- **Plan:** merge the input `ids` into the returned `media.ids` before returning.
-
-### 5. Dead/misleading config keys
+### 5. Dead/misleading config keys (partially done)
+- ~~**`OPEN_MEDIA_*` env overrides**~~ — **done** (PR #8): `load()` now applies
+  `OPEN_MEDIA_{TMDB_API_KEY,REAL_DEBRID_TOKEN,ANILIST_TOKEN,MAL_TOKEN}`.
 - **`behavior.resume`** (`compose.rs` never passes it; `om-app/lib.rs:210` always
   resumes when history has a position). Wire it (skip resume when false) or remove.
 - **`ui.theme`** loaded but unused (TUI hardcodes colors). Wire or remove.
-- **`OPEN_MEDIA_*` env overrides** — `om-config` doc claims they exist; `load()`
-  reads only the file. Implement env overrides or drop the doc line.
 
 ---
 
@@ -113,27 +95,18 @@ numerals, bare-ordinal shorthand).
 
 ## P3 — smaller correctness nits & polish
 
-- **Scoring:** cached results get **no bonus** when `prefer_cached == false`
-  (`om-core/src/scoring.rs` ~51), so a slow uncached source can outrank an instant
-  cached one of equal quality. Give cached a small unconditional tiebreak.
-- **MAL `Repeating` → `"watching"`** collapse (`om-track/src/mal.rs` ~91); use
-  `is_rewatching`.
-- **AniSkip `episodeLength=0`** hardcoded (`om-track/src/aniskip.rs` ~59) disables
-  interval validation; pass the real runtime when known.
-- **vlc ignores resume** (`om-player/src/vlc.rs` ~48) — pass a `--start=` equivalent.
-- **P2P holds the state mutex across the ~90s metadata wait**
-  (`om-stream/src/p2p.rs`) — serializes concurrent calls/cleanup; don't hold the
-  lock while sleeping.
+Done in the 2026-06 batch (struck): ~~Scoring cached tiebreak~~ (#9);
+~~MAL `Repeating`→`is_rewatching`~~ (#10); ~~AniSkip `episodeLength` real runtime~~
+(#15); ~~vlc resume `--start-time`~~ (#11); ~~P2P mutex held across metadata wait~~
+(#12); ~~nyaa category configurable~~ (#14); ~~release-tag parser nits~~ (#13).
+
+Still open:
 - **RD `check_cached` is a no-op** (`om-debrid/src/realdebrid.rs` ~150) — cache
   state for non-Torrentio-flagged candidates is always `Unknown`. Revisit when RD
   exposes a working bulk endpoint.
-- **nyaa category hardcoded** `c=1_2` (English-translated) (`nyaa.rs:92`) — no
-  raw/all-anime option; make configurable.
-- **Release-tag parser nits** (`om-sources/src/tags.rs`): bit-depth (`10bit`) folded
-  into the video codec field; only the first audio codec captured; provider
-  extraction can yield garbage when `name` has no `[...]`; `[AD+]`/`[PM+]`/`[TB+]`
-  (AllDebrid/Premiumize/Torbox) cache flags unrecognized; `GiB` not matched in
-  Torrentio's emoji size regex.
+- **Anime per-episode titles** — AniList episodes have no `title` (`anilist.rs`),
+  so the player/Discord shows `Series - S01E01`. Consider a Jikan/AniList
+  per-episode title fetch (carried over from #3).
 
 ---
 

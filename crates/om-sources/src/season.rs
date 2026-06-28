@@ -12,9 +12,11 @@
 //! the season(s) it covers so the wrong season can be filtered out.
 //!
 //! Handled: explicit numeric markers (`S2`, `Season 2`, `2nd Season`), multi-season
-//! ranges (`S01-S05`, `Seasons 1-5`), and trailing roman numerals (`… II`). Not yet
-//! handled: absolute episode numbering (a sequel numbered `… - 21`) — that needs an
-//! episode offset from AniList relations (see `future-features.md`).
+//! ranges (`S01-S05`, `Seasons 1-5`), and trailing roman numerals (`… II`). Also
+//! absolute episode numbering (a sequel numbered `… - 21`): [`release_episode`]
+//! parses the episode coordinate so a marker-less release whose number is the
+//! franchise-continuous one can be matched, given an offset from AniList relations
+//! (`MetadataProvider::episode_offset`, applied in `om-app`).
 
 use std::sync::LazyLock;
 
@@ -46,6 +48,13 @@ re!(R_S_N, r"\bs0*(\d+)\b");
 // sequel marker even without the word "Season".
 re!(R_NTH_BARE, r"\b(\d+)(?:st|nd|rd|th)\b");
 re!(R_ROMAN_START, r"^\s*(viii|vii|vi|iv|ix|iii|ii|x|v)\b");
+
+// Episode coordinate in the decoration: a `-`/`~`/`#`-introduced number, with an
+// optional `~`/`-` range end (`- 21`, `- 01 ~ 20`, `#01-12`). Anchored on a
+// `-`/`~`/`#` lead so a bare resolution/year token elsewhere isn't read as the
+// episode. 1–4 digits covers absolute counts without matching `1080`/`2024`,
+// which are not `-`-led in a release name.
+re!(R_EPISODE, r"[-~#]\s*0*(\d{1,4})(?:\s*[-~]\s*0*(\d{1,4}))?");
 
 /// Which season(s) a release covers. `None` means no marker → treated as the
 /// first season (the bare `- 01` convention).
@@ -135,6 +144,62 @@ pub fn release_season(release_title: &str, base: &str) -> SeasonMatch {
         return SeasonMatch::Single(roman_to_u32(&c[1]));
     }
     SeasonMatch::None
+}
+
+/// Which episode(s) a release covers, parsed from its decoration. Used only to
+/// recognize an *absolute-numbered* sequel release (a no-season-marker entry
+/// whose episode number is the franchise-continuous one, e.g. `… - 21`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpisodeMatch {
+    /// No episode coordinate found (e.g. a season-pack named only `Complete`).
+    None,
+    /// A single episode (`… - 21`).
+    Single(u32),
+    /// An inclusive episode batch (`… - 01 ~ 20`).
+    Range(u32, u32),
+}
+
+impl EpisodeMatch {
+    /// Whether this release's episode coverage includes `n`.
+    pub fn covers(&self, n: u32) -> bool {
+        match self {
+            EpisodeMatch::None => false,
+            EpisodeMatch::Single(e) => *e == n,
+            EpisodeMatch::Range(a, b) => *a <= n && n <= *b,
+        }
+    }
+}
+
+/// Extract the episode coordinate from a release title, anchored on the known
+/// `base` name (so a number inside the franchise name isn't read as the episode).
+///
+/// This exists for absolute-numbering: when a sequel is numbered continuously
+/// (`[SubsPlease] <base> - 21`), the episode token `21` is the only signal that
+/// it's the requested absolute episode, since it carries no season marker. The
+/// caller pairs this with [`release_season`] returning [`SeasonMatch::None`].
+pub fn release_episode(release_title: &str, base: &str) -> EpisodeMatch {
+    let rel = normalize(release_title);
+    let base_n = normalize(base);
+    let decoration = match base_n.is_empty() {
+        true => rel.as_str(),
+        false => match rel.find(&base_n) {
+            Some(pos) => &rel[pos + base_n.len()..],
+            None => rel.as_str(),
+        },
+    };
+    match R_EPISODE.captures(decoration) {
+        Some(c) => {
+            let a: u32 = match c[1].parse() {
+                Ok(v) => v,
+                Err(_) => return EpisodeMatch::None,
+            };
+            match c.get(2).and_then(|m| m.as_str().parse::<u32>().ok()) {
+                Some(b) => EpisodeMatch::Range(a.min(b), a.max(b)),
+                None => EpisodeMatch::Single(a),
+            }
+        }
+        None => EpisodeMatch::None,
+    }
 }
 
 /// Lowercase; keep alphanumerics plus `-`/`~` (so season/episode ranges survive);
@@ -296,5 +361,51 @@ mod tests {
         );
         assert_eq!(m, SeasonMatch::None);
         assert!(m.covers(1));
+    }
+
+    #[test]
+    fn release_episode_parses_single_and_range() {
+        // Single absolute episode of a continuously-numbered sequel.
+        assert_eq!(
+            release_episode("[SubsPlease] Frieren - 21 (1080p) [ABCD].mkv", "Frieren"),
+            EpisodeMatch::Single(21)
+        );
+        // A batch range.
+        assert_eq!(
+            release_episode("[Erai-raws] Frieren - 01 ~ 20 [1080p][Batch]", "Frieren"),
+            EpisodeMatch::Range(1, 20)
+        );
+        // Leading zeros are stripped, not octal-parsed.
+        assert_eq!(
+            release_episode("[X] Frieren - 09 (1080p)", "Frieren"),
+            EpisodeMatch::Single(9)
+        );
+    }
+
+    #[test]
+    fn release_episode_ignores_numbers_in_base_and_resolution() {
+        // The `100` is inside the base; the only episode token is `- 21`. A bare
+        // `1080p` (not `-`-led) must not be read as the episode.
+        assert_eq!(
+            release_episode("[X] Mob Psycho 100 - 21 (1080p)", "Mob Psycho 100"),
+            EpisodeMatch::Single(21)
+        );
+    }
+
+    #[test]
+    fn release_episode_none_when_no_coordinate() {
+        assert_eq!(
+            release_episode("[Group] Frieren Complete Batch [1080p]", "Frieren"),
+            EpisodeMatch::None
+        );
+    }
+
+    #[test]
+    fn episode_match_covers() {
+        assert!(EpisodeMatch::Single(21).covers(21));
+        assert!(!EpisodeMatch::Single(21).covers(20));
+        assert!(EpisodeMatch::Range(1, 20).covers(20));
+        assert!(!EpisodeMatch::Range(1, 20).covers(21));
+        assert!(!EpisodeMatch::None.covers(1));
     }
 }

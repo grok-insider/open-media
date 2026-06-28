@@ -141,23 +141,71 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
         ConfigAction::Show => {
             let cfg = om_config::load()?;
             println!("config: {}", om_config::config_path().display());
+
+            // Secrets are masked via mask(); raw tokens are never printed.
+            println!("[credentials]");
             println!(
-                "  tmdb_api_key      = {}",
+                "  tmdb_api_key          = {}",
                 mask(&cfg.credentials.tmdb_api_key)
             );
-            println!("  debrid_provider   = {}", cfg.credentials.debrid_provider);
             println!(
-                "  real_debrid_token = {}",
+                "  debrid_provider       = {}",
+                cfg.credentials.debrid_provider
+            );
+            println!(
+                "  real_debrid_token     = {}",
                 mask(&cfg.credentials.real_debrid_token)
             );
             println!(
-                "  anilist_token     = {}",
+                "  anilist_token         = {}",
                 mask(&cfg.credentials.anilist_token)
             );
-            println!("  player.command    = {}", cfg.player.command);
-            println!("  quality           = {}", cfg.providers.quality);
-            println!("  nyaa_direct       = {}", cfg.providers.nyaa_direct);
-            println!("  skip_intro_outro  = {}", cfg.behavior.skip_intro_outro);
+            println!(
+                "  mal_token             = {}",
+                mask(&cfg.credentials.mal_token)
+            );
+
+            println!("[providers]");
+            println!("  quality               = {}", cfg.providers.quality);
+            println!("  show_uncached         = {}", cfg.providers.show_uncached);
+            println!("  cinemeta              = {}", cfg.providers.cinemeta);
+            println!("  nyaa_direct           = {}", cfg.providers.nyaa_direct);
+            println!("  nyaa_category         = {}", cfg.providers.nyaa_category);
+            println!(
+                "  torrentio_providers   = {}",
+                cfg.providers.torrentio_providers.join(", ")
+            );
+
+            println!("[player]");
+            println!("  player_command        = {}", cfg.player.command);
+            println!("  player.args           = {}", cfg.player.args.join(" "));
+
+            println!("[streaming]");
+            println!("  http_port             = {}", cfg.streaming.http_port);
+            println!(
+                "  cleanup_after_playback = {}",
+                cfg.streaming.cleanup_after_playback
+            );
+
+            println!("[behavior]");
+            println!(
+                "  skip_intro_outro      = {}",
+                cfg.behavior.skip_intro_outro
+            );
+            println!("  skip_filler           = {}", cfg.behavior.skip_filler);
+            println!("  autoplay_next         = {}", cfg.behavior.autoplay_next);
+            println!("  resume                = {}", cfg.behavior.resume);
+            println!(
+                "  complete_threshold    = {}",
+                cfg.behavior.complete_threshold
+            );
+            println!(
+                "  discord_presence      = {}",
+                cfg.behavior.discord_presence
+            );
+
+            println!("[ui]");
+            println!("  theme                 = {}", cfg.ui.theme);
             Ok(())
         }
         ConfigAction::Set { kv } => {
@@ -166,12 +214,39 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("expected key=value, got `{kv}`"))?;
             let mut cfg = om_config::load().unwrap_or_default();
             match key {
+                // Strings — taken verbatim.
                 "tmdb_api_key" => cfg.credentials.tmdb_api_key = value.to_string(),
                 "real_debrid_token" => cfg.credentials.real_debrid_token = value.to_string(),
                 "anilist_token" => cfg.credentials.anilist_token = value.to_string(),
                 "mal_token" => cfg.credentials.mal_token = value.to_string(),
                 "debrid_provider" => cfg.credentials.debrid_provider = value.to_string(),
                 "player_command" => cfg.player.command = value.to_string(),
+                "quality" => cfg.providers.quality = value.to_string(),
+                "nyaa_category" => cfg.providers.nyaa_category = value.to_string(),
+                "theme" => cfg.ui.theme = value.to_string(),
+                // Bools — parsed with a clear error on bad input.
+                "show_uncached" => cfg.providers.show_uncached = parse_bool(key, value)?,
+                "nyaa_direct" => cfg.providers.nyaa_direct = parse_bool(key, value)?,
+                "cinemeta" => cfg.providers.cinemeta = parse_bool(key, value)?,
+                "skip_intro_outro" => cfg.behavior.skip_intro_outro = parse_bool(key, value)?,
+                "skip_filler" => cfg.behavior.skip_filler = parse_bool(key, value)?,
+                "autoplay_next" => cfg.behavior.autoplay_next = parse_bool(key, value)?,
+                "resume" => cfg.behavior.resume = parse_bool(key, value)?,
+                "discord_presence" => cfg.behavior.discord_presence = parse_bool(key, value)?,
+                "cleanup_after_playback" => {
+                    cfg.streaming.cleanup_after_playback = parse_bool(key, value)?
+                }
+                // Numbers — parsed with a clear error on bad input.
+                "complete_threshold" => {
+                    cfg.behavior.complete_threshold = value.parse::<f32>().map_err(|e| {
+                        anyhow::anyhow!("`{key}` expects a number (e.g. 0.85), got `{value}`: {e}")
+                    })?
+                }
+                "http_port" => {
+                    cfg.streaming.http_port = value.parse::<u16>().map_err(|e| {
+                        anyhow::anyhow!("`{key}` expects a port number 0-65535, got `{value}`: {e}")
+                    })?
+                }
                 other => anyhow::bail!("unknown key `{other}`"),
             }
             om_config::save(&cfg)?;
@@ -285,6 +360,16 @@ fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {
         "series" | "tv" => Some(MediaKind::Series),
         "anime" => Some(MediaKind::Anime),
         _ => None,
+    }
+}
+
+/// Parse a boolean config value, accepting common spellings and returning an
+/// actionable error (naming the key) on anything else.
+fn parse_bool(key: &str, value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => anyhow::bail!("`{key}` expects a boolean (true/false), got `{other}`"),
     }
 }
 

@@ -145,10 +145,18 @@ history; `CHANGELOG` is release-plz–generated from the commits):
   season from 1).
 - **TUI:** a Seasons screen + real per-season episode lists; a focusable filter/sort
   side panel on Sources, persisted to `[ui.sources]`.
+- **2026-06 audit batch** (landed via a `dev` integration branch → `master`):
+  AniList `MOVIE`→`Movie` kind and airing-anime episode counts from
+  `nextAiringEpisode`; `Engine::details` cross-provider id merge; `OPEN_MEDIA_*`
+  env overrides; cached-source score tiebreak; MAL `is_rewatching`; vlc resume;
+  P2P lock-across-metadata-wait fix; release-tag parser nits; configurable nyaa
+  category; real runtime to AniSkip. Plus repo plumbing: a `dev`-only-into-`master`
+  CI guard (required check on `master`).
 
-**Remaining follow-ups** (audit items, anime absolute episode numbering, binge
-auto-advance, pagination, tracker OAuth, and smaller correctness nits) are tracked
-in **`continue-plan.md`** — check there before starting new work.
+**Remaining follow-ups** (anime *absolute* episode numbering, binge auto-advance,
+pagination, `om config set` coverage, tracker OAuth, Discord app id, the
+`behavior.resume`/`ui.theme` dead keys, and a few smaller nits) are tracked in
+**`continue-plan.md`** — check there before starting new work.
 
 ---
 

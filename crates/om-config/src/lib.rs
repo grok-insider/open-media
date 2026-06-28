@@ -160,6 +160,11 @@ pub struct Behavior {
     /// Skip filler/recap episodes when bingeing (anime, via Jikan).
     #[serde(default)]
     pub skip_filler: bool,
+    /// After an episode completes, automatically advance to the next one and keep
+    /// playing (binge mode). Off by default; only triggers for episodic content
+    /// and only when the finished episode crossed `complete_threshold`.
+    #[serde(default)]
+    pub autoplay_next: bool,
     /// Resume from the last saved position.
     #[serde(default = "default_true")]
     pub resume: bool,
@@ -176,6 +181,7 @@ impl Default for Behavior {
         Self {
             skip_intro_outro: true,
             skip_filler: false,
+            autoplay_next: false,
             resume: true,
             complete_threshold: default_complete_threshold(),
             discord_presence: false,
@@ -474,6 +480,24 @@ tmdb_api_key = "abc"
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.providers.nyaa_category, "1_3");
+    }
+
+    #[test]
+    fn autoplay_next_default_and_roundtrip() {
+        // Off by default on an empty document, matching the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.behavior.autoplay_next);
+        assert_eq!(
+            cfg.behavior.autoplay_next,
+            Behavior::default().autoplay_next
+        );
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.behavior.autoplay_next = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.behavior.autoplay_next);
     }
 
     #[test]

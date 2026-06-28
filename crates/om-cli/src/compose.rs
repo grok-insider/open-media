@@ -25,7 +25,10 @@ use om_track::{AniListTracker, AniSkipEnricher, CompositeTracker, DiscordPresenc
 pub fn build_engine(cfg: &Config) -> Engine {
     let mut builder = EngineBuilder::default()
         .scoring_prefs(scoring_prefs(cfg))
-        .complete_threshold(cfg.behavior.complete_threshold);
+        .complete_threshold(cfg.behavior.complete_threshold)
+        .skip_filler(cfg.behavior.skip_filler)
+        .autoplay_next(cfg.behavior.autoplay_next)
+        .resume(cfg.behavior.resume);
 
     // --- Metadata providers ---
     // TMDB first (richest) when a key is configured; its IMDB ids win on dedup.

@@ -12,6 +12,12 @@ use crate::map_net;
 const DEFAULT_BASE: &str = "https://api.themoviedb.org/3";
 const IMAGE_BASE: &str = "https://image.tmdb.org/t/p/w500";
 
+/// Upper bound on TMDB search pages fetched per query. TMDB returns 20 results
+/// per page, so 3 pages caps a query at ~60 candidates — enough depth for
+/// ranking without letting a generic term (which can report hundreds of pages)
+/// fan out into a flood of requests.
+const MAX_SEARCH_PAGES: u32 = 3;
+
 /// TMDB-backed metadata provider.
 pub struct TmdbProvider {
     client: Client,
@@ -97,18 +103,38 @@ impl MetadataProvider for TmdbProvider {
             Some(MediaKind::Series) | Some(MediaKind::Anime) => "/search/tv",
             None => "/search/multi",
         };
-        let resp: SearchResponse = self
-            .get_json(path, &[("query", query), ("include_adult", "false")])
-            .await?;
-
         let forced_kind = match kind {
             Some(MediaKind::Movie) => Some(MediaKind::Movie),
             Some(MediaKind::Series) | Some(MediaKind::Anime) => Some(MediaKind::Series),
             None => None,
         };
 
-        Ok(resp
-            .results
+        // Page 1 also tells us how many pages exist; fetch a bounded number of
+        // additional pages sequentially and concatenate, so deeper results are
+        // available for ranking without unbounded fan-out (TMDB can report
+        // hundreds of pages for a generic term).
+        let first: SearchResponse = self
+            .get_json(path, &[("query", query), ("include_adult", "false")])
+            .await?;
+        let last_page = first.total_pages.unwrap_or(1).clamp(1, MAX_SEARCH_PAGES);
+
+        let mut results = first.results;
+        for page in 2..=last_page {
+            let page_str = page.to_string();
+            let resp: SearchResponse = self
+                .get_json(
+                    path,
+                    &[
+                        ("query", query),
+                        ("include_adult", "false"),
+                        ("page", page_str.as_str()),
+                    ],
+                )
+                .await?;
+            results.extend(resp.results);
+        }
+
+        Ok(results
             .into_iter()
             .filter_map(|r| r.into_media(forced_kind))
             .collect())
@@ -173,6 +199,10 @@ impl MetadataProvider for TmdbProvider {
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     results: Vec<SearchResult>,
+    /// Total pages TMDB has for this query; absent on malformed responses, in
+    /// which case we treat it as a single page.
+    #[serde(default)]
+    total_pages: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,6 +411,100 @@ mod tests {
             vote_average: None,
         };
         assert!(person.into_media(None).is_none());
+    }
+
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a `/search/movie` page response: `n` results with sequential ids
+    /// offset by `start`, advertising `total_pages`.
+    fn movie_page(start: i32, n: i32, total_pages: u32) -> serde_json::Value {
+        let results: Vec<_> = (0..n)
+            .map(|i| {
+                let id = start + i;
+                serde_json::json!({
+                    "id": id,
+                    "media_type": "movie",
+                    "title": format!("Movie {id}"),
+                    "release_date": "2020-01-01"
+                })
+            })
+            .collect();
+        serde_json::json!({ "results": results, "total_pages": total_pages, "page": 1 })
+    }
+
+    #[tokio::test]
+    async fn search_merges_multiple_pages_up_to_total() {
+        let server = MockServer::start().await;
+
+        // total_pages = 2 → adapter fetches page 1 then page 2 and concatenates.
+        Mock::given(method("GET"))
+            .and(path("/search/movie"))
+            .and(query_param("query", "x"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(movie_page(100, 2, 2)))
+            .mount(&server)
+            .await;
+        // Page 1: no `page` query param present.
+        Mock::given(method("GET"))
+            .and(path("/search/movie"))
+            .and(query_param("query", "x"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(movie_page(1, 3, 2)))
+            .mount(&server)
+            .await;
+
+        let provider = TmdbProvider::with_base_url("k", server.uri());
+        let results = provider.search("x", Some(MediaKind::Movie)).await.unwrap();
+
+        // 3 from page 1 + 2 from page 2.
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].ids.tmdb, Some(1));
+        assert_eq!(results[4].ids.tmdb, Some(101));
+    }
+
+    #[tokio::test]
+    async fn search_caps_pages_at_max_even_when_more_exist() {
+        let server = MockServer::start().await;
+
+        // TMDB advertises far more pages than we will fetch; the adapter must
+        // stop at MAX_SEARCH_PAGES. Every numbered page yields 2 results.
+        for p in 2..=MAX_SEARCH_PAGES {
+            Mock::given(method("GET"))
+                .and(path("/search/movie"))
+                .and(query_param("page", p.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(movie_page(
+                    100 * p as i32,
+                    2,
+                    999,
+                )))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/search/movie"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(movie_page(1, 2, 999)))
+            .mount(&server)
+            .await;
+
+        let provider = TmdbProvider::with_base_url("k", server.uri());
+        let results = provider.search("x", Some(MediaKind::Movie)).await.unwrap();
+
+        // 2 results per page × MAX_SEARCH_PAGES pages, and no more.
+        assert_eq!(results.len(), 2 * MAX_SEARCH_PAGES as usize);
+    }
+
+    #[tokio::test]
+    async fn search_single_page_when_total_pages_is_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/movie"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(movie_page(1, 2, 1)))
+            .mount(&server)
+            .await;
+
+        let provider = TmdbProvider::with_base_url("k", server.uri());
+        let results = provider.search("x", Some(MediaKind::Movie)).await.unwrap();
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
