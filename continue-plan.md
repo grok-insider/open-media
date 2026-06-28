@@ -56,32 +56,24 @@ plus a `dev`-only-into-`master` CI guard (#19).
 > (the "anime episodes have no titles → `Series - S01E01`" gap) — moved to P3 below.
 > **#4 `Engine::details` id-merge — done** (PR #7).
 
-### 5. Dead/misleading config keys (partially done)
-- ~~**`OPEN_MEDIA_*` env overrides**~~ — **done** (PR #8): `load()` now applies
-  `OPEN_MEDIA_{TMDB_API_KEY,REAL_DEBRID_TOKEN,ANILIST_TOKEN,MAL_TOKEN}`.
-- **`behavior.resume`** (`compose.rs` never passes it; `om-app/lib.rs:210` always
-  resumes when history has a position). Wire it (skip resume when false) or remove.
-- **`ui.theme`** loaded but unused (TUI hardcodes colors). Wire or remove.
+### 5. Dead/misleading config keys — **all done**
+- ~~**`OPEN_MEDIA_*` env overrides**~~ — done (PR #8).
+- ~~**`behavior.resume`**~~ — done (PR #28): `resume(bool)` on the Engine/builder,
+  wired from config; when false the start-seek is skipped (progress still saved).
+- ~~**`ui.theme`**~~ — done (PR #25): a dark/light Theme threaded through the TUI
+  (`auto`→dark for now; true auto-detection is a follow-up).
 
 ---
 
 ## P2 — incomplete features
 
-### 6. Binge / auto-advance to next episode
-- **Where:** `crates/om-app/src/lib.rs::play` (doc mentions it ~ln 185; not done).
-- **Plan:** after playback ends and progress ≥ threshold, advance to the next
-  episode in the season and recurse; call `Enricher::filler_episodes` to skip
-  filler (the enricher is wired when `skip_filler`, but never consulted).
-
-### 7. Pagination / "load more"
-- TMDB `search` fetches page 1 only (`tmdb.rs` — `total_pages` not read); AniList
-  `Page(perPage: 15)`; nyaa single RSS page. Add paging or a "load more" affordance.
-
-### 8. `om config set` covers only 6 keys
-- **Where:** `crates/om-cli/src/main.rs::cmd_config` (~168-176).
-- Add setters for `quality`, `show_uncached`, `nyaa_direct`, `cinemeta`,
-  `skip_intro_outro`, `http_port`, `complete_threshold`, … (currently file-edit
-  only). Also `config show` omits many loaded keys — make it complete.
+> **#6 Binge / auto-advance — done** (PR #26): after an episode completes,
+> auto-advance to the next when `behavior.autoplay_next` is set; filler-aware via
+> `Enricher::filler_episodes`.
+> **#7 Pagination — done** (PR #27): TMDB reads `total_pages` and AniList fetches
+> more results, inside each provider (no port change). nyaa stays single-page.
+> **#8 `om config set` coverage — done** (PR #24): setters for the full key set
+> with typed parsing; `config show` prints all loaded keys (secrets masked).
 
 ### 9. Tracker OAuth acquisition + MAL refresh
 - AniList/MAL consume a pre-obtained token; no loopback OAuth flow, and MAL tokens
