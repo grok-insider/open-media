@@ -266,6 +266,8 @@ struct AniListMedia {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
     genres: Vec<String>,
     #[serde(default)]
     streaming_episodes: Vec<StreamingEpisode>,
@@ -332,8 +334,17 @@ impl AniListMedia {
             .or_else(|| self.title.native.clone())
             .unwrap_or_default();
         let original = self.title.romaji.or(self.title.native);
+        // AniList tags anime films as `format: "MOVIE"`. Model them as Movies
+        // with no season/episode coordinates so the play path streams the film
+        // directly instead of asking for a season+episode it doesn't have.
+        let is_movie = self.format.as_deref() == Some("MOVIE");
+        let (kind, episode_count, season_count) = if is_movie {
+            (MediaKind::Movie, None, None)
+        } else {
+            (MediaKind::Anime, self.episodes, Some(1))
+        };
         Media {
-            kind: MediaKind::Anime,
+            kind,
             ids,
             title,
             original_title: original,
@@ -343,8 +354,8 @@ impl AniListMedia {
             poster: self.cover_image.and_then(|c| c.large),
             genres: self.genres,
             status: self.status,
-            episode_count: self.episodes,
-            season_count: Some(1),
+            episode_count,
+            season_count,
         }
     }
 }
@@ -378,6 +389,39 @@ mod tests {
         assert_eq!(m.year, Some(2023));
         assert_eq!(m.score, Some(8.9));
         assert_eq!(m.episode_count, Some(28));
+    }
+
+    #[test]
+    fn movie_format_maps_to_movie_kind_without_coordinates() {
+        let json = serde_json::json!({
+            "id": 199,
+            "title": { "romaji": "Sen to Chihiro no Kamikakushi", "english": "Spirited Away" },
+            "seasonYear": 2001,
+            "episodes": 1,
+            "format": "MOVIE",
+        });
+        let media: AniListMedia = serde_json::from_value(json).unwrap();
+        let m = media.into_media();
+        assert_eq!(m.kind, MediaKind::Movie);
+        // Films carry no season/episode coordinates so the play path streams
+        // the file directly.
+        assert_eq!(m.season_count, None);
+        assert_eq!(m.episode_count, None);
+    }
+
+    #[test]
+    fn tv_format_still_maps_to_anime_kind() {
+        let json = serde_json::json!({
+            "id": 1,
+            "title": { "romaji": "Some Show" },
+            "episodes": 12,
+            "format": "TV",
+        });
+        let media: AniListMedia = serde_json::from_value(json).unwrap();
+        let m = media.into_media();
+        assert_eq!(m.kind, MediaKind::Anime);
+        assert_eq!(m.season_count, Some(1));
+        assert_eq!(m.episode_count, Some(12));
     }
 
     #[test]
