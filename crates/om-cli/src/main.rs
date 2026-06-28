@@ -7,6 +7,7 @@
 //! [`Engine`]: om_app::Engine
 
 mod compose;
+mod login;
 mod stills;
 mod tui;
 
@@ -48,6 +49,11 @@ enum Command {
         #[arg(long)]
         episode: Option<u32>,
     },
+    /// Authorize a tracker via OAuth and save its token to config.
+    Login {
+        /// Tracker to authorize: `anilist` (MAL coming soon).
+        provider: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
             season,
             episode,
         }) => cmd_play(&query, season, episode).await,
+        Some(Command::Login { provider }) => login::cmd_login(&provider).await,
     }
 }
 
