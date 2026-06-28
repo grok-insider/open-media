@@ -6,9 +6,9 @@
 # are pinned to one `version_group` so they bump in lockstep — a change in ANY
 # crate (e.g. an `om-debrid` fix) moves the whole workspace to the next version.
 #
-# Only the binary crate `om-cli` emits a tag + GitHub Release + changelog; the ten
-# libraries ride the shared version silently (their commits are folded into the
-# single root CHANGELOG.md via om-cli's `changelog_include`).
+# Only the binary crate `om-cli` emits a tag + GitHub Release + changelog; the
+# library crates ride the shared version silently (their commits are folded into
+# the single root CHANGELOG.md via om-cli's `changelog_include`).
 #
 # On each push to master, release-plz opens/updates a "release PR" (bump +
 # Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z` and creates the GitHub Release.
@@ -36,7 +36,7 @@ semver_check = false
 # minor bump even on 0.x — more communicative than the Cargo-SemVer 0.x default
 # (where features are patch and only breaking changes bump the minor).
 features_always_increment_minor = true
-# Defaults for the ten library crates below: no own tag/release/changelog. om-cli
+# Defaults for the library crates below: no own tag/release/changelog. om-cli
 # overrides these to true.
 git_tag_enable = false
 git_release_enable = false
@@ -48,7 +48,7 @@ changelog_update = false
 git_tag_name = "v{{ version }}"
 pr_labels = ["release"]
 
-# --- The ten libraries: share the version group, stay silent individually. ------
+# --- The libraries: share the version group, stay silent individually. ----------
 [[package]]
 name = "om-core"
 version_group = "om"
@@ -79,6 +79,9 @@ version_group = "om"
 [[package]]
 name = "om-app"
 version_group = "om"
+[[package]]
+name = "om-subs"
+version_group = "om"
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
 [[package]]
@@ -106,6 +109,7 @@ changelog_include = [
     "om-track",
     "om-history",
     "om-app",
+    "om-subs",
 ]
 
 # Preserve the curated changelog header (release-plz would otherwise substitute its
