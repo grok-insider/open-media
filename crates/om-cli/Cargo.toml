@@ -31,8 +31,16 @@ tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
+# Terminal image protocols (kitty/sixel/iTerm2) for episode stills + posters.
+# default-features off to drop the optional libchafa C dependency; the built-in
+# unicode-halfblocks fallback covers terminals without a graphics protocol.
+# `image` is decode-only (JPEG/PNG/WebP — what TMDB/Cinemeta/AniList serve);
+# stills are fetched over the shared workspace reqwest client.
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
