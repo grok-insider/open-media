@@ -82,13 +82,15 @@ version_group = "om"
 [[package]]
 name = "om-subs"
 version_group = "om"
-# om-subs has a *git* dependency (the open-subtitle engine), which release-plz
-# can't package in its isolated per-crate worktree ("Failed to find package
-# om-subs" — the git source doesn't resolve there). Exclude it from release-plz's
-# update/package change-detection. It still inherits the shared workspace version
-# (`version.workspace = true`) and ships inside the `om` binary, so nothing about
-# the single-version/one-release model changes — release-plz just doesn't try to
-# package this adapter standalone.
+# KNOWN LIMITATION: om-subs has a *git* dependency (the open-subtitle engine).
+# release-plz's `release-pr` (change-detection) step copies each crate into an
+# isolated worktree and runs `cargo package` there, where the git source can't
+# resolve → "Failed to find package om-subs". `release = false` does NOT skip that
+# packaging step, so the `release-plz PR` job is expected to fail until upstream
+# release-plz/release-plz#2789 (source-dir fallback when `cargo package` fails)
+# lands. We therefore mark that job `continue-on-error: true` in release.yml and
+# bump the version manually (a single line in the root Cargo.toml) per release.
+# The `release-plz release` job (tag + GitHub Release) is unaffected and works.
 release = false
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).

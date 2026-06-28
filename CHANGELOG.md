@@ -4,6 +4,53 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0
+
+### Added
+- **Subtitles** — auto-fetch subtitles into the player via an `open-subtitle`
+  engine integration. A new `SubtitleProvider` port (`om-core`) and `om-subs`
+  adapter search by title + season/episode, write the best match to a temp file,
+  and load it into mpv/vlc (`--sub-file`). Opt-in via `[subtitles]`
+  (`enabled = false` by default, `languages = ["en"]`).
+- **`om login anilist`** — obtain an AniList token via a loopback OAuth flow
+  (implicit grant; no client secret), saved to the config for progress tracking.
+- **Binge / auto-advance** — after an episode completes, optionally advance to the
+  next one (`behavior.autoplay_next`), skipping filler/recap when `skip_filler`
+  is set (consults the AniSkip/Jikan enricher).
+- **Search pagination** — TMDB and AniList now return more than one page of
+  results.
+- **Anime absolute episode numbering** — match continuously-numbered sequels
+  (e.g. an S2E01 released as `… - 21`) via AniList prequel offsets and a
+  nyaa absolute-number fetch.
+- **Configurable TUI theme** — `ui.theme` (`dark`/`light`/`auto`) is now applied
+  instead of hardcoded colors.
+- **Wider `om config set` / `show`** — setters for the full key set with typed
+  parsing; `config show` prints all loaded keys (secrets masked).
+- Configurable nyaa category (`providers.nyaa_category`).
+
+### Fixed
+- AniList movies are no longer mis-modeled as episodic (`format: MOVIE` → movie).
+- Currently-airing anime derive their episode count from `nextAiringEpisode`
+  instead of yielding an empty list.
+- `Engine::details` merges cross-provider ids instead of dropping them.
+- `behavior.resume` is honored (skip the start-seek when disabled; progress is
+  still recorded).
+- `OPEN_MEDIA_*` environment overrides are applied on config load.
+- Cached debrid sources get a small unconditional score tiebreak.
+- MAL sets `is_rewatching` for a repeating status.
+- vlc honors the resume position (`--start-time`).
+- The P2P engine no longer holds its state lock across the metadata wait.
+- Real episode runtime is passed to AniSkip when known.
+- Release-tag parsing nits (bit-depth, multi-audio, provider guard, `[AD+]`/
+  `[PM+]`/`[TB+]` cache flags, `GiB`).
+
+### Internal
+- A `dev` integration branch now gates merges into `master` (CI guard), and the
+  release pipeline is hardened (network-resilient release-plz). Note: the
+  `release-plz` PR job is non-blocking because the git-dependent `om-subs` crate
+  can't be packaged by release-plz's change detection (upstream
+  release-plz/release-plz#2789); releases are cut from a manual version bump.
+
 ## 0.2.0
 
 - Added Windows support for mpv interaction and Discord Rich Presence.
