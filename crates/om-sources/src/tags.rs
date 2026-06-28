@@ -19,7 +19,7 @@ macro_rules! re {
 }
 
 re!(SEEDERS_RE, r"👤\s*(\d+)");
-re!(SIZE_RE, r"💾\s*([\d.]+)\s*(GB|MB|TB)");
+re!(SIZE_RE, r"💾\s*([\d.]+)\s*(GiB|MiB|TiB|GB|MB|TB)");
 re!(QUALITY_RE, r"\b(2160p|4K|1080p|720p|480p|360p)\b");
 re!(
     HDR_RE,
@@ -27,7 +27,7 @@ re!(
 );
 re!(
     VIDEO_CODEC_RE,
-    r"(?i)\b(HEVC|x265|x264|AVC|AV1|H\.?265|H\.?264|VC-1|10bit|10-bit)\b"
+    r"(?i)\b(HEVC|x265|x264|AVC|AV1|H\.?265|H\.?264|VC-1)\b"
 );
 re!(
     AUDIO_RE,
@@ -86,8 +86,14 @@ pub struct ParsedRelease {
 pub fn parse_torrentio(name: &str, title: &str) -> ParsedRelease {
     let combined = format!("{name}\n{title}");
 
-    // Cache: `[RD+]` / `⚡` mean instantly available on the debrid service.
-    let cache = if name.contains("[RD+]") || name.contains('⚡') {
+    // Cache: a `[XX+]` debrid flag (`[RD+]` Real-Debrid, `[AD+]` AllDebrid,
+    // `[PM+]` Premiumize, `[TB+]` Torbox) or `⚡` means instantly available.
+    let cache = if name.contains("[RD+]")
+        || name.contains("[AD+]")
+        || name.contains("[PM+]")
+        || name.contains("[TB+]")
+        || name.contains('⚡')
+    {
         CacheState::Cached
     } else if name.contains("[RD download]") || name.contains("[RD]") {
         CacheState::Uncached
@@ -95,13 +101,13 @@ pub fn parse_torrentio(name: &str, title: &str) -> ParsedRelease {
         CacheState::Unknown
     };
 
-    // Provider is the trailing segment of `name` after the `[...]` tag.
+    // Provider is the trailing segment of `name` after the `[...]` tag. Without
+    // a closing bracket there is no provider segment to extract, so yield empty
+    // (→ falls back to "torrentio") rather than echoing the whole release name.
     let provider = name
-        .rsplit(']')
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(name)
+        .rsplit_once(']')
+        .map(|(_, rest)| rest)
+        .unwrap_or("")
         .lines()
         .next()
         .unwrap_or("")
@@ -216,7 +222,6 @@ fn parse_video_codec(text: &str) -> Option<String> {
             "AVC" | "H264" | "X264" => "AVC",
             "AV1" => "AV1",
             "VC-1" => "VC-1",
-            "10BIT" | "10-BIT" => "10bit",
             _ => continue,
         };
         if !out.iter().any(|x| x == v) {
@@ -228,7 +233,9 @@ fn parse_video_codec(text: &str) -> Option<String> {
 
 fn parse_audio(text: &str) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(m) = AUDIO_RE.find(text) {
+    // Capture every distinct audio codec, not just the first (a release can
+    // carry e.g. both `TrueHD` and `AC3` tracks).
+    for m in AUDIO_RE.find_iter(text) {
         let c = m.as_str().to_uppercase();
         let norm = if c.contains("DTS-HD") || c.contains("DTS HD") {
             "DTS-HD MA"
@@ -251,7 +258,7 @@ fn parse_audio(text: &str) -> Option<String> {
         } else {
             ""
         };
-        if !norm.is_empty() {
+        if !norm.is_empty() && !parts.iter().any(|p| p == norm) {
             parts.push(norm.to_string());
         }
     }
@@ -334,5 +341,46 @@ mod tests {
         let (q, tags) = parse_release_name("[SubsPlease] Frieren - 01 (1080p) [HEVC].mkv");
         assert_eq!(q, Quality::P1080);
         assert_eq!(tags.video_codec.as_deref(), Some("HEVC"));
+    }
+
+    #[test]
+    fn bit_depth_does_not_pollute_video_codec() {
+        // `10bit` / `10-bit` must not be folded into the codec field.
+        let (_, tags) = parse_release_name("Show 1080p x265 10bit HEVC");
+        assert_eq!(tags.video_codec.as_deref(), Some("HEVC"));
+        let (_, tags) = parse_release_name("Show 1080p AV1 10-bit");
+        assert_eq!(tags.video_codec.as_deref(), Some("AV1"));
+    }
+
+    #[test]
+    fn captures_multiple_distinct_audio_codecs() {
+        let (_, tags) = parse_release_name("Movie.2024.1080p.BluRay.TrueHD.AC3-GRP");
+        let audio = tags.audio.as_deref().unwrap();
+        assert!(audio.contains("TrueHD"), "got {audio:?}");
+        assert!(audio.contains("AC3"), "got {audio:?}");
+    }
+
+    #[test]
+    fn provider_without_bracket_is_not_garbage() {
+        // No `[...]` tag → no provider segment → falls back to "torrentio",
+        // never echoes the release name back as the provider.
+        let p = parse_torrentio("Frieren S01E01 1080p WEB x264", "👤 10 💾 1.2 GB");
+        assert_eq!(p.provider, "torrentio");
+    }
+
+    #[test]
+    fn recognizes_alldebrid_premiumize_torbox_cache_flags() {
+        for flag in ["[AD+]", "[PM+]", "[TB+]"] {
+            let p = parse_torrentio(&format!("{flag} prov"), "Show 1080p\n👤 5 💾 1 GB");
+            assert_eq!(p.cache, CacheState::Cached, "flag {flag} should be cached");
+        }
+    }
+
+    #[test]
+    fn torrentio_size_regex_matches_gib() {
+        let p = parse_torrentio("[RD+] prov", "Show 2160p\n👤 5 💾 1.4 GiB");
+        assert_eq!(p.size_bytes, parse_size_to_bytes("1.4 GiB"));
+        let p = parse_torrentio("[RD+] prov", "Show 1080p\n👤 5 💾 700 MB");
+        assert_eq!(p.size_bytes, parse_size_to_bytes("700 MB"));
     }
 }
