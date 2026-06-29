@@ -28,7 +28,7 @@ pub struct TmdbProvider {
 impl TmdbProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE.to_string(),
         }
@@ -37,7 +37,7 @@ impl TmdbProvider {
     /// Construct against a custom base URL (used by integration tests).
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             api_key: api_key.into(),
             base_url: base_url.into(),
         }
@@ -49,14 +49,19 @@ impl TmdbProvider {
         query: &[(&str, &str)],
     ) -> CoreResult<T> {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self
-            .client
-            .get(&url)
-            .query(&[("api_key", self.api_key.as_str())]);
-        if !query.is_empty() {
-            req = req.query(query);
-        }
-        let resp = req.send().await.map_err(|e| map_net("tmdb", e))?;
+        // Retry the whole GET on transient transport failures; rebuild the
+        // request each attempt since `send()` consumes the builder.
+        let resp = open_media_net::retry(|| async {
+            let mut req = self
+                .client
+                .get(&url)
+                .query(&[("api_key", self.api_key.as_str())]);
+            if !query.is_empty() {
+                req = req.query(query);
+            }
+            req.send().await.map_err(|e| map_net("tmdb", e))
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {

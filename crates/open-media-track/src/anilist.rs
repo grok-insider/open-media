@@ -22,7 +22,7 @@ pub struct AniListTracker {
 impl AniListTracker {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             token: token.into(),
             base_url: DEFAULT_BASE.to_string(),
         }

@@ -27,7 +27,7 @@ pub struct TorrentioSource {
 impl TorrentioSource {
     pub fn new(config_string: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             config_string: config_string.into(),
             base_url: DEFAULT_BASE.to_string(),
         }
@@ -35,7 +35,7 @@ impl TorrentioSource {
 
     pub fn with_base_url(config_string: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             config_string: config_string.into(),
             base_url: base_url.into(),
         }
@@ -77,13 +77,16 @@ impl SourceProvider for TorrentioSource {
         let url = self.build_url(query)?;
         tracing::debug!(%url, "torrentio request");
 
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            if e.is_timeout() {
-                CoreError::Timeout(format!("torrentio: {e}"))
-            } else {
-                CoreError::Network(format!("torrentio: {e}"))
-            }
-        })?;
+        let resp = open_media_net::retry(|| async {
+            self.client.get(&url).send().await.map_err(|e| {
+                if e.is_timeout() {
+                    CoreError::Timeout(format!("torrentio: {e}"))
+                } else {
+                    CoreError::Network(format!("torrentio: {e}"))
+                }
+            })
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {

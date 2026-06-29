@@ -38,7 +38,7 @@ pub(crate) struct JikanTitles {
 impl JikanTitles {
     pub(crate) fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
         }
     }
@@ -47,7 +47,7 @@ impl JikanTitles {
     #[cfg(test)]
     pub(crate) fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: base_url.into(),
         }
     }
