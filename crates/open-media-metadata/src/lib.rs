@@ -17,6 +17,7 @@
 
 pub mod anilist;
 pub mod cinemeta;
+mod jikan;
 pub mod tmdb;
 
 pub use anilist::AniListProvider;
