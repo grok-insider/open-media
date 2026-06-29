@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 open-media-core = { workspace = true }
+open-media-net = { workspace = true }
 open-media-config = { workspace = true }
 open-media-app = { workspace = true }
 # Adapter crates — open-media-cli is the ONLY crate allowed to depend on concrete

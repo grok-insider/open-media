@@ -358,12 +358,17 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         include_uncached: cfg.providers.show_uncached,
     };
     let candidates = engine.find_sources(&req).await?;
-    let best = candidates
+    // Keep only the resolvable candidates, in ranked order, so playback can fall
+    // through to the next source if the top pick fails to resolve/launch.
+    let resolvable: Vec<_> = candidates
         .into_iter()
-        .find(|c| c.is_resolvable())
+        .filter(|c| c.is_resolvable())
+        .collect();
+    let best = resolvable
+        .first()
         .ok_or_else(|| anyhow::anyhow!("no playable source found"))?;
     println!(
-        "  source: [{}] {} {} ({}, {})",
+        "  source: [{}] {} {} ({}, {}){}",
         best.provider,
         best.quality.label(),
         best.human_size(),
@@ -374,11 +379,17 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         },
         best.seeders
             .map(|s| format!("{s} seeders"))
-            .unwrap_or_else(|| "?".into())
+            .unwrap_or_else(|| "?".into()),
+        if resolvable.len() > 1 {
+            format!(" — {} fallbacks", resolvable.len() - 1)
+        } else {
+            String::new()
+        }
     );
 
-    // 6. Resolve + play.
-    engine.play(&req, &best).await?;
+    // 6. Resolve + play, falling through to the next resolvable candidate if the
+    //    chosen source can't be resolved or launched.
+    engine.play_with_fallback(&req, &resolvable).await?;
     Ok(())
 }
 

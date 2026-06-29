@@ -10,6 +10,7 @@ description = "MetadataProvider adapters: TMDB + Cinemeta (keyless) for movies/s
 
 [dependencies]
 open-media-core = { workspace = true }
+open-media-net = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

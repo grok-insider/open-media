@@ -47,7 +47,7 @@ impl Stills {
         let picker = Picker::from_query_stdio().ok();
         Self {
             picker,
-            client: Client::new(),
+            client: open_media_net::client(),
             cache: HashMap::new(),
         }
     }
