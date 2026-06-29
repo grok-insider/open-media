@@ -2480,10 +2480,10 @@ version = "0.3.0"
 dependencies = [
  "async-trait",
  "om-core",
- "os-compose",
- "os-config",
- "os-core",
- "os-engine",
+ "open-subtitle-compose",
+ "open-subtitle-config",
+ "open-subtitle-core",
+ "open-subtitle-engine",
  "tokio",
  "tracing",
 ]
@@ -2529,6 +2529,132 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "open-subtitle-compose"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a80e91e19d79d4492ee6c547d2e3b5180b387e77ca7685bc87172b8b67281c70"
+dependencies = [
+ "open-subtitle-config",
+ "open-subtitle-core",
+ "open-subtitle-engine",
+ "open-subtitle-identify",
+ "open-subtitle-process",
+ "open-subtitle-providers",
+ "open-subtitle-sync",
+ "open-subtitle-transcribe",
+ "open-subtitle-translate",
+]
+
+[[package]]
+name = "open-subtitle-config"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69d7edebdd12b5b8ff105f56742acfdb9908ed532977a30dc9a213013b352146"
+dependencies = [
+ "directories",
+ "open-subtitle-core",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "open-subtitle-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aabf5241ba407bcdc29d0a7e3140ce0e6b2340d7b2f6bb2880b7d84635b5c6df"
+dependencies = [
+ "async-trait",
+ "regex",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "open-subtitle-engine"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9957a953016da28ee58b6a7712066b203ec262165ce49fd9878baf119d9b9e9"
+dependencies = [
+ "futures",
+ "open-subtitle-core",
+ "tracing",
+]
+
+[[package]]
+name = "open-subtitle-identify"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88be4ed2a8a484d4c72edfbb10aee335541cf4be05347f51384855559444858a"
+dependencies = [
+ "async-trait",
+ "open-subtitle-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "open-subtitle-process"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab89a8ecd522f7586a7b3414bb36cac983073686c1e0f12f0450d79cfa75b84a"
+dependencies = [
+ "chardetng",
+ "encoding_rs",
+ "flate2",
+ "open-subtitle-core",
+ "zip",
+]
+
+[[package]]
+name = "open-subtitle-providers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b402d962bbd81f255bf51f1616be5a1c77453bcf388efbf36021026a26113828"
+dependencies = [
+ "async-trait",
+ "open-subtitle-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "urlencoding",
+]
+
+[[package]]
+name = "open-subtitle-sync"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa5469b1161d9a5f81d3868430dcc042ea9534f86ccf56fc653ca2faef4df38"
+dependencies = [
+ "async-trait",
+ "open-subtitle-core",
+ "tokio",
+]
+
+[[package]]
+name = "open-subtitle-transcribe"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3c698f8dc607afcd749bdfdd4a6acef80ad303742348259c25e8eb621b93e7c"
+dependencies = [
+ "async-trait",
+ "open-subtitle-core",
+ "tokio",
+]
+
+[[package]]
+name = "open-subtitle-translate"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e66d5cd15bc8e3fab4622f4b467c790c88e831d30fdb5a29dd488db029c2b816"
+dependencies = [
+ "async-trait",
+ "open-subtitle-core",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2550,122 +2676,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "os-compose"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "os-config",
- "os-core",
- "os-engine",
- "os-identify",
- "os-process",
- "os-providers",
- "os-sync",
- "os-transcribe",
- "os-translate",
-]
-
-[[package]]
-name = "os-config"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "directories",
- "os-core",
- "serde",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "os-core"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "regex",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "os-engine"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "futures",
- "os-core",
- "tracing",
-]
-
-[[package]]
-name = "os-identify"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "os-core",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "os-process"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "chardetng",
- "encoding_rs",
- "flate2",
- "os-core",
- "zip",
-]
-
-[[package]]
-name = "os-providers"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "os-core",
- "reqwest",
- "serde",
- "serde_json",
- "urlencoding",
-]
-
-[[package]]
-name = "os-sync"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "os-core",
- "tokio",
-]
-
-[[package]]
-name = "os-transcribe"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "os-core",
- "tokio",
-]
-
-[[package]]
-name = "os-translate"
-version = "0.2.0"
-source = "git+https://github.com/grok-insider/open-subtitle?tag=v0.2.0#7da7634af2cd5ed3fd7a719b23100091262a956d"
-dependencies = [
- "async-trait",
- "os-core",
- "reqwest",
- "serde_json",
 ]
 
 [[package]]
