@@ -77,21 +77,17 @@ version_group = "om"
 name = "om-history"
 version_group = "om"
 [[package]]
+name = "om-telemetry"
+version_group = "om"
+[[package]]
 name = "om-app"
 version_group = "om"
 [[package]]
 name = "om-subs"
 version_group = "om"
-# KNOWN LIMITATION: om-subs has a *git* dependency (the open-subtitle engine).
-# release-plz's `release-pr` (change-detection) step copies each crate into an
-# isolated worktree and runs `cargo package` there, where the git source can't
-# resolve → "Failed to find package om-subs". `release = false` does NOT skip that
-# packaging step, so the `release-plz PR` job is expected to fail until upstream
-# release-plz/release-plz#2789 (source-dir fallback when `cargo package` fails)
-# lands. We therefore mark that job `continue-on-error: true` in release.yml and
-# bump the version manually (a single line in the root Cargo.toml) per release.
-# The `release-plz release` job (tag + GitHub Release) is unaffected and works.
-release = false
+# om-subs depends on the open-subtitle engine from crates.io (the open-subtitle-*
+# crates), so `cargo package` resolves it during change detection like every other
+# crate — it is no longer excluded from release processing.
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
 [[package]]
@@ -118,11 +114,10 @@ changelog_include = [
     "om-player",
     "om-track",
     "om-history",
+    "om-telemetry",
+    "om-subs",
     "om-app",
 ]
-# Note: om-subs is intentionally NOT in changelog_include — it's excluded from
-# release-plz processing (`release = false` above) because of its git dependency.
-# Its user-facing changes still surface via the normal commit scan on om-cli.
 
 # Preserve the curated changelog header (release-plz would otherwise substitute its
 # generic default). New version sections are inserted under `## [Unreleased]`.
