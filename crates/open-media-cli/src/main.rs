@@ -20,6 +20,9 @@ use open_media_core::model::MediaKind;
 #[derive(Debug, Parser)]
 #[command(name = "om", version, about, long_about = None)]
 struct Cli {
+    /// Free-text query that opens the TUI pre-filled and immediately searches
+    /// (e.g. `om "frieren"`). Ignored when a subcommand is given.
+    query: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -79,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(cli.command.is_none());
 
     match cli.command {
-        None => run_interactive().await,
+        None => run_interactive(cli.query).await,
         Some(Command::Init) => cmd_init(),
         Some(Command::Config { action }) => cmd_config(action),
         Some(Command::Search { query, kind }) => cmd_search(&query, kind.as_deref()).await,
@@ -107,7 +110,7 @@ fn init_tracing(tui_mode: bool) {
 }
 
 /// Default (no subcommand): the interactive TUI.
-async fn run_interactive() -> anyhow::Result<()> {
+async fn run_interactive(initial_query: Option<String>) -> anyhow::Result<()> {
     let mut cfg = match open_media_config::load() {
         Ok(c) => c,
         Err(_) => {
@@ -117,7 +120,7 @@ async fn run_interactive() -> anyhow::Result<()> {
     };
     telemetry::startup(&mut cfg);
     let engine = compose::build_engine(&cfg);
-    tui::run(engine, cfg, None).await
+    tui::run(engine, cfg, initial_query).await
 }
 
 fn cmd_init() -> anyhow::Result<()> {
@@ -408,5 +411,38 @@ fn mask(secret: &str) -> String {
         "(not set)".to_string()
     } else {
         format!("set ({} chars)", secret.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn positional_query_opens_tui_prefilled() {
+        let cli = Cli::parse_from(["om", "frieren"]);
+        assert_eq!(cli.query.as_deref(), Some("frieren"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn bare_invocation_has_no_query_and_no_command() {
+        let cli = Cli::parse_from(["om"]);
+        assert!(cli.query.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn subcommand_still_parses_as_subcommand() {
+        let cli = Cli::parse_from(["om", "search", "x"]);
+        assert!(cli.query.is_none());
+        match cli.command {
+            Some(Command::Search { query, kind }) => {
+                assert_eq!(query, "x");
+                assert!(kind.is_none());
+            }
+            other => panic!("expected Search subcommand, got {other:?}"),
+        }
     }
 }
