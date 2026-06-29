@@ -18,19 +18,19 @@ v0.4).
 
 ## The golden rules
 
-1. **Respect the dependency rule** (`AGENTS.md` → Module layout). `om-app` depends
-   only on `om-core`. Only `om-cli` may name concrete adapters. If a change wants
+1. **Respect the dependency rule** (`AGENTS.md` → Module layout). `open-media-app` depends
+   only on `open-media-core`. Only `open-media-cli` may name concrete adapters. If a change wants
    to break this, you need a new **port**, not a shortcut.
 2. **Extend, don't edit, the core.** New backend = new adapter implementing an
    existing port + one line in `compose.rs` (OCP). New capability = new narrow
-   port in `om-core::ports` (ISP).
+   port in `open-media-core::ports` (ISP).
 3. **Map errors at the boundary.** Adapters convert concrete errors into the right
    `CoreError` variant. Callers branch on category, not on backend.
-4. **No secrets in code, logs, or tests.** Tokens come only from `om-config` and
+4. **No secrets in code, logs, or tests.** Tokens come only from `open-media-config` and
    are masked on display. Public *identifiers* are not secrets: the Discord
    application id (`compose.rs`) is sent in the presence handshake by design and is
    correctly hardcoded, not a config secret.
-5. **Telemetry privacy invariant.** The `UsageReporter` payload (`om-telemetry`)
+5. **Telemetry privacy invariant.** The `UsageReporter` payload (`open-media-telemetry`)
    must only ever carry `UsageInfo` — app version, OS, arch, a random install id.
    Never add anything about what a user watches (titles, queries, source names,
    tokens, history). Telemetry is opt-out (`telemetry=false`) and best-effort.
@@ -47,7 +47,7 @@ cargo build
 ```
 
 - **Tests:** unit-test pure logic (no network). Test adapters against recorded
-  fixtures, not the live service. Test app logic with fake ports (see `om-app`).
+  fixtures, not the live service. Test app logic with fake ports (see `open-media-app`).
 - **Docs:** update `docs/PLAN.md` checkboxes when you complete phase work. Don't
   hand-edit `CHANGELOG.md` — release-plz regenerates it from your commit messages
   (see [Releases](#releases)), so a clear Conventional Commit *is* the changelog
@@ -69,10 +69,10 @@ commit history drives automated versioning and the changelog (see
   release on their own; grouped into the changelog where relevant.
 
 Keep subjects short and imperative (`fix: unrestrict the requested RD file`); add
-a scope when it helps (`feat(om-sources): …`). Small, focused commits.
+a scope when it helps (`feat(open-media-sources): …`). Small, focused commits.
 
 A PR should leave `master` green (fmt + clippy + test) and the dependency rule
-intact. Note any new config keys and update `om-config` + README.
+intact. Note any new config keys and update `open-media-config` + README.
 
 ## Releases
 
@@ -87,9 +87,9 @@ write changelog entries by hand:
    `CHANGELOG.md` from the commits since the last tag. Polish that PR's notes if
    you like.
 3. **Merge the release PR to ship.** It tags `vX.Y.Z`, creates the GitHub Release,
-   and attaches a prebuilt `om` binary. The same push makes CI build and push
-   `om-X.Y.Z` to the `grok-insider` cachix cache (`flake.nix` reads the version from
-   `Cargo.toml`), and `om --version` reports it.
+   and attaches a prebuilt `open-media` binary. The same push makes CI build and push
+   `open-media-X.Y.Z` to the `grok-insider` cachix cache (`flake.nix` reads the version from
+   `Cargo.toml`), and `open-media --version` reports it.
 
 Nothing is published to crates.io.
 
@@ -106,9 +106,9 @@ git tag -a v0.1.0 -m "open-media 0.1.0" && git push origin v0.1.0
 
 - [ ] New file in the owning crate; struct `impl`s the port; errors mapped.
 - [ ] Exported from the crate's `lib.rs`.
-- [ ] Selected in `crates/om-cli/src/compose.rs` (+ config keys in `om-config`).
+- [ ] Selected in `crates/open-media-cli/src/compose.rs` (+ config keys in `open-media-config`).
 - [ ] Fixture tests; `fmt`/`clippy`/`test` clean.
-- [ ] No changes to `om-core`/`om-app` unless you intentionally added a port.
+- [ ] No changes to `open-media-core`/`open-media-app` unless you intentionally added a port.
 
 ## Scope & legality
 

@@ -1,0 +1,22 @@
+[package]
+name = "open-media-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Application layer: use-cases and the Engine that composes ports. Depends only on open-media-core."
+
+[dependencies]
+open-media-core = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["time", "macros"] }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

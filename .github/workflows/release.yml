@@ -8,10 +8,10 @@ name: Release
 #                           CHANGELOG.md from Conventional Commits).
 #   * release-plz-release — when that PR is merged, creates the `vX.Y.Z` tag +
 #                           GitHub Release from the changelog.
-#   * upload-binary       — builds a portable static `om` and attaches it.
+#   * upload-binary       — builds a portable static `open-media` and attaches it.
 #
 # Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
-# master push and pushes `om-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
+# master push and pushes `open-media-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
 # version straight from Cargo.toml). Nothing is published to crates.io — see the
 # `git_only` setting in release-plz.toml.
 
@@ -82,7 +82,7 @@ jobs:
         with:
           version: ${{ env.RP_VER }}
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
-          project-description: "Linux media streaming app: debrid/torrent sources, mpv playback, Discord RPC, watch history (om)"
+          project-description: "Linux media streaming app: debrid/torrent sources, mpv playback, Discord RPC, watch history (open-media)"
       - name: Commit AI changelog to the Release PR
         if: ${{ env.RP_PR != '' }}
         run: |
@@ -141,16 +141,16 @@ jobs:
           echo "tag=$(echo "$RELEASES" | jq -r '.[0].tag')" >> "$GITHUB_OUTPUT"
           echo "version=$(echo "$RELEASES" | jq -r '.[0].version')" >> "$GITHUB_OUTPUT"
 
-  # Build the `om` binary for each target and attach an archive (+ sha256) to the
+  # Build the `open-media` binary for each target and attach an archive (+ sha256) to the
   # Release. Independent per target (fail-fast: false): one platform failing
   # leaves the others (and the tag/Release/changelog/cachix) intact, re-runnable.
   #
-  # om is portable across Unix (rustls + bundled rusqlite, no system OpenSSL/sqlite).
+  # open-media is portable across Unix (rustls + bundled rusqlite, no system OpenSSL/sqlite).
   # zig supplies the cross C toolchain + musl libc for the static Linux builds;
   # aws-lc-sys (rustls crypto) builds aws-lc with CMake+bindgen.
   #
   # Windows (x86_64-pc-windows-msvc) builds natively on windows-latest. The IPC
-  # control planes are cfg-gated (crates/{om-player,om-track}/src/ipc.rs): tokio
+  # control planes are cfg-gated (crates/{open-media-player,open-media-track}/src/ipc.rs): tokio
   # Unix sockets on Unix, tokio named pipes on Windows. aws-lc-sys needs NASM on
   # Windows, supplied by ilammy/setup-nasm; CMake + MSVC ship on the runner.
   artifacts:
@@ -208,20 +208,20 @@ jobs:
 
       - name: Build (zigbuild static)
         if: matrix.cross == 'zig'
-        run: cargo zigbuild --release -p om-cli --target "$TARGET"
+        run: cargo zigbuild --release -p open-media-cli --target "$TARGET"
 
       - name: Build (native)
         if: matrix.cross != 'zig'
-        run: cargo build --release -p om-cli --target ${{ matrix.target }}
+        run: cargo build --release -p open-media-cli --target ${{ matrix.target }}
 
       - name: Verify Linux binary is static
         if: matrix.cross == 'zig'
         run: |
           set -euo pipefail
-          bin="target/$TARGET/release/om"
+          bin="target/$TARGET/release/open-media"
           file "$bin"
           if ldd "$bin" 2>&1 | grep -qiE 'libc\.so|GLIBC'; then
-            echo "::error::om is dynamically linked against glibc"; exit 1
+            echo "::error::open-media is dynamically linked against glibc"; exit 1
           fi
 
       # `shell: bash` runs in Git Bash on the Windows runner too (default there is
@@ -232,9 +232,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          bin=om
-          [ "${RUNNER_OS}" = "Windows" ] && bin=om.exe
-          archive="om-${VERSION}-${TARGET}.tar.gz"
+          bin=open-media
+          [ "${RUNNER_OS}" = "Windows" ] && bin=open-media.exe
+          archive="open-media-${VERSION}-${TARGET}.tar.gz"
           tar -czf "$archive" -C "target/$TARGET/release" "$bin"
           shasum -a 256 "$archive" > "$archive.sha256" 2>/dev/null || sha256sum "$archive" > "$archive.sha256"
           gh release upload "$TAG" "$archive" "$archive.sha256" --clobber

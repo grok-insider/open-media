@@ -72,13 +72,13 @@ control, resume.
 | Debrid abstraction (RD/Torbox/…) | rdbatch | `DebridProvider` |
 | RD add→select→unrestrict flow | littlejohn | `DebridProvider` (RealDebrid) |
 | P2P streaming server | toru | `StreamResolver`/`P2pEngine` |
-| Release-tag parsing + scoring | miru | `om-core::scoring` + adapter parsers |
+| Release-tag parsing + scoring | miru | `open-media-core::scoring` + adapter parsers |
 | mpv IPC: resume/skip/track | curd | `PlaybackControl` |
 | AniSkip OP/ED, Jikan filler | curd | `Enricher` |
 | AniList/MAL tracking (dual) | curd | `Tracker` + `CompositeTracker` |
 | Discord presence | curd | `PresenceReporter` |
 | Watch history / resume | miru/curd | `HistoryStore` |
-| ratatui state-machine TUI | littlejohn/miru | `om-cli` (Phase 9) |
+| ratatui state-machine TUI | littlejohn/miru | `open-media-cli` (Phase 9) |
 
 ## 3. Concrete protocol notes (the reusable specifics)
 

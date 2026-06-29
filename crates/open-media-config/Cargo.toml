@@ -1,0 +1,19 @@
+[package]
+name = "open-media-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "open-media configuration: schema, load/save, XDG paths, secrets policy."
+
+[dependencies]
+open-media-core = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true
