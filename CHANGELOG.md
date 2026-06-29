@@ -4,6 +4,46 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0
+
+### Added
+- **Anime episode titles** — AniList anime episodes now show real titles
+  (e.g. `Frieren - S01E01 - The Journey's End`) fetched from Jikan
+  (`/v4/anime/{mal}/episodes`), falling back to AniList `streamingEpisodes`.
+  Best-effort; surfaces in the episode list, the mpv window title, and Discord.
+- **Open the TUI pre-filled** — `open-media "<query>"` (a positional argument)
+  opens the TUI and immediately runs the search.
+- **Real tracker in the Provider column** — keyless Torrentio results now parse
+  the actual sub-tracker (1337x/RARBG/YTS/…) from the release title instead of
+  showing a flat "Torrentio", so the Sources Provider filter is useful without a
+  debrid token.
+- **AniList/MAL → IMDB bridge** — anime are bridged to an IMDB id (via Fribb's
+  anime-lists, fetched and cached) so Torrentio/Real-Debrid cached sources light
+  up for anime, not just nyaa. Coverage is partial (mostly anime movies and a
+  subset of series); unmapped titles keep their nyaa sources unchanged.
+- **MSRV CI** — a dedicated `cargo check` job on Rust 1.82 verifies the declared
+  minimum supported version.
+
+### Changed
+- **Robustness** — a shared `open-media-net` HTTP client with connect/request
+  timeouts replaces bare `reqwest::Client::new()` across every adapter, plus a
+  bounded exponential-backoff retry helper on the transient (network/timeout)
+  paths. Playback now fails over to the next ranked source candidate when the
+  chosen one can't be resolved (above the existing debrid→P2P fallback), and a
+  binge no longer aborts on a single failed episode.
+
+### Fixed
+- Singular `Season N-M` batch releases are parsed as a season range (previously
+  only the plural `Seasons 1-5` / `S01-S05` forms were), while keeping
+  `Season 2 - 01` as season 2 episode 1.
+
+## 0.4.0
+
+### Changed
+- Renamed the crates, binary, and library names from `om*`/`om-*` to
+  `open-media` / `open-media-*` (and the subtitle engine `os-*` →
+  `open-subtitle-*`). No behavioral change.
+
 ## 0.3.0
 
 ### Added
