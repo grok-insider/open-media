@@ -4,11 +4,11 @@
 # Every crate shares ONE version via `version.workspace = true` (root Cargo.toml
 # `[workspace.package] version`). To keep that single field consistent, all crates
 # are pinned to one `version_group` so they bump in lockstep — a change in ANY
-# crate (e.g. an `om-debrid` fix) moves the whole workspace to the next version.
+# crate (e.g. an `open-media-debrid` fix) moves the whole workspace to the next version.
 #
-# Only the binary crate `om-cli` emits a tag + GitHub Release + changelog; the
+# Only the binary crate `open-media-cli` emits a tag + GitHub Release + changelog; the
 # library crates ride the shared version silently (their commits are folded into
-# the single root CHANGELOG.md via om-cli's `changelog_include`).
+# the single root CHANGELOG.md via open-media-cli's `changelog_include`).
 #
 # On each push to master, release-plz opens/updates a "release PR" (bump +
 # Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z` and creates the GitHub Release.
@@ -36,13 +36,13 @@ semver_check = false
 # minor bump even on 0.x — more communicative than the Cargo-SemVer 0.x default
 # (where features are patch and only breaking changes bump the minor).
 features_always_increment_minor = true
-# Defaults for the library crates below: no own tag/release/changelog. om-cli
+# Defaults for the library crates below: no own tag/release/changelog. open-media-cli
 # overrides these to true.
 git_tag_enable = false
 git_release_enable = false
 changelog_update = false
 # CRITICAL: every crate must resolve its release baseline to the SINGLE shared tag
-# `vX.Y.Z`. Set workspace-wide (not just on om-cli): otherwise the libraries fall
+# `vX.Y.Z`. Set workspace-wide (not just on open-media-cli): otherwise the libraries fall
 # back to the default `om-<lib>-vX.Y.Z` pattern, find no such tag, and get treated
 # as "initial release" — replaying the entire pre-1.0 history into a spurious bump.
 git_tag_name = "v{{ version }}"
@@ -50,73 +50,73 @@ pr_labels = ["release"]
 
 # --- The libraries: share the version group, stay silent individually. ----------
 [[package]]
-name = "om-core"
+name = "open-media-core"
 version_group = "om"
 [[package]]
-name = "om-config"
+name = "open-media-config"
 version_group = "om"
 [[package]]
-name = "om-metadata"
+name = "open-media-metadata"
 version_group = "om"
 [[package]]
-name = "om-sources"
+name = "open-media-sources"
 version_group = "om"
 [[package]]
-name = "om-debrid"
+name = "open-media-debrid"
 version_group = "om"
 [[package]]
-name = "om-stream"
+name = "open-media-stream"
 version_group = "om"
 [[package]]
-name = "om-player"
+name = "open-media-player"
 version_group = "om"
 [[package]]
-name = "om-track"
+name = "open-media-track"
 version_group = "om"
 [[package]]
-name = "om-history"
+name = "open-media-history"
 version_group = "om"
 [[package]]
-name = "om-telemetry"
+name = "open-media-telemetry"
 version_group = "om"
 [[package]]
-name = "om-app"
+name = "open-media-app"
 version_group = "om"
 [[package]]
-name = "om-subs"
+name = "open-media-subs"
 version_group = "om"
-# om-subs depends on the open-subtitle engine from crates.io (the open-subtitle-*
+# open-media-subs depends on the open-subtitle engine from crates.io (the open-subtitle-*
 # crates), so `cargo package` resolves it during change detection like every other
 # crate — it is no longer excluded from release processing.
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
 [[package]]
-name = "om-cli"
+name = "open-media-cli"
 version_group = "om"
 git_tag_enable = true
 git_release_enable = true
 # Tag/release named `vX.Y.Z` (the `git_tag_name` template is set workspace-wide
-# above so all crates share this baseline; om-cli is the only one that emits it).
+# above so all crates share this baseline; open-media-cli is the only one that emits it).
 git_release_name = "v{{ version }}"
 # Keep the single curated changelog at the repo root (path is relative to the
 # root Cargo.toml, i.e. the repo root in CI).
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-# om-cli is the composition root that depends on every other crate, so a change
+# open-media-cli is the composition root that depends on every other crate, so a change
 # anywhere ships in the binary. Fold all members' commits into the root changelog.
 changelog_include = [
-    "om-core",
-    "om-config",
-    "om-metadata",
-    "om-sources",
-    "om-debrid",
-    "om-stream",
-    "om-player",
-    "om-track",
-    "om-history",
-    "om-telemetry",
-    "om-subs",
-    "om-app",
+    "open-media-core",
+    "open-media-config",
+    "open-media-metadata",
+    "open-media-sources",
+    "open-media-debrid",
+    "open-media-stream",
+    "open-media-player",
+    "open-media-track",
+    "open-media-history",
+    "open-media-telemetry",
+    "open-media-subs",
+    "open-media-app",
 ]
 
 # Preserve the curated changelog header (release-plz would otherwise substitute its

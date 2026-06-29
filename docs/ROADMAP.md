@@ -21,14 +21,14 @@ binge**; see `continue-plan.md` for the tracked follow-ups.
 > cut automatically by [release-plz](https://release-plz.dev) from Conventional
 > Commits (see `CONTRIBUTING.md` → Releases): the workspace is single-versioned
 > (started at `0.1.0`), each `feat:`/`fix:` bumps it, and merging the release PR
-> tags `vX.Y.Z` → GitHub Release (+ prebuilt `om`) → cachix.
+> tags `vX.Y.Z` → GitHub Release (+ prebuilt `open-media`) → cachix.
 
 ### v0.1 — "it plays" (MVP)
 The vertical slice: discover → source → resolve (Real-Debrid + P2P) → play in mpv.
 - TMDB + **Cinemeta** (keyless) + AniList metadata — search works with no API key.
 - Torrentio + direct nyaa sources (season-aware for anime).
 - Real-Debrid resolve, librqbit P2P fallback.
-- mpv/vlc launch; basic `om play`.
+- mpv/vlc launch; basic `open-media play`.
 - Config + secrets; CLI (`init`/`config`/`search`/`play`).
 - Corresponds to PLAN Phases 1–5 (**M2**).
 
@@ -51,7 +51,7 @@ The session features that make it pleasant.
 - Nix flake + Home Manager module + cachix (matches sibling repos).
 - CI (fmt/clippy/test) + automated releases: release-plz opens a version-bump PR on
   each `feat:`/`fix:`; merging it tags `vX.Y.Z`, publishes a GitHub Release with a
-  prebuilt `om` binary, and pushes `om-X.Y.Z` to cachix.
+  prebuilt `open-media` binary, and pushes `open-media-X.Y.Z` to cachix.
 - PLAN Phase 10 (**M5**).
 
 ### v1.0 — "stable & broad"

@@ -28,29 +28,29 @@ pieces are shaped the way they are.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Interface         om-cli  (clap CLI, ratatui TUI, composition root)    │
+│  Interface         open-media-cli  (clap CLI, ratatui TUI, composition root)    │
 ├───────────────────────────────────────────────────────────────────────┤
-│  Application       om-app  (Engine + use-cases)   depends ONLY on core  │
+│  Application       open-media-app  (Engine + use-cases)   depends ONLY on core  │
 ├───────────────────────────────────────────────────────────────────────┤
-│  Domain / Ports    om-core (models, traits, scoring)   depends on nothing│
+│  Domain / Ports    open-media-core (models, traits, scoring)   depends on nothing│
 ├───────────────────────────────────────────────────────────────────────┤
-│  Adapters          om-metadata om-sources om-debrid om-stream           │
-│  (infrastructure)  om-player om-track om-history   each impl a port      │
+│  Adapters          open-media-metadata open-media-sources open-media-debrid open-media-stream           │
+│  (infrastructure)  open-media-player open-media-track open-media-history   each impl a port      │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
 - Dependencies point **inward**: adapters → core, app → core, cli → {app, core,
   adapters}. Nothing points outward from core.
-- `om-app` must never name a concrete adapter. The compiler enforces it: `om-app`
+- `open-media-app` must never name a concrete adapter. The compiler enforces it: `open-media-app`
   has no dependency on any adapter crate.
-- `om-cli` is the **only** composition root. `crates/om-cli/src/compose.rs` is the
+- `open-media-cli` is the **only** composition root. `crates/open-media-cli/src/compose.rs` is the
   single file that knows which concrete types exist.
 
 This is Dependency Inversion at the crate level: the high-level policy
-(`om-app`) and the low-level details (adapters) both depend on the abstraction
-(`om-core` ports), not on each other.
+(`open-media-app`) and the low-level details (adapters) both depend on the abstraction
+(`open-media-core` ports), not on each other.
 
-## 3. Domain model (`om-core::model`, `::stream`, `::tracking`)
+## 3. Domain model (`open-media-core::model`, `::stream`, `::tracking`)
 
 Pure data, `serde`-serializable, no behavior beyond small helpers.
 
@@ -68,7 +68,7 @@ Pure data, `serde`-serializable, no behavior beyond small helpers.
 - **Tracking.** `Interval`/`SkipTimes`, `WatchProgress` (resume + completion),
   `ListStatus`, `Activity` (presence).
 
-## 4. Ports (`om-core::ports`)
+## 4. Ports (`open-media-core::ports`)
 
 Every port is a small, object-safe, `#[async_trait]` trait so the `Engine` can
 hold `Arc<dyn Port>` chosen at runtime. ISP keeps them separate — a debrid
@@ -99,7 +99,7 @@ We keep the provider-agnostic `AddedTorrent`/`DebridFile` shapes so the resolver
 and UI never see backend JSON, and `resolve_playback` hides the multi-step
 add→poll→select→poll→unrestrict flow inside the adapter.
 
-## 5. Application layer (`om-app`)
+## 5. Application layer (`open-media-app`)
 
 `Engine` holds the selected ports and exposes use-cases:
 
@@ -165,7 +165,7 @@ selects the largest video file, and serves
 `http://127.0.0.1:3131/torrents/{id}/stream/{idx}` with Range support → mpv seeks
 freely while pieces download around the read head.
 
-## 8. The local P2P streaming engine (`om-stream`)
+## 8. The local P2P streaming engine (`open-media-stream`)
 
 The Rust port of toru's crown jewel, but leaner: `librqbit` already ships a
 Range-aware streaming endpoint (`/torrents/{id}/stream/{file_idx}`) backed by a
@@ -182,7 +182,7 @@ all.
 
 ## 9. Concurrency model
 
-- One tokio multi-threaded runtime owned by `om-cli`.
+- One tokio multi-threaded runtime owned by `open-media-cli`.
 - Network fan-out (`search`, `find_sources`) → `futures::join_all` (Phase 1).
 - The TUI uses the littlejohn pattern: render-from-state loop + an
   `mpsc::unbounded` channel; all I/O is `tokio::spawn`ed and posts result
@@ -202,14 +202,14 @@ app can branch on failure *category* (e.g. retry on `Network`, prompt re-auth on
 
 ## 11. Configuration & secrets
 
-- One TOML document (`om-config::Config`) under `XDG_CONFIG_HOME`. `#[serde(default)]`
+- One TOML document (`open-media-config::Config`) under `XDG_CONFIG_HOME`. `#[serde(default)]`
   throughout so a minimal file works; hand-written `Default` impls are kept in
   sync with the serde defaults (see the `Credentials` note in code).
 - **Secrets (tokens) live only in that file.** Never compiled in, never in the
   repo, never logged (masked on display). Optional `OPEN_MEDIA_*` env overrides
   for CI/ephemeral use.
 
-## 12. Scoring (`om-core::scoring`)
+## 12. Scoring (`open-media-core::scoring`)
 
 Pure, deterministic, unit-tested ranking applied after merge. Dominance order:
 cached (when preferred) ≫ quality (rank + exact-target bonus) ≫ seeders/language
@@ -222,7 +222,7 @@ and trivially testable.
   unit tests (already present).
 - **Adapters**: parse real recorded fixtures (a Torrentio JSON, a nyaa RSS page,
   an RD `torrents/info` body); no live calls in CI.
-- **App**: fake ports (see `om-app`'s `FakeMeta` test) to assert orchestration
+- **App**: fake ports (see `open-media-app`'s `FakeMeta` test) to assert orchestration
   branching, merge, and ranking without a network.
 - **Gate**: `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace`.
 
@@ -234,7 +234,7 @@ and trivially testable.
 | **O**CP | new debrid/indexer/tracker/player = new adapter + one line in `compose.rs` |
 | **L**SP | every adapter honors its port's contract incl. `CoreError` semantics |
 | **I**SP | many narrow ports; `Player` vs `PlaybackControl` split; debrid ⊥ tracker |
-| **D**IP | `om-app` depends on `om-core` ports; only `om-cli` names concrete adapters |
+| **D**IP | `open-media-app` depends on `open-media-core` ports; only `open-media-cli` names concrete adapters |
 
 ## 15. Known deferrals
 
