@@ -14,19 +14,18 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-# The open-subtitle engine, pinned to a release tag. These are sibling-workspace
-# crates fetched over git (no crates.io publish); the tag keeps the build
-# reproducible. om-subs is the only place that names them — the rest of
-# open-media stays behind the SubtitleProvider port.
+# The open-subtitle engine, consumed from crates.io. The crates are published
+# under `open-subtitle-*` (the generic `os-*` names are taken by unrelated crates),
+# but imported here as `os_core`/`os_config`/… via the `package = …` rename, so
+# the rest of om-subs is unchanged. om-subs is the only place that names them — the
+# rest of open-media stays behind the SubtitleProvider port.
 #
-# The `version` alongside `git` is required so `cargo package` (which release-plz
-# runs for change detection) can verify the manifest — cargo demands a version
-# req on every dep when packaging. The `git`+`tag` source always wins for builds;
-# the version is never resolved from crates.io (these crates aren't published).
-os-core = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-config = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-compose = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
-os-engine = { version = "0.2.0", git = "https://github.com/grok-insider/open-subtitle", tag = "v0.2.0" }
+# Registry (not git) deps are what let `cargo package` — which release-plz runs for
+# change detection — resolve them, so om-subs is no longer excluded from releases.
+os-core = { package = "open-subtitle-core", version = "0.2.0" }
+os-config = { package = "open-subtitle-config", version = "0.2.0" }
+os-compose = { package = "open-subtitle-compose", version = "0.2.0" }
+os-engine = { package = "open-subtitle-engine", version = "0.2.0" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
