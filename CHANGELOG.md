@@ -4,6 +4,12 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1](https://github.com/grok-insider/open-media/compare/v0.6.0...v0.6.1) - 2026-06-29
+
+### Fixed
+
+- *(cli)* show open-media (not om) in --version ([#71](https://github.com/grok-insider/open-media/pull/71))
+
 ## 0.6.0
 
 ### Changed
