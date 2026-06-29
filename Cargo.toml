@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # Minimum supported Rust version. Pinned conservatively; CI uses stable (>= this)
 # and the nix devshell's rustc is canonical.
@@ -32,19 +32,19 @@ repository = "https://github.com/grok-insider/open-media"
 # The `version` requirement is required by `cargo package` (which release-plz runs
 # to detect changes); release-plz keeps these in lockstep with the workspace
 # version on every bump. They are never published — `path` always wins for builds.
-open-media-core = { path = "crates/open-media-core", version = "0.4.0" }
-open-media-net = { path = "crates/open-media-net", version = "0.4.0" }
-open-media-config = { path = "crates/open-media-config", version = "0.4.0" }
-open-media-metadata = { path = "crates/open-media-metadata", version = "0.4.0" }
-open-media-sources = { path = "crates/open-media-sources", version = "0.4.0" }
-open-media-debrid = { path = "crates/open-media-debrid", version = "0.4.0" }
-open-media-stream = { path = "crates/open-media-stream", version = "0.4.0" }
-open-media-player = { path = "crates/open-media-player", version = "0.4.0" }
-open-media-subs = { path = "crates/open-media-subs", version = "0.4.0" }
-open-media-track = { path = "crates/open-media-track", version = "0.4.0" }
-open-media-history = { path = "crates/open-media-history", version = "0.4.0" }
-open-media-telemetry = { path = "crates/open-media-telemetry", version = "0.4.0" }
-open-media-app = { path = "crates/open-media-app", version = "0.4.0" }
+open-media-core = { path = "crates/open-media-core", version = "0.5.0" }
+open-media-net = { path = "crates/open-media-net", version = "0.5.0" }
+open-media-config = { path = "crates/open-media-config", version = "0.5.0" }
+open-media-metadata = { path = "crates/open-media-metadata", version = "0.5.0" }
+open-media-sources = { path = "crates/open-media-sources", version = "0.5.0" }
+open-media-debrid = { path = "crates/open-media-debrid", version = "0.5.0" }
+open-media-stream = { path = "crates/open-media-stream", version = "0.5.0" }
+open-media-player = { path = "crates/open-media-player", version = "0.5.0" }
+open-media-subs = { path = "crates/open-media-subs", version = "0.5.0" }
+open-media-track = { path = "crates/open-media-track", version = "0.5.0" }
+open-media-history = { path = "crates/open-media-history", version = "0.5.0" }
+open-media-telemetry = { path = "crates/open-media-telemetry", version = "0.5.0" }
+open-media-app = { path = "crates/open-media-app", version = "0.5.0" }
 
 # --- Shared third-party deps (versions pinned once here; see ARCHITECTURE.md) ---
 # Kept light in the scaffold. Heavy adapter deps (reqwest, librqbit, rusqlite)
