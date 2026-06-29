@@ -22,10 +22,10 @@ tracing = { workspace = true }
 #
 # Registry (not git) deps are what let `cargo package` — which release-plz runs for
 # change detection — resolve them, so open-media-subs is no longer excluded from releases.
-os-core = { package = "open-subtitle-core", version = "0.2.0" }
-os-config = { package = "open-subtitle-config", version = "0.2.0" }
-os-compose = { package = "open-subtitle-compose", version = "0.2.0" }
-os-engine = { package = "open-subtitle-engine", version = "0.2.0" }
+os-core = { package = "open-subtitle-core", version = "0.2.1" }
+os-config = { package = "open-subtitle-config", version = "0.2.1" }
+os-compose = { package = "open-subtitle-compose", version = "0.2.1" }
+os-engine = { package = "open-subtitle-engine", version = "0.2.1" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
