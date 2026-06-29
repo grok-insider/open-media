@@ -18,7 +18,7 @@ use open_media_core::model::MediaKind;
 /// open-media: watch movies, series, and anime from the terminal — via
 /// Real-Debrid (instant, cached) or direct P2P, into mpv/vlc.
 #[derive(Debug, Parser)]
-#[command(name = "om", version, about, long_about = None)]
+#[command(name = "open-media", version, about, long_about = None)]
 struct Cli {
     /// Free-text query that opens the TUI pre-filled and immediately searches
     /// (e.g. `om "frieren"`). Ignored when a subcommand is given.
