@@ -132,6 +132,10 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          # Publish each crate to crates.io in dependency order (publish = true in
+          # release-plz.toml). Token is the `open-media-publish` crates.io API key
+          # (publish-new + publish-update scopes), owned by grok-insider.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Resolve the just-created release's tag/version once (jq on Linux) so the
   # cross-platform matrix (incl. Windows) doesn't need jq.

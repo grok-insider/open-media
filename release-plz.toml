@@ -11,17 +11,19 @@
 # the single root CHANGELOG.md via open-media-cli's `changelog_include`).
 #
 # On each push to master, release-plz opens/updates a "release PR" (bump +
-# Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z` and creates the GitHub Release.
-# Delivery is that Release (binary + notes) and the grok-insider cachix cache — flake.nix
-# reads the same version from Cargo.toml, so the cached path tracks it as
-# `om-X.Y.Z`. Nothing is published to crates.io (`git_only`).
+# Cargo.lock + CHANGELOG). Merging it tags `vX.Y.Z`, creates the GitHub Release,
+# and publishes every crate to crates.io in dependency order. Delivery is that
+# Release (binary + notes), the crates.io packages, and the grok-insider cachix
+# cache — flake.nix reads the same version from Cargo.toml, so the cached path
+# tracks it as `open-media-X.Y.Z`.
 
 [workspace]
-# Not on crates.io: read the current version from the `v*` git tag, not the cargo
-# registry. Implies no `cargo publish`.
-git_only = true
-# Never run `cargo publish` (git_only alone doesn't always disable it).
-publish = false
+# Published to crates.io. The `release-plz release` job (on the master push that
+# merges the release PR) publishes every crate in dependency order, and the
+# `vX.Y.Z` tag + GitHub Release + prebuilt binaries + cachix push are produced
+# alongside. Requires CARGO_REGISTRY_TOKEN in the release workflow.
+git_only = false
+publish = true
 # Release the current workspace version whenever it isn't tagged yet (robust; lets
 # a direct version bump cut a release and re-baseline at packageable code).
 release_always = true

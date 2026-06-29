@@ -4,6 +4,16 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0
+
+### Changed
+- **Published to crates.io.** All `open-media-*` crates (the libraries and the
+  `open-media-cli` binary) are now published to crates.io under the `grok-insider`
+  account, so they can be consumed as normal registry dependencies and the binary
+  installed with `cargo install open-media-cli`. GitHub Releases (prebuilt
+  binaries) and the cachix cache remain as additional delivery channels. release-plz
+  now publishes each crate in dependency order on release.
+
 ## 0.5.0
 
 ### Added
