@@ -30,7 +30,7 @@ pub struct NyaaSource {
 impl NyaaSource {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
             category: DEFAULT_CATEGORY.to_string(),
         }
@@ -40,7 +40,7 @@ impl NyaaSource {
     /// `"1_2"` for English-translated anime, `"1_3"` for raw/untranslated).
     pub fn with_category(category: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
             category: category.into(),
         }
@@ -48,7 +48,7 @@ impl NyaaSource {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: base_url.into(),
             category: DEFAULT_CATEGORY.to_string(),
         }
@@ -93,13 +93,16 @@ impl NyaaSource {
         );
         tracing::debug!(%url, "nyaa rss request");
 
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            if e.is_timeout() {
-                CoreError::Timeout(format!("nyaa: {e}"))
-            } else {
-                CoreError::Network(format!("nyaa: {e}"))
-            }
-        })?;
+        let resp = open_media_net::retry(|| async {
+            self.client.get(&url).send().await.map_err(|e| {
+                if e.is_timeout() {
+                    CoreError::Timeout(format!("nyaa: {e}"))
+                } else {
+                    CoreError::Network(format!("nyaa: {e}"))
+                }
+            })
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {

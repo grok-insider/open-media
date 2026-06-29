@@ -47,7 +47,7 @@ impl Default for CinemetaProvider {
 impl CinemetaProvider {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
         }
     }
@@ -55,19 +55,21 @@ impl CinemetaProvider {
     /// Construct against a custom base URL (used by integration tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: base_url.into(),
         }
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> CoreResult<T> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| map_net("cinemeta", e))?;
+        let resp = open_media_net::retry(|| async {
+            self.client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| map_net("cinemeta", e))
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {

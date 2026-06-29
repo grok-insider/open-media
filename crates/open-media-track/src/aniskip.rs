@@ -27,7 +27,7 @@ pub struct AniSkipEnricher {
 impl AniSkipEnricher {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             aniskip_base: ANISKIP_BASE.to_string(),
             jikan_base: JIKAN_BASE.to_string(),
         }
@@ -36,7 +36,7 @@ impl AniSkipEnricher {
     /// Override both base URLs (tests point them at one mock server).
     pub fn with_bases(aniskip_base: impl Into<String>, jikan_base: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             aniskip_base: aniskip_base.into(),
             jikan_base: jikan_base.into(),
         }
@@ -68,12 +68,14 @@ impl Enricher for AniSkipEnricher {
             "{}/v1/skip-times/{mal}/{episode}?types=op&types=ed&episodeLength={episode_length}",
             self.aniskip_base
         );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| map_net("aniskip", e))?;
+        let resp = open_media_net::retry(|| async {
+            self.client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| map_net("aniskip", e))
+        })
+        .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(SkipTimes::default());
         }
@@ -115,12 +117,14 @@ impl Enricher for AniSkipEnricher {
         let mut page = 1u32;
         loop {
             let url = format!("{}/v4/anime/{mal}/episodes?page={page}", self.jikan_base);
-            let resp = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| map_net("jikan", e))?;
+            let resp = open_media_net::retry(|| async {
+                self.client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| map_net("jikan", e))
+            })
+            .await?;
             if !resp.status().is_success() {
                 break;
             }

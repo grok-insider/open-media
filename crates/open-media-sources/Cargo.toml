@@ -10,6 +10,7 @@ description = "SourceProvider adapters: Torrentio (all media) and direct nyaa.si
 
 [dependencies]
 open-media-core = { workspace = true }
+open-media-net = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

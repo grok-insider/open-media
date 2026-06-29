@@ -86,7 +86,7 @@ pub struct AniListProvider {
 impl AniListProvider {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
             jikan: JikanTitles::new(),
         }
@@ -94,7 +94,7 @@ impl AniListProvider {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: base_url.into(),
             jikan: JikanTitles::new(),
         }
@@ -107,7 +107,7 @@ impl AniListProvider {
     #[cfg(test)]
     fn with_bases(anilist_base: impl Into<String>, jikan_base: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: anilist_base.into(),
             jikan: JikanTitles::with_base_url(jikan_base),
         }
@@ -119,13 +119,17 @@ impl AniListProvider {
         variables: serde_json::Value,
     ) -> CoreResult<T> {
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| map_net("anilist", e))?;
+        // AniList search/details are read-only GraphQL queries (idempotent), so a
+        // transient transport failure is safe to retry.
+        let resp = open_media_net::retry(|| async {
+            self.client
+                .post(&self.base_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| map_net("anilist", e))
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {

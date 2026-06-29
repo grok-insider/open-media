@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/open-media-core",
+    "crates/open-media-net",
     "crates/open-media-config",
     "crates/open-media-metadata",
     "crates/open-media-sources",
@@ -32,6 +33,7 @@ repository = "https://github.com/grok-insider/open-media"
 # to detect changes); release-plz keeps these in lockstep with the workspace
 # version on every bump. They are never published — `path` always wins for builds.
 open-media-core = { path = "crates/open-media-core", version = "0.4.0" }
+open-media-net = { path = "crates/open-media-net", version = "0.4.0" }
 open-media-config = { path = "crates/open-media-config", version = "0.4.0" }
 open-media-metadata = { path = "crates/open-media-metadata", version = "0.4.0" }
 open-media-sources = { path = "crates/open-media-sources", version = "0.4.0" }

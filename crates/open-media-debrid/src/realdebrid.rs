@@ -31,7 +31,7 @@ pub struct RealDebrid {
 impl RealDebrid {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             token: token.into(),
             base_url: DEFAULT_BASE.to_string(),
             poll_interval: Duration::from_secs(2),

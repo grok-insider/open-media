@@ -10,6 +10,7 @@ description = "Tracker (AniList/MAL/composite), Enricher (AniSkip/Jikan), and Di
 
 [dependencies]
 open-media-core = { workspace = true }
+open-media-net = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
