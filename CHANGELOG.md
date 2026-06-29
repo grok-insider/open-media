@@ -4,6 +4,10 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.1
+
+- Fixed the `--version` output to display "open-media" instead of "om".
+
 ## 0.6.0
 
 ### Changed
