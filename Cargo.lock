@@ -2333,36 +2333,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-app"
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "once_cell_polyfill"
+version = "1.70.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "open-media-app"
 version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",
- "om-core",
+ "open-media-core",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "om-cli"
+name = "open-media-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
  "image",
- "om-app",
- "om-config",
- "om-core",
- "om-debrid",
- "om-history",
- "om-metadata",
- "om-player",
- "om-sources",
- "om-stream",
- "om-subs",
- "om-telemetry",
- "om-track",
+ "open-media-app",
+ "open-media-config",
+ "open-media-core",
+ "open-media-debrid",
+ "open-media-history",
+ "open-media-metadata",
+ "open-media-player",
+ "open-media-sources",
+ "open-media-stream",
+ "open-media-subs",
+ "open-media-telemetry",
+ "open-media-track",
  "ratatui",
  "ratatui-image",
  "reqwest",
@@ -2374,18 +2386,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-config"
+name = "open-media-config"
 version = "0.4.0"
 dependencies = [
  "dirs",
- "om-core",
+ "open-media-core",
  "serde",
  "toml 0.9.12+spec-1.1.0",
  "uuid",
 ]
 
 [[package]]
-name = "om-core"
+name = "open-media-core"
 version = "0.4.0"
 dependencies = [
  "async-trait",
@@ -2394,11 +2406,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-debrid"
+name = "open-media-debrid"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2408,20 +2420,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-history"
+name = "open-media-history"
 version = "0.4.0"
 dependencies = [
- "om-core",
+ "open-media-core",
  "rusqlite",
  "tempfile",
 ]
 
 [[package]]
-name = "om-metadata"
+name = "open-media-metadata"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2432,11 +2444,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-player"
+name = "open-media-player"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2445,11 +2457,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-sources"
+name = "open-media-sources"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "quick-xml 0.38.4",
  "regex",
  "reqwest",
@@ -2462,12 +2474,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-stream"
+name = "open-media-stream"
 version = "0.4.0"
 dependencies = [
  "async-trait",
  "librqbit",
- "om-core",
+ "open-media-core",
  "reqwest",
  "serde",
  "tokio",
@@ -2475,11 +2487,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-subs"
+name = "open-media-subs"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "open-subtitle-compose",
  "open-subtitle-config",
  "open-subtitle-core",
@@ -2489,11 +2501,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-telemetry"
+name = "open-media-telemetry"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2503,11 +2515,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "om-track"
+name = "open-media-track"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "om-core",
+ "open-media-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2515,18 +2527,6 @@ dependencies = [
  "tracing",
  "wiremock",
 ]
-
-[[package]]
-name = "once_cell"
-version = "1.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "once_cell_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "open-subtitle-compose"
