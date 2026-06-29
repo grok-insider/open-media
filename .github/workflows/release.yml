@@ -30,6 +30,17 @@ jobs:
     name: release-plz PR
     if: github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
+    # release-plz's `release-pr` (change-detection) copies each crate into an
+    # isolated worktree and runs `cargo package` there to diff against the last
+    # release. When a crate is renamed or restructured between releases, that step
+    # fails with "Failed to find package <crate>" because the baseline tag and the
+    # current tree disagree on package identity — an upstream limitation
+    # (release-plz/release-plz#2789, still open). This is non-fatal: the actual
+    # release is cut by the `release-plz release` job below (which works), and the
+    # version is bumped manually in the root Cargo.toml. So this job is marked
+    # non-blocking; it self-heals on the release AFTER a rename, once the baseline
+    # tag carries the new names.
+    continue-on-error: true
     permissions:
       contents: write
       pull-requests: write
