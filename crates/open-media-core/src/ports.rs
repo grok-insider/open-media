@@ -282,6 +282,37 @@ pub trait SubtitleProvider: Send + Sync {
     async fn fetch(&self, query: &SubtitleQuery) -> CoreResult<Vec<SubtitleTrack>>;
 }
 
+/// Bridges an anime's id dialect (AniList/MAL) to an IMDB id.
+///
+/// Anime is discovered via AniList, which carries no IMDB id — but the
+/// IMDB-keyed source providers ([`SourceProvider`] backends like Torrentio/Comet)
+/// and, through them, the debrid cache only light up when [`IdSet::imdb`] is
+/// populated. This port closes that gap: given the ids known for an anime, it
+/// returns the matching `tt…` id (when one exists), which the application layer
+/// merges into the [`IdSet`] before building a source query — no change to the
+/// source providers themselves (they already key off `imdb`).
+///
+/// Contract:
+/// - **Best-effort and non-fatal.** A fetch/parse/cache failure must surface as
+///   `Ok(None)` (no enrichment), never an `Err` that would abort the user's
+///   action. The whole capability is an *addition*: without it, anime simply
+///   keeps getting its anime-native (nyaa) sources as before.
+/// - **Partial coverage is expected.** The backing dataset carries an IMDB id
+///   mainly for standalone anime *movies* and a subset of series; many TV
+///   entries have none. Returning `None` for those is correct, not an error.
+/// - Object-safe and optional — the [`Engine`] works without an `IdBridge` wired.
+///
+/// [`IdSet::imdb`]: crate::model::IdSet::imdb
+/// [`Engine`]: ../../open_media_app/struct.Engine.html
+#[async_trait]
+pub trait IdBridge: Send + Sync {
+    fn name(&self) -> &str;
+
+    /// Resolve an IMDB id for the given ids (keyed off the anilist/mal dialect),
+    /// or `Ok(None)` when no mapping exists or the lookup could not be performed.
+    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>>;
+}
+
 /// Reports a "now watching" activity to a presence service (Discord RPC).
 #[async_trait]
 pub trait PresenceReporter: Send + Sync {
