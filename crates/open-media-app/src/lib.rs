@@ -238,8 +238,31 @@ impl Engine {
     /// [`Playback`]: open_media_core::stream::Playback
     /// [`PlaybackControl`]: open_media_core::ports::PlaybackControl
     pub async fn play(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<()> {
-        // Single-shot playback of the chosen candidate.
-        let completed = self.play_once(req, candidate).await?;
+        // Single chosen candidate: the no-fallback entry point. Delegates to the
+        // fallback path with a one-element list so both share the binge logic.
+        self.play_with_fallback(req, std::slice::from_ref(candidate))
+            .await
+    }
+
+    /// Like [`Engine::play`] but with **across-candidate failover**: try the
+    /// ranked candidates in order, and when resolving or launching the chosen one
+    /// fails, fall through to the next [resolvable](SourceCandidate::is_resolvable)
+    /// candidate instead of aborting. This is the layer *above* the
+    /// [`StreamResolver`]'s own intra-candidate debrid→P2P fallback: it survives a
+    /// candidate that can't be resolved at all (dead torrent, debrid rejects the
+    /// hash), not just one transport that's down.
+    ///
+    /// `candidates` is expected pre-ranked (as [`Engine::find_sources`] returns
+    /// it); non-resolvable entries are skipped. Returns the last failure if no
+    /// candidate could be played, or `NoSource` if the list had nothing
+    /// resolvable.
+    pub async fn play_with_fallback(
+        &self,
+        req: &PlayRequest,
+        candidates: &[SourceCandidate],
+    ) -> CoreResult<()> {
+        // Play the first episode, falling through candidates on failure.
+        let completed = self.play_episode_with_fallback(req, candidates).await?;
 
         // Binge: when enabled and the episode was actually watched to completion,
         // keep advancing to the next (non-filler) episode until we run out of
@@ -257,17 +280,68 @@ impl Engine {
             let Some(next) = self.next_request(&current, &filler).await else {
                 break;
             };
-            let Some(candidate) = self.pick_candidate(&next).await else {
+            // The whole ranked candidate list for the next episode, so a failed
+            // resolve falls through to the next source rather than ending the
+            // binge on a single dud release.
+            let next_candidates = self.pick_candidates(&next).await;
+            if next_candidates.is_empty() {
                 // No playable source for the next episode — stop rather than skip
                 // a gap silently; the viewer can resume manually.
                 break;
-            };
-            if !self.play_once(&next, &candidate).await? {
-                break; // quit / low-progress exit ends the binge.
+            }
+            match self
+                .play_episode_with_fallback(&next, &next_candidates)
+                .await
+            {
+                // Quit / low-progress exit ends the binge.
+                Ok(false) => break,
+                Ok(true) => {}
+                // Every candidate for this episode failed to play. Stop the binge
+                // here rather than aborting the whole session with an error — the
+                // viewer keeps what they watched and can resume manually.
+                Err(e) => {
+                    tracing::warn!(error = %e, "no playable source for next episode; ending binge");
+                    break;
+                }
             }
             current = next;
         }
         Ok(())
+    }
+
+    /// Play a single episode, trying each resolvable candidate in order until one
+    /// plays through. Returns whether the played episode crossed the completion
+    /// threshold (the binge loop's advance signal). Errors only when *every*
+    /// resolvable candidate failed to resolve/launch; the last such error is
+    /// returned (or [`CoreError::NoSource`] when the list had nothing resolvable).
+    async fn play_episode_with_fallback(
+        &self,
+        req: &PlayRequest,
+        candidates: &[SourceCandidate],
+    ) -> CoreResult<bool> {
+        let mut last_err: Option<CoreError> = None;
+        let mut tried = 0usize;
+        for candidate in candidates.iter().filter(|c| c.is_resolvable()) {
+            tried += 1;
+            match self.play_once(req, candidate).await {
+                Ok(completed) => return Ok(completed),
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %candidate.provider,
+                        error = %e,
+                        "candidate failed to play; trying next source"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            if tried == 0 {
+                CoreError::NoSource("no resolvable candidate to play".into())
+            } else {
+                CoreError::NoSource("all candidates failed to play".into())
+            }
+        }))
     }
 
     /// Resolve a chosen candidate and play it through once. Returns whether the
@@ -473,15 +547,20 @@ impl Engine {
         })
     }
 
-    /// Find + rank sources for a request and return the top resolvable candidate,
-    /// reusing the same ranking [`Engine::find_sources`] applies. `None` when the
-    /// lookup fails or nothing is resolvable.
-    async fn pick_candidate(&self, req: &PlayRequest) -> Option<SourceCandidate> {
+    /// Find + rank sources for a request and return the resolvable candidates in
+    /// ranked order, reusing the same ranking [`Engine::find_sources`] applies.
+    /// Empty when the lookup fails or nothing is resolvable. The caller plays
+    /// these with failover (first that resolves+plays wins).
+    async fn pick_candidates(&self, req: &PlayRequest) -> Vec<SourceCandidate> {
         self.find_sources(req)
             .await
-            .ok()?
-            .into_iter()
-            .find(|c| c.is_resolvable())
+            .map(|cands| {
+                cands
+                    .into_iter()
+                    .filter(|c| c.is_resolvable())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     /// Fetch external subtitles for the request and materialize each returned
@@ -1573,5 +1652,130 @@ mod tests {
             .await
             .unwrap();
         assert!(args.lock().unwrap().is_empty());
+    }
+
+    // ---- across-candidate source failover ------------------------------------
+    //
+    // The resolver rejects a named candidate (simulating a dead torrent / debrid
+    // that won't cache the hash) and resolves anything else. With two ranked
+    // candidates where the first is the rejected one, `play_with_fallback` must
+    // fall through to the second and play it — not abort.
+
+    /// A resolver that errors for one specific candidate title and echoes any
+    /// other into a playable URL. Records every title it was asked to resolve so
+    /// the test can assert the order candidates were tried.
+    struct FailingResolver {
+        fail_title: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl StreamResolver for FailingResolver {
+        async fn resolve(&self, candidate: &SourceCandidate) -> CoreResult<Playback> {
+            self.seen.lock().unwrap().push(candidate.title.clone());
+            if candidate.title == self.fail_title {
+                return Err(CoreError::NoSource(format!(
+                    "cannot resolve {}",
+                    candidate.title
+                )));
+            }
+            Ok(Playback {
+                url: "http://localhost/stream".into(),
+                origin: PlaybackOrigin::LocalP2p,
+                file_name: candidate.title.clone(),
+            })
+        }
+    }
+
+    /// A player that records the playback file name it was handed, then exits at
+    /// once (no monitor). Lets the test assert *which* candidate actually played.
+    struct PlayedCapturePlayer {
+        played: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Player for PlayedCapturePlayer {
+        fn name(&self) -> &str {
+            "played-capture"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            playback: &Playback,
+            _opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            self.played.lock().unwrap().push(playback.file_name.clone());
+            Ok(Box::new(InstantSession))
+        }
+    }
+
+    fn named_candidate(title: &str) -> SourceCandidate {
+        SourceCandidate {
+            provider: title.into(),
+            title: title.into(),
+            quality: Quality::P1080,
+            size_bytes: 1,
+            seeders: Some(1),
+            info_hash: Some("0".repeat(40)),
+            magnet: None,
+            direct_url: None,
+            file_index: None,
+            cache: CacheState::Cached,
+            tags: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn play_falls_through_to_next_candidate_on_resolve_failure() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .resolver(Arc::new(FailingResolver {
+                fail_title: "first".into(),
+                seen: seen.clone(),
+            }))
+            .player(Arc::new(PlayedCapturePlayer {
+                played: played.clone(),
+            }))
+            .build();
+
+        let candidates = vec![named_candidate("first"), named_candidate("second")];
+        engine
+            .play_with_fallback(&movie_request(), &candidates)
+            .await
+            .unwrap();
+
+        // The resolver was asked for "first" (failed) then "second" (succeeded).
+        assert_eq!(*seen.lock().unwrap(), vec!["first", "second"]);
+        // Only the second candidate actually reached the player.
+        assert_eq!(*played.lock().unwrap(), vec!["second".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn play_errors_when_all_candidates_fail_to_resolve() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            // Resolver fails for "first"; the only other candidate is
+            // non-resolvable, so nothing can play.
+            .resolver(Arc::new(FailingResolver {
+                fail_title: "first".into(),
+                seen: seen.clone(),
+            }))
+            .player(Arc::new(PlayedCapturePlayer {
+                played: played.clone(),
+            }))
+            .build();
+
+        let candidates = vec![named_candidate("first")];
+        let err = engine
+            .play_with_fallback(&movie_request(), &candidates)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, CoreError::NoSource(_)));
+        assert!(played.lock().unwrap().is_empty());
     }
 }
