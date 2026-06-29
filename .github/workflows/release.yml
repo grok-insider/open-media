@@ -30,14 +30,6 @@ jobs:
     name: release-plz PR
     if: github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
-    # The om-subs crate has a git dependency (the open-subtitle engine) that
-    # release-plz cannot `cargo package` in its isolated change-detection worktree
-    # ("Failed to find package om-subs"). Until upstream release-plz/release-plz#2789
-    # (source-dir fallback) lands, this job is expected to fail — so it's marked
-    # non-blocking. The release is cut by the `release-plz release` job below
-    # (unaffected) off a manual version bump in the root Cargo.toml. See
-    # release-plz.toml (om-subs package note) and continue-plan.md.
-    continue-on-error: true
     permissions:
       contents: write
       pull-requests: write
