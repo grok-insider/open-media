@@ -10,17 +10,26 @@
 //! - [`AniListProvider`] — AniList GraphQL. Anime discovery + MAL-id bridging
 //!   (needed by AniSkip and MAL tracking).
 //!
+//! It also hosts the [`IdBridge`] adapter:
+//!
+//! - [`FribbIdBridge`] — maps an anime's AniList/MAL id to an IMDB id via Fribb's
+//!   anime-lists dataset, so anime can reach the IMDB-keyed source/debrid path
+//!   (Torrentio/Real-Debrid). Fetch-and-cache; partial coverage by design.
+//!
 //! All take an injectable base URL so integration tests can point them at a
 //! mock server (see `tests/`).
 //!
 //! [`MetadataProvider`]: open_media_core::ports::MetadataProvider
+//! [`IdBridge`]: open_media_core::ports::IdBridge
 
 pub mod anilist;
+pub mod bridge;
 pub mod cinemeta;
 mod jikan;
 pub mod tmdb;
 
 pub use anilist::AniListProvider;
+pub use bridge::FribbIdBridge;
 pub use cinemeta::CinemetaProvider;
 pub use tmdb::TmdbProvider;
 
