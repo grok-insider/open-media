@@ -10,12 +10,18 @@ description = "MetadataProvider adapters: TMDB + Cinemeta (keyless) for movies/s
 
 [dependencies]
 open-media-core = { workspace = true }
+open-media-net = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 urlencoding = { workspace = true }
 tracing = { workspace = true }
+# `time`: the Jikan client paces its page loop with `tokio::time::sleep` to
+# respect the ~3 req/s rate limit (mirrors om-track's aniskip enricher).
+# `sync`: the Fribb id-bridge memoizes its lazily-loaded dataset in a
+# `tokio::sync::OnceCell` so the multi-MB fetch+parse happens at most once.
+tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

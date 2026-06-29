@@ -20,6 +20,9 @@ use open_media_core::model::MediaKind;
 #[derive(Debug, Parser)]
 #[command(name = "om", version, about, long_about = None)]
 struct Cli {
+    /// Free-text query that opens the TUI pre-filled and immediately searches
+    /// (e.g. `om "frieren"`). Ignored when a subcommand is given.
+    query: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -79,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(cli.command.is_none());
 
     match cli.command {
-        None => run_interactive().await,
+        None => run_interactive(cli.query).await,
         Some(Command::Init) => cmd_init(),
         Some(Command::Config { action }) => cmd_config(action),
         Some(Command::Search { query, kind }) => cmd_search(&query, kind.as_deref()).await,
@@ -107,7 +110,7 @@ fn init_tracing(tui_mode: bool) {
 }
 
 /// Default (no subcommand): the interactive TUI.
-async fn run_interactive() -> anyhow::Result<()> {
+async fn run_interactive(initial_query: Option<String>) -> anyhow::Result<()> {
     let mut cfg = match open_media_config::load() {
         Ok(c) => c,
         Err(_) => {
@@ -117,7 +120,7 @@ async fn run_interactive() -> anyhow::Result<()> {
     };
     telemetry::startup(&mut cfg);
     let engine = compose::build_engine(&cfg);
-    tui::run(engine, cfg, None).await
+    tui::run(engine, cfg, initial_query).await
 }
 
 fn cmd_init() -> anyhow::Result<()> {
@@ -355,12 +358,17 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         include_uncached: cfg.providers.show_uncached,
     };
     let candidates = engine.find_sources(&req).await?;
-    let best = candidates
+    // Keep only the resolvable candidates, in ranked order, so playback can fall
+    // through to the next source if the top pick fails to resolve/launch.
+    let resolvable: Vec<_> = candidates
         .into_iter()
-        .find(|c| c.is_resolvable())
+        .filter(|c| c.is_resolvable())
+        .collect();
+    let best = resolvable
+        .first()
         .ok_or_else(|| anyhow::anyhow!("no playable source found"))?;
     println!(
-        "  source: [{}] {} {} ({}, {})",
+        "  source: [{}] {} {} ({}, {}){}",
         best.provider,
         best.quality.label(),
         best.human_size(),
@@ -371,11 +379,17 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         },
         best.seeders
             .map(|s| format!("{s} seeders"))
-            .unwrap_or_else(|| "?".into())
+            .unwrap_or_else(|| "?".into()),
+        if resolvable.len() > 1 {
+            format!(" — {} fallbacks", resolvable.len() - 1)
+        } else {
+            String::new()
+        }
     );
 
-    // 6. Resolve + play.
-    engine.play(&req, &best).await?;
+    // 6. Resolve + play, falling through to the next resolvable candidate if the
+    //    chosen source can't be resolved or launched.
+    engine.play_with_fallback(&req, &resolvable).await?;
     Ok(())
 }
 
@@ -408,5 +422,38 @@ fn mask(secret: &str) -> String {
         "(not set)".to_string()
     } else {
         format!("set ({} chars)", secret.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn positional_query_opens_tui_prefilled() {
+        let cli = Cli::parse_from(["om", "frieren"]);
+        assert_eq!(cli.query.as_deref(), Some("frieren"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn bare_invocation_has_no_query_and_no_command() {
+        let cli = Cli::parse_from(["om"]);
+        assert!(cli.query.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn subcommand_still_parses_as_subcommand() {
+        let cli = Cli::parse_from(["om", "search", "x"]);
+        assert!(cli.query.is_none());
+        match cli.command {
+            Some(Command::Search { query, kind }) => {
+                assert_eq!(query, "x");
+                assert!(kind.is_none());
+            }
+            other => panic!("expected Search subcommand, got {other:?}"),
+        }
     }
 }

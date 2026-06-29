@@ -12,6 +12,7 @@ use open_media_core::ports::MetadataProvider;
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::jikan::JikanTitles;
 use crate::map_net;
 
 const DEFAULT_BASE: &str = "https://graphql.anilist.co";
@@ -75,20 +76,40 @@ const PREQUEL_HOP_CAP: u8 = 5;
 pub struct AniListProvider {
     client: Client,
     base_url: String,
+    /// Best-effort per-episode title source (MAL id keyed). Enriches the sparse
+    /// `streamingEpisodes` titles in [`episodes`]; never a hard dependency.
+    ///
+    /// [`episodes`]: MetadataProvider::episodes
+    jikan: JikanTitles,
 }
 
 impl AniListProvider {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: DEFAULT_BASE.to_string(),
+            jikan: JikanTitles::new(),
         }
     }
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: open_media_net::client(),
             base_url: base_url.into(),
+            jikan: JikanTitles::new(),
+        }
+    }
+
+    /// Like [`with_base_url`], but also points the Jikan client at a base URL —
+    /// so a test can serve both AniList and Jikan from one mock server.
+    ///
+    /// [`with_base_url`]: Self::with_base_url
+    #[cfg(test)]
+    fn with_bases(anilist_base: impl Into<String>, jikan_base: impl Into<String>) -> Self {
+        Self {
+            client: open_media_net::client(),
+            base_url: anilist_base.into(),
+            jikan: JikanTitles::with_base_url(jikan_base),
         }
     }
 
@@ -98,13 +119,17 @@ impl AniListProvider {
         variables: serde_json::Value,
     ) -> CoreResult<T> {
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| map_net("anilist", e))?;
+        // AniList search/details are read-only GraphQL queries (idempotent), so a
+        // transient transport failure is safe to retry.
+        let resp = open_media_net::retry(|| async {
+            self.client
+                .post(&self.base_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| map_net("anilist", e))
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(CoreError::Remote {
@@ -283,13 +308,27 @@ impl MetadataProvider for AniListProvider {
             }
         }
 
+        // AniList's per-episode titles are sparse, so when we have a MAL id,
+        // pull richer titles from Jikan (MAL's episode list, keyed by episode
+        // number). This is best-effort: a failure yields an empty map and we
+        // simply fall back to the `streamingEpisodes`-derived title below.
+        let jikan_titles = match ids.mal {
+            Some(mal) => self.jikan.episode_titles(mal).await,
+            None => HashMap::new(),
+        };
+
         Ok((1..=count)
             .map(|n| {
                 let se = enrich.get(&n);
+                // Prefer Jikan's title; fall back to the streaming-episode one.
+                let title = jikan_titles
+                    .get(&n)
+                    .cloned()
+                    .or_else(|| se.and_then(|s| s.clean_title()));
                 Episode {
                     season,
                     number: n,
-                    title: se.and_then(|s| s.clean_title()),
+                    title,
                     air_date: None,
                     overview: None,
                     runtime_minutes: None,
@@ -596,7 +635,7 @@ impl AniListMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::matchers::{body_string_contains, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// One AniList `Page` response with `n` media (sequential ids offset by
@@ -845,5 +884,94 @@ mod tests {
         assert_eq!(eps[1].still, None);
         // Ep 3 matched.
         assert_eq!(eps[2].title.as_deref(), Some("Third"));
+    }
+
+    /// An AniList `Media` detail response with two streaming episodes (eps 1+2)
+    /// and a MAL id, used by the Jikan-enrichment tests.
+    fn detail_with_mal(mal: i32) -> serde_json::Value {
+        serde_json::json!({
+            "data": { "Media": {
+                "id": 1,
+                "idMal": mal,
+                "title": { "romaji": "Show" },
+                "episodes": 3,
+                "format": "TV",
+                "streamingEpisodes": [
+                    { "title": "Episode 1 - AniList One", "thumbnail": "https://t/1.jpg" },
+                    { "title": "Episode 2 - AniList Two", "thumbnail": "https://t/2.jpg" }
+                ]
+            } }
+        })
+    }
+
+    /// A Jikan `/episodes` page (titles for eps 1 and 2 only; ep 3 absent).
+    fn jikan_episodes() -> serde_json::Value {
+        serde_json::json!({
+            "pagination": { "has_next_page": false },
+            "data": [
+                { "mal_id": 1, "title": "Jikan One" },
+                { "mal_id": 2, "title": "Jikan Two" }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn episodes_prefer_jikan_titles_then_fall_back() {
+        // One mock server serves both: AniList details over POST, Jikan
+        // episodes over GET /v4/anime/{mal}/episodes.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(detail_with_mal(52991)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v4/anime/\d+/episodes$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jikan_episodes()))
+            .mount(&server)
+            .await;
+
+        let provider = AniListProvider::with_bases(server.uri(), server.uri());
+        let ids = IdSet::default().with_anilist(1).with_mal(52991);
+        let eps = provider.episodes(&ids, 1).await.unwrap();
+
+        assert_eq!(eps.len(), 3);
+        // Eps 1+2: Jikan's title wins over the AniList streaming one.
+        assert_eq!(eps[0].title.as_deref(), Some("Jikan One"));
+        assert_eq!(eps[1].title.as_deref(), Some("Jikan Two"));
+        // Ep 3: Jikan has no title → fall back (no streaming entry either → bare).
+        assert_eq!(eps[2].title, None);
+        // Stills still come from AniList's streamingEpisodes.
+        assert_eq!(eps[0].still.as_deref(), Some("https://t/1.jpg"));
+    }
+
+    #[tokio::test]
+    async fn episodes_without_mal_use_streaming_titles_only() {
+        // No idMal → Jikan is never consulted; a GET would 404 (no GET mock)
+        // but the adapter must not issue one, so behavior is unchanged.
+        let server = MockServer::start().await;
+        let detail = serde_json::json!({
+            "data": { "Media": {
+                "id": 1,
+                "title": { "romaji": "Show" },
+                "episodes": 2,
+                "format": "TV",
+                "streamingEpisodes": [
+                    { "title": "Episode 1 - AniList One", "thumbnail": "https://t/1.jpg" },
+                    { "title": "Episode 2 - AniList Two", "thumbnail": "https://t/2.jpg" }
+                ]
+            } }
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(detail))
+            .mount(&server)
+            .await;
+
+        let provider = AniListProvider::with_base_url(server.uri());
+        let ids = IdSet::default().with_anilist(1);
+        let eps = provider.episodes(&ids, 1).await.unwrap();
+
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].title.as_deref(), Some("AniList One"));
+        assert_eq!(eps[1].title.as_deref(), Some("AniList Two"));
     }
 }

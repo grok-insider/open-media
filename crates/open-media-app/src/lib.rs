@@ -24,8 +24,9 @@ use std::time::Duration;
 use open_media_core::error::{CoreError, CoreResult};
 use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
-    Chapter, Enricher, HistoryStore, MetadataProvider, PlayOptions, PlaybackControl, Player,
-    PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
+    Chapter, Enricher, HistoryStore, IdBridge, MetadataProvider, PlayOptions, PlaybackControl,
+    Player, PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider,
+    Tracker,
 };
 use open_media_core::scoring::{self, ScoringPrefs};
 use open_media_core::stream::{Playback, SourceCandidate};
@@ -63,6 +64,10 @@ pub struct Engine {
     /// Preferred subtitle languages (most-wanted first) for the [`SubtitleQuery`].
     /// Empty when no provider is wired or none are configured.
     subtitle_languages: Vec<String>,
+    /// Bridges an anime's AniList/MAL id to an IMDB id so the IMDB-keyed source
+    /// providers (Torrentio → debrid) can serve it. Optional: when unset, anime
+    /// without an IMDB id simply keep their anime-native (nyaa) sources.
+    id_bridge: Option<Arc<dyn IdBridge>>,
     prefs: ScoringPrefs,
     /// Fraction watched at which an episode counts as complete (e.g. 0.85).
     complete_threshold: f32,
@@ -155,8 +160,14 @@ impl Engine {
     /// support the media kind (e.g. nyaa for a live-action movie) are skipped.
     pub async fn find_sources(&self, req: &PlayRequest) -> CoreResult<Vec<SourceCandidate>> {
         let absolute_episode = self.absolute_episode(req).await;
+        // Enrich anime with an IMDB id (best-effort) *before* the query is built,
+        // so the IMDB-keyed providers (Torrentio → debrid) light up for anime
+        // that AniList only knows by anilist/mal id. A no-op for everything that
+        // already has an imdb id or when no bridge is wired.
+        let mut media = req.media.clone();
+        self.enrich_imdb(&mut media).await;
         let query = SourceQuery {
-            media: req.media.clone(),
+            media,
             season: req.season,
             episode: req.episode,
             absolute_episode,
@@ -182,6 +193,41 @@ impl Engine {
 
         scoring::rank(&mut candidates, &self.prefs);
         Ok(candidates)
+    }
+
+    /// Populate `media.ids.imdb` from the [`IdBridge`] when it is missing.
+    ///
+    /// This is the hinge of anime→IMDB source enrichment: the IMDB-keyed source
+    /// providers (Torrentio, and through them the debrid cache) short-circuit
+    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa. Looking
+    /// up an IMDB id for the anime's anilist/mal id here — right before the
+    /// [`SourceQuery`] is built — lets those providers serve anime with **no
+    /// change to the providers themselves** (they already key off `imdb`).
+    ///
+    /// Best-effort and side-effect-free beyond the passed `media`:
+    /// - only runs for [`MediaKind::Anime`] that lack an imdb id and have an
+    ///   anilist/mal id to bridge from, and only when a bridge is wired;
+    /// - a bridge error or a `None` result leaves `media` untouched (the title
+    ///   keeps its nyaa sources). It must never fail the caller.
+    async fn enrich_imdb(&self, media: &mut Media) {
+        if media.kind != MediaKind::Anime || media.ids.imdb.is_some() {
+            return;
+        }
+        let Some(bridge) = &self.id_bridge else {
+            return;
+        };
+        match bridge.imdb_for(&media.ids).await {
+            Ok(Some(imdb)) => {
+                tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
+                media.ids.imdb = Some(imdb);
+            }
+            Ok(None) => {
+                tracing::debug!("no IMDB mapping for anime; keeping anime-native sources");
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "id bridge lookup failed; keeping anime-native sources");
+            }
+        }
     }
 
     /// Compute the episode's *absolute* (franchise-continuous) number, when a
@@ -238,8 +284,31 @@ impl Engine {
     /// [`Playback`]: open_media_core::stream::Playback
     /// [`PlaybackControl`]: open_media_core::ports::PlaybackControl
     pub async fn play(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<()> {
-        // Single-shot playback of the chosen candidate.
-        let completed = self.play_once(req, candidate).await?;
+        // Single chosen candidate: the no-fallback entry point. Delegates to the
+        // fallback path with a one-element list so both share the binge logic.
+        self.play_with_fallback(req, std::slice::from_ref(candidate))
+            .await
+    }
+
+    /// Like [`Engine::play`] but with **across-candidate failover**: try the
+    /// ranked candidates in order, and when resolving or launching the chosen one
+    /// fails, fall through to the next [resolvable](SourceCandidate::is_resolvable)
+    /// candidate instead of aborting. This is the layer *above* the
+    /// [`StreamResolver`]'s own intra-candidate debrid→P2P fallback: it survives a
+    /// candidate that can't be resolved at all (dead torrent, debrid rejects the
+    /// hash), not just one transport that's down.
+    ///
+    /// `candidates` is expected pre-ranked (as [`Engine::find_sources`] returns
+    /// it); non-resolvable entries are skipped. Returns the last failure if no
+    /// candidate could be played, or `NoSource` if the list had nothing
+    /// resolvable.
+    pub async fn play_with_fallback(
+        &self,
+        req: &PlayRequest,
+        candidates: &[SourceCandidate],
+    ) -> CoreResult<()> {
+        // Play the first episode, falling through candidates on failure.
+        let completed = self.play_episode_with_fallback(req, candidates).await?;
 
         // Binge: when enabled and the episode was actually watched to completion,
         // keep advancing to the next (non-filler) episode until we run out of
@@ -257,17 +326,68 @@ impl Engine {
             let Some(next) = self.next_request(&current, &filler).await else {
                 break;
             };
-            let Some(candidate) = self.pick_candidate(&next).await else {
+            // The whole ranked candidate list for the next episode, so a failed
+            // resolve falls through to the next source rather than ending the
+            // binge on a single dud release.
+            let next_candidates = self.pick_candidates(&next).await;
+            if next_candidates.is_empty() {
                 // No playable source for the next episode — stop rather than skip
                 // a gap silently; the viewer can resume manually.
                 break;
-            };
-            if !self.play_once(&next, &candidate).await? {
-                break; // quit / low-progress exit ends the binge.
+            }
+            match self
+                .play_episode_with_fallback(&next, &next_candidates)
+                .await
+            {
+                // Quit / low-progress exit ends the binge.
+                Ok(false) => break,
+                Ok(true) => {}
+                // Every candidate for this episode failed to play. Stop the binge
+                // here rather than aborting the whole session with an error — the
+                // viewer keeps what they watched and can resume manually.
+                Err(e) => {
+                    tracing::warn!(error = %e, "no playable source for next episode; ending binge");
+                    break;
+                }
             }
             current = next;
         }
         Ok(())
+    }
+
+    /// Play a single episode, trying each resolvable candidate in order until one
+    /// plays through. Returns whether the played episode crossed the completion
+    /// threshold (the binge loop's advance signal). Errors only when *every*
+    /// resolvable candidate failed to resolve/launch; the last such error is
+    /// returned (or [`CoreError::NoSource`] when the list had nothing resolvable).
+    async fn play_episode_with_fallback(
+        &self,
+        req: &PlayRequest,
+        candidates: &[SourceCandidate],
+    ) -> CoreResult<bool> {
+        let mut last_err: Option<CoreError> = None;
+        let mut tried = 0usize;
+        for candidate in candidates.iter().filter(|c| c.is_resolvable()) {
+            tried += 1;
+            match self.play_once(req, candidate).await {
+                Ok(completed) => return Ok(completed),
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %candidate.provider,
+                        error = %e,
+                        "candidate failed to play; trying next source"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            if tried == 0 {
+                CoreError::NoSource("no resolvable candidate to play".into())
+            } else {
+                CoreError::NoSource("all candidates failed to play".into())
+            }
+        }))
     }
 
     /// Resolve a chosen candidate and play it through once. Returns whether the
@@ -473,15 +593,20 @@ impl Engine {
         })
     }
 
-    /// Find + rank sources for a request and return the top resolvable candidate,
-    /// reusing the same ranking [`Engine::find_sources`] applies. `None` when the
-    /// lookup fails or nothing is resolvable.
-    async fn pick_candidate(&self, req: &PlayRequest) -> Option<SourceCandidate> {
+    /// Find + rank sources for a request and return the resolvable candidates in
+    /// ranked order, reusing the same ranking [`Engine::find_sources`] applies.
+    /// Empty when the lookup fails or nothing is resolvable. The caller plays
+    /// these with failover (first that resolves+plays wins).
+    async fn pick_candidates(&self, req: &PlayRequest) -> Vec<SourceCandidate> {
         self.find_sources(req)
             .await
-            .ok()?
-            .into_iter()
-            .find(|c| c.is_resolvable())
+            .map(|cands| {
+                cands
+                    .into_iter()
+                    .filter(|c| c.is_resolvable())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     /// Fetch external subtitles for the request and materialize each returned
@@ -709,6 +834,7 @@ pub struct EngineBuilder {
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     subtitle_languages: Vec<String>,
+    id_bridge: Option<Arc<dyn IdBridge>>,
     prefs: ScoringPrefs,
     complete_threshold: f32,
     skip_filler: bool,
@@ -762,6 +888,14 @@ impl EngineBuilder {
         self.subtitle_languages = languages;
         self
     }
+    /// AniList/MAL → IMDB bridge (optional). When set, [`Engine::find_sources`]
+    /// fills a missing `ids.imdb` for anime before querying sources, so the
+    /// IMDB-keyed providers (Torrentio → debrid) can serve them. Without it, anime
+    /// keep their anime-native (nyaa) sources.
+    pub fn id_bridge(mut self, bridge: Arc<dyn IdBridge>) -> Self {
+        self.id_bridge = Some(bridge);
+        self
+    }
     pub fn scoring_prefs(mut self, prefs: ScoringPrefs) -> Self {
         self.prefs = prefs;
         self
@@ -803,6 +937,7 @@ impl EngineBuilder {
             presence: self.presence,
             subtitles: self.subtitles,
             subtitle_languages: self.subtitle_languages,
+            id_bridge: self.id_bridge,
             prefs: self.prefs,
             complete_threshold: if self.complete_threshold > 0.0 {
                 self.complete_threshold
@@ -1573,5 +1708,247 @@ mod tests {
             .await
             .unwrap();
         assert!(args.lock().unwrap().is_empty());
+    }
+
+    // ---- across-candidate source failover ------------------------------------
+    //
+    // The resolver rejects a named candidate (simulating a dead torrent / debrid
+    // that won't cache the hash) and resolves anything else. With two ranked
+    // candidates where the first is the rejected one, `play_with_fallback` must
+    // fall through to the second and play it — not abort.
+
+    /// A resolver that errors for one specific candidate title and echoes any
+    /// other into a playable URL. Records every title it was asked to resolve so
+    /// the test can assert the order candidates were tried.
+    struct FailingResolver {
+        fail_title: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl StreamResolver for FailingResolver {
+        async fn resolve(&self, candidate: &SourceCandidate) -> CoreResult<Playback> {
+            self.seen.lock().unwrap().push(candidate.title.clone());
+            if candidate.title == self.fail_title {
+                return Err(CoreError::NoSource(format!(
+                    "cannot resolve {}",
+                    candidate.title
+                )));
+            }
+            Ok(Playback {
+                url: "http://localhost/stream".into(),
+                origin: PlaybackOrigin::LocalP2p,
+                file_name: candidate.title.clone(),
+            })
+        }
+    }
+
+    /// A player that records the playback file name it was handed, then exits at
+    /// once (no monitor). Lets the test assert *which* candidate actually played.
+    struct PlayedCapturePlayer {
+        played: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Player for PlayedCapturePlayer {
+        fn name(&self) -> &str {
+            "played-capture"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            playback: &Playback,
+            _opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            self.played.lock().unwrap().push(playback.file_name.clone());
+            Ok(Box::new(InstantSession))
+        }
+    }
+
+    fn named_candidate(title: &str) -> SourceCandidate {
+        SourceCandidate {
+            provider: title.into(),
+            title: title.into(),
+            quality: Quality::P1080,
+            size_bytes: 1,
+            seeders: Some(1),
+            info_hash: Some("0".repeat(40)),
+            magnet: None,
+            direct_url: None,
+            file_index: None,
+            cache: CacheState::Cached,
+            tags: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn play_falls_through_to_next_candidate_on_resolve_failure() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .resolver(Arc::new(FailingResolver {
+                fail_title: "first".into(),
+                seen: seen.clone(),
+            }))
+            .player(Arc::new(PlayedCapturePlayer {
+                played: played.clone(),
+            }))
+            .build();
+
+        let candidates = vec![named_candidate("first"), named_candidate("second")];
+        engine
+            .play_with_fallback(&movie_request(), &candidates)
+            .await
+            .unwrap();
+
+        // The resolver was asked for "first" (failed) then "second" (succeeded).
+        assert_eq!(*seen.lock().unwrap(), vec!["first", "second"]);
+        // Only the second candidate actually reached the player.
+        assert_eq!(*played.lock().unwrap(), vec!["second".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn play_errors_when_all_candidates_fail_to_resolve() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            // Resolver fails for "first"; the only other candidate is
+            // non-resolvable, so nothing can play.
+            .resolver(Arc::new(FailingResolver {
+                fail_title: "first".into(),
+                seen: seen.clone(),
+            }))
+            .player(Arc::new(PlayedCapturePlayer {
+                played: played.clone(),
+            }))
+            .build();
+
+        let candidates = vec![named_candidate("first")];
+        let err = engine
+            .play_with_fallback(&movie_request(), &candidates)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, CoreError::NoSource(_)));
+        assert!(played.lock().unwrap().is_empty());
+    }
+
+    // ---- IdBridge: anime → IMDB enrichment before source lookup -------------
+    //
+    // Proves the app-layer contract against the *port*: an anime Media with no
+    // imdb id gets `ids.imdb` populated from the bridge before the SourceQuery is
+    // built, so an IMDB-keyed source provider sees the bridged id.
+
+    /// A bridge that returns a fixed IMDB id for any ids carrying an anilist id.
+    struct FakeBridge {
+        imdb: Option<String>,
+    }
+
+    #[async_trait]
+    impl IdBridge for FakeBridge {
+        fn name(&self) -> &str {
+            "fake-bridge"
+        }
+        async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+            // Mirror the real bridge: only answer when there's an anime id to
+            // bridge from.
+            if ids.anilist.is_some() || ids.mal.is_some() {
+                Ok(self.imdb.clone())
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// A source provider that records the imdb id present on each query's media
+    /// (so the test can assert what the bridge contributed) and returns nothing.
+    struct ImdbCaptureSource {
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl SourceProvider for ImdbCaptureSource {
+        fn name(&self) -> &str {
+            "imdb-capture"
+        }
+        async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+            self.seen.lock().unwrap().push(query.media.ids.imdb.clone());
+            Ok(vec![])
+        }
+    }
+
+    fn anime_no_imdb() -> Media {
+        Media {
+            kind: MediaKind::Anime,
+            ids: IdSet::default().with_anilist(199),
+            title: "Spirited Away".into(),
+            original_title: None,
+            year: None,
+            score: None,
+            overview: None,
+            poster: None,
+            genres: vec![],
+            status: None,
+            episode_count: None,
+            season_count: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_fills_imdb_for_anime_before_source_query() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .id_bridge(Arc::new(FakeBridge {
+                imdb: Some("tt0245429".into()),
+            }))
+            .build();
+
+        let req = play_request(anime_no_imdb());
+        engine.find_sources(&req).await.unwrap();
+
+        // The source provider saw the bridged IMDB id, not None.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some("tt0245429".to_string())],
+            "anime with no imdb should be enriched before the source query"
+        );
+        // The caller's request media is untouched (enrichment is on a clone).
+        assert_eq!(req.media.ids.imdb, None);
+    }
+
+    #[tokio::test]
+    async fn bridge_miss_leaves_anime_without_imdb() {
+        // Bridge returns None (the common partial-coverage case) → no enrichment.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .id_bridge(Arc::new(FakeBridge { imdb: None }))
+            .build();
+
+        engine
+            .find_sources(&play_request(anime_no_imdb()))
+            .await
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn bridge_not_invoked_without_bridge_wired() {
+        // No bridge → anime keeps its missing imdb (nyaa-only path), no panic.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .build();
+
+        engine
+            .find_sources(&play_request(anime_no_imdb()))
+            .await
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
     }
 }

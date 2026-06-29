@@ -37,9 +37,16 @@ re!(M_ROMAN_END, r"(?i)\s+(viii|vii|vi|iv|ix|iii|ii|x|v)\s*$");
 // --- Patterns over a *normalized* release decoration (already lowercased; `-`
 // and `~` kept so ranges survive). ---
 re!(R_S_RANGE, r"s0*(\d+)\s*[-~]\s*s0*(\d+)");
-// Plural "seasons" only: a singular "Season 2 - 01" is *S2 episode 1*, not a
-// "seasons 2 to 1" range, so it must fall through to the single-season match.
+// Plural "seasons" always denotes a range ("Seasons 1-5").
 re!(R_SEASON_RANGE, r"seasons\s+0*(\d+)\s*[-~]\s*0*(\d+)");
+// Singular "Season N-M" is a range too ("Season 1-5"), but only when the second
+// number is a *bare* season number (`5`), not a zero-padded episode coordinate.
+// "Season 2 - 01" is *S2 episode 1*: the `01` form excludes it, so it falls
+// through to the single-season match below as Single(2).
+re!(
+    R_SEASON_RANGE_SINGULAR,
+    r"season\s+0*(\d+)\s*[-~]\s*([1-9]\d*)\b"
+);
 re!(R_NTH_SEASON, r"(\d+)(?:st|nd|rd|th)\s+season");
 re!(R_SEASON_N, r"season\s+0*(\d+)");
 re!(R_S_N, r"\bs0*(\d+)\b");
@@ -126,7 +133,7 @@ pub fn release_season(release_title: &str, base: &str) -> SeasonMatch {
     };
 
     // Ranges first (a single-season regex would otherwise match the low end).
-    for re in [&R_S_RANGE, &R_SEASON_RANGE] {
+    for re in [&R_S_RANGE, &R_SEASON_RANGE, &R_SEASON_RANGE_SINGULAR] {
         if let Some(c) = re.captures(decoration) {
             if let (Ok(a), Ok(b)) = (c[1].parse::<u32>(), c[2].parse::<u32>()) {
                 return SeasonMatch::Range(a.min(b), a.max(b));
@@ -326,6 +333,46 @@ mod tests {
         assert_eq!(m, SeasonMatch::Range(1, 5));
         assert!(m.covers(1));
         assert!(m.covers(2));
+        assert!(!m.covers(6));
+    }
+
+    #[test]
+    fn release_singular_season_range_covers_range() {
+        // Singular "Season N-M" (with or without spaces around the dash) is a
+        // multi-season batch, same as "Seasons 1-5" / "S01-S05".
+        for t in [
+            "[Group] Kage no Jitsuryokusha ni Naritakute! Season 1-5 1080p Complete",
+            "[Group] Kage no Jitsuryokusha ni Naritakute! Season 1 - 5 1080p Complete",
+        ] {
+            let m = release_season(t, BASE);
+            assert_eq!(m, SeasonMatch::Range(1, 5), "{t}");
+            assert!(m.covers(1));
+            assert!(m.covers(5));
+            assert!(!m.covers(6));
+        }
+    }
+
+    #[test]
+    fn release_singular_season_then_episode_stays_single() {
+        // "Season 2 - 01": the zero-padded `01` is an episode coordinate, not a
+        // range end, so this must remain Single(2) — not a "2 to 1" range.
+        let m = release_season(
+            "[SubsPlease] Kage no Jitsuryokusha ni Naritakute! Season 2 - 01 (1080p)",
+            BASE,
+        );
+        assert_eq!(m, SeasonMatch::Single(2));
+        assert!(m.covers(2));
+        assert!(!m.covers(1));
+    }
+
+    #[test]
+    fn release_plural_seasons_range_covers_range() {
+        let m = release_season(
+            "[Group] Kage no Jitsuryokusha ni Naritakute! Seasons 1-5 1080p Complete",
+            BASE,
+        );
+        assert_eq!(m, SeasonMatch::Range(1, 5));
+        assert!(m.covers(3));
         assert!(!m.covers(6));
     }
 
