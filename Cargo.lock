@@ -2545,9 +2545,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-compose"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a80e91e19d79d4492ee6c547d2e3b5180b387e77ca7685bc87172b8b67281c70"
+checksum = "223580586401bd7b0f8b89e1e56595ac35b312a3e5cd5a582fc7299bae96ead5"
 dependencies = [
  "open-subtitle-config",
  "open-subtitle-core",
@@ -2562,9 +2562,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-config"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69d7edebdd12b5b8ff105f56742acfdb9908ed532977a30dc9a213013b352146"
+checksum = "a77f57e0c9a8d3e4c4e6e30aa7bc9d0be19e8a825e69921111e17208f54ecce7"
 dependencies = [
  "directories",
  "open-subtitle-core",
@@ -2574,9 +2574,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-core"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aabf5241ba407bcdc29d0a7e3140ce0e6b2340d7b2f6bb2880b7d84635b5c6df"
+checksum = "e8152bc282d06045165cbef779eef8f4c12e2ee960294afd3168ccce1c1a3289"
 dependencies = [
  "async-trait",
  "regex",
@@ -2586,9 +2586,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-engine"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9957a953016da28ee58b6a7712066b203ec262165ce49fd9878baf119d9b9e9"
+checksum = "618d507c2e30d680ba556eca83c6d2f2856fccfb1c775cebc49e37ae3e8e6767"
 dependencies = [
  "futures",
  "open-subtitle-core",
@@ -2597,9 +2597,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-identify"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88be4ed2a8a484d4c72edfbb10aee335541cf4be05347f51384855559444858a"
+checksum = "f12f971ad8d02632e7b5d9b86d0f4a55ca9ee9ffe6841b81d0cc040cfad422e3"
 dependencies = [
  "async-trait",
  "open-subtitle-core",
@@ -2610,9 +2610,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-process"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab89a8ecd522f7586a7b3414bb36cac983073686c1e0f12f0450d79cfa75b84a"
+checksum = "d6d7494c3b426e1a6b3b4506afefd451330ae00a298078a6ee0177d9880e556b"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -2623,9 +2623,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-providers"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b402d962bbd81f255bf51f1616be5a1c77453bcf388efbf36021026a26113828"
+checksum = "d70eeacf43fa3534118426a32570812f218938f129294b2f77cf0b28c26e9e41"
 dependencies = [
  "async-trait",
  "open-subtitle-core",
@@ -2637,9 +2637,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-sync"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa5469b1161d9a5f81d3868430dcc042ea9534f86ccf56fc653ca2faef4df38"
+checksum = "1a67127e7ba05de6be53d9627ff5227418f46aa3fc7686cef961b1a53cc27f36"
 dependencies = [
  "async-trait",
  "open-subtitle-core",
@@ -2648,9 +2648,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-transcribe"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3c698f8dc607afcd749bdfdd4a6acef80ad303742348259c25e8eb621b93e7c"
+checksum = "a50ec6868428c9fc3c6c7857e4cd1f139d111ce991006030e6c7a4f578887a27"
 dependencies = [
  "async-trait",
  "open-subtitle-core",
@@ -2659,9 +2659,9 @@ dependencies = [
 
 [[package]]
 name = "open-subtitle-translate"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e66d5cd15bc8e3fab4622f4b467c790c88e831d30fdb5a29dd488db029c2b816"
+checksum = "97f225857ddc6ccace2d0537cbbb57f9e00dbcab98ef4744ccf1ff64b6b0fb2d"
 dependencies = [
  "async-trait",
  "open-subtitle-core",
