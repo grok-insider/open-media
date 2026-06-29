@@ -24,8 +24,9 @@ use std::time::Duration;
 use open_media_core::error::{CoreError, CoreResult};
 use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
-    Chapter, Enricher, HistoryStore, MetadataProvider, PlayOptions, PlaybackControl, Player,
-    PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
+    Chapter, Enricher, HistoryStore, IdBridge, MetadataProvider, PlayOptions, PlaybackControl,
+    Player, PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider,
+    Tracker,
 };
 use open_media_core::scoring::{self, ScoringPrefs};
 use open_media_core::stream::{Playback, SourceCandidate};
@@ -63,6 +64,10 @@ pub struct Engine {
     /// Preferred subtitle languages (most-wanted first) for the [`SubtitleQuery`].
     /// Empty when no provider is wired or none are configured.
     subtitle_languages: Vec<String>,
+    /// Bridges an anime's AniList/MAL id to an IMDB id so the IMDB-keyed source
+    /// providers (Torrentio → debrid) can serve it. Optional: when unset, anime
+    /// without an IMDB id simply keep their anime-native (nyaa) sources.
+    id_bridge: Option<Arc<dyn IdBridge>>,
     prefs: ScoringPrefs,
     /// Fraction watched at which an episode counts as complete (e.g. 0.85).
     complete_threshold: f32,
@@ -155,8 +160,14 @@ impl Engine {
     /// support the media kind (e.g. nyaa for a live-action movie) are skipped.
     pub async fn find_sources(&self, req: &PlayRequest) -> CoreResult<Vec<SourceCandidate>> {
         let absolute_episode = self.absolute_episode(req).await;
+        // Enrich anime with an IMDB id (best-effort) *before* the query is built,
+        // so the IMDB-keyed providers (Torrentio → debrid) light up for anime
+        // that AniList only knows by anilist/mal id. A no-op for everything that
+        // already has an imdb id or when no bridge is wired.
+        let mut media = req.media.clone();
+        self.enrich_imdb(&mut media).await;
         let query = SourceQuery {
-            media: req.media.clone(),
+            media,
             season: req.season,
             episode: req.episode,
             absolute_episode,
@@ -182,6 +193,41 @@ impl Engine {
 
         scoring::rank(&mut candidates, &self.prefs);
         Ok(candidates)
+    }
+
+    /// Populate `media.ids.imdb` from the [`IdBridge`] when it is missing.
+    ///
+    /// This is the hinge of anime→IMDB source enrichment: the IMDB-keyed source
+    /// providers (Torrentio, and through them the debrid cache) short-circuit
+    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa. Looking
+    /// up an IMDB id for the anime's anilist/mal id here — right before the
+    /// [`SourceQuery`] is built — lets those providers serve anime with **no
+    /// change to the providers themselves** (they already key off `imdb`).
+    ///
+    /// Best-effort and side-effect-free beyond the passed `media`:
+    /// - only runs for [`MediaKind::Anime`] that lack an imdb id and have an
+    ///   anilist/mal id to bridge from, and only when a bridge is wired;
+    /// - a bridge error or a `None` result leaves `media` untouched (the title
+    ///   keeps its nyaa sources). It must never fail the caller.
+    async fn enrich_imdb(&self, media: &mut Media) {
+        if media.kind != MediaKind::Anime || media.ids.imdb.is_some() {
+            return;
+        }
+        let Some(bridge) = &self.id_bridge else {
+            return;
+        };
+        match bridge.imdb_for(&media.ids).await {
+            Ok(Some(imdb)) => {
+                tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
+                media.ids.imdb = Some(imdb);
+            }
+            Ok(None) => {
+                tracing::debug!("no IMDB mapping for anime; keeping anime-native sources");
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "id bridge lookup failed; keeping anime-native sources");
+            }
+        }
     }
 
     /// Compute the episode's *absolute* (franchise-continuous) number, when a
@@ -788,6 +834,7 @@ pub struct EngineBuilder {
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     subtitle_languages: Vec<String>,
+    id_bridge: Option<Arc<dyn IdBridge>>,
     prefs: ScoringPrefs,
     complete_threshold: f32,
     skip_filler: bool,
@@ -841,6 +888,14 @@ impl EngineBuilder {
         self.subtitle_languages = languages;
         self
     }
+    /// AniList/MAL → IMDB bridge (optional). When set, [`Engine::find_sources`]
+    /// fills a missing `ids.imdb` for anime before querying sources, so the
+    /// IMDB-keyed providers (Torrentio → debrid) can serve them. Without it, anime
+    /// keep their anime-native (nyaa) sources.
+    pub fn id_bridge(mut self, bridge: Arc<dyn IdBridge>) -> Self {
+        self.id_bridge = Some(bridge);
+        self
+    }
     pub fn scoring_prefs(mut self, prefs: ScoringPrefs) -> Self {
         self.prefs = prefs;
         self
@@ -882,6 +937,7 @@ impl EngineBuilder {
             presence: self.presence,
             subtitles: self.subtitles,
             subtitle_languages: self.subtitle_languages,
+            id_bridge: self.id_bridge,
             prefs: self.prefs,
             complete_threshold: if self.complete_threshold > 0.0 {
                 self.complete_threshold
@@ -1777,5 +1833,122 @@ mod tests {
 
         assert!(matches!(err, CoreError::NoSource(_)));
         assert!(played.lock().unwrap().is_empty());
+    }
+
+    // ---- IdBridge: anime → IMDB enrichment before source lookup -------------
+    //
+    // Proves the app-layer contract against the *port*: an anime Media with no
+    // imdb id gets `ids.imdb` populated from the bridge before the SourceQuery is
+    // built, so an IMDB-keyed source provider sees the bridged id.
+
+    /// A bridge that returns a fixed IMDB id for any ids carrying an anilist id.
+    struct FakeBridge {
+        imdb: Option<String>,
+    }
+
+    #[async_trait]
+    impl IdBridge for FakeBridge {
+        fn name(&self) -> &str {
+            "fake-bridge"
+        }
+        async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+            // Mirror the real bridge: only answer when there's an anime id to
+            // bridge from.
+            if ids.anilist.is_some() || ids.mal.is_some() {
+                Ok(self.imdb.clone())
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// A source provider that records the imdb id present on each query's media
+    /// (so the test can assert what the bridge contributed) and returns nothing.
+    struct ImdbCaptureSource {
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl SourceProvider for ImdbCaptureSource {
+        fn name(&self) -> &str {
+            "imdb-capture"
+        }
+        async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+            self.seen.lock().unwrap().push(query.media.ids.imdb.clone());
+            Ok(vec![])
+        }
+    }
+
+    fn anime_no_imdb() -> Media {
+        Media {
+            kind: MediaKind::Anime,
+            ids: IdSet::default().with_anilist(199),
+            title: "Spirited Away".into(),
+            original_title: None,
+            year: None,
+            score: None,
+            overview: None,
+            poster: None,
+            genres: vec![],
+            status: None,
+            episode_count: None,
+            season_count: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_fills_imdb_for_anime_before_source_query() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .id_bridge(Arc::new(FakeBridge {
+                imdb: Some("tt0245429".into()),
+            }))
+            .build();
+
+        let req = play_request(anime_no_imdb());
+        engine.find_sources(&req).await.unwrap();
+
+        // The source provider saw the bridged IMDB id, not None.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some("tt0245429".to_string())],
+            "anime with no imdb should be enriched before the source query"
+        );
+        // The caller's request media is untouched (enrichment is on a clone).
+        assert_eq!(req.media.ids.imdb, None);
+    }
+
+    #[tokio::test]
+    async fn bridge_miss_leaves_anime_without_imdb() {
+        // Bridge returns None (the common partial-coverage case) → no enrichment.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .id_bridge(Arc::new(FakeBridge { imdb: None }))
+            .build();
+
+        engine
+            .find_sources(&play_request(anime_no_imdb()))
+            .await
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn bridge_not_invoked_without_bridge_wired() {
+        // No bridge → anime keeps its missing imdb (nyaa-only path), no panic.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
+            .build();
+
+        engine
+            .find_sources(&play_request(anime_no_imdb()))
+            .await
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
     }
 }

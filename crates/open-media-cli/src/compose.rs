@@ -15,7 +15,7 @@ use open_media_core::stream::Quality;
 
 use open_media_debrid::RealDebrid;
 use open_media_history::SqliteHistory;
-use open_media_metadata::{AniListProvider, CinemetaProvider, TmdbProvider};
+use open_media_metadata::{AniListProvider, CinemetaProvider, FribbIdBridge, TmdbProvider};
 use open_media_player::{MpvPlayer, VlcPlayer};
 use open_media_sources::{NyaaSource, TorrentioSource};
 use open_media_stream::{HybridResolver, P2pEngine};
@@ -53,6 +53,13 @@ pub fn build_engine(cfg: &Config) -> Engine {
             cfg.providers.nyaa_category.clone(),
         )));
     }
+
+    // --- AniList/MAL → IMDB bridge (keyless; fetch-and-cache) ---
+    // Always wired: anime are discovered by AniList (no IMDB id), which makes the
+    // IMDB-keyed providers (Torrentio → debrid) short-circuit for them. The
+    // bridge fills `ids.imdb` for anime that have an IMDB mapping so those
+    // providers can serve them; titles without a mapping keep their nyaa sources.
+    builder = builder.id_bridge(Arc::new(FribbIdBridge::new()));
 
     // --- Debrid + resolver (debrid optional → P2P fallback) ---
     let debrid: Option<Arc<dyn open_media_core::ports::DebridProvider>> = if cfg.has_real_debrid() {

@@ -20,7 +20,7 @@
 //! - [`ports`] — the trait boundaries: [`MetadataProvider`], [`SourceProvider`],
 //!   [`DebridProvider`], [`StreamResolver`], [`Player`]/[`PlaybackControl`],
 //!   [`Tracker`], [`Enricher`], [`HistoryStore`], [`PresenceReporter`],
-//!   [`SubtitleProvider`], [`UsageReporter`].
+//!   [`SubtitleProvider`], [`IdBridge`], [`UsageReporter`].
 //! - [`scoring`] — pure, tested candidate ranking.
 //!
 //! See `docs/ARCHITECTURE.md` for how these compose into the playback pipeline.
@@ -54,6 +54,7 @@
 //! [`HistoryStore`]: ports::HistoryStore
 //! [`PresenceReporter`]: ports::PresenceReporter
 //! [`SubtitleProvider`]: ports::SubtitleProvider
+//! [`IdBridge`]: ports::IdBridge
 //! [`UsageReporter`]: ports::UsageReporter
 
 pub mod error;
