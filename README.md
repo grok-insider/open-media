@@ -46,19 +46,19 @@ maintainable Rust application:
 
 ```
               ┌─────────────┐   search    ┌──────────────────────┐
-   you  ─────▶│  om (TUI)   │────────────▶│  MetadataProvider     │  TMDB / Cinemeta
+   you  ─────▶│ open-media  │────────────▶│  MetadataProvider     │  TMDB / Cinemeta
               └─────────────┘             └──────────┬───────────┘  / AniList
                      │  pick title                   │ Media + ids (imdb/mal/…)
                      ▼                                ▼
               ┌─────────────┐   find      ┌──────────────────────┐
               │   Engine    │────────────▶│  SourceProvider(s)    │  Torrentio + nyaa
-              │  (om-app)   │             └──────────┬───────────┘
+              │  (open-media-app)   │             └──────────┬───────────┘
               └─────────────┘   rank ◀───────────────┘ candidates (+cache flags)
                      │  best candidate
                      ▼
               ┌─────────────┐  resolve    ┌──────────────────────┐
               │StreamResolver│───────────▶│ DebridProvider (cached)│ ─▶ direct HTTPS URL
-              │  (om-stream)│             │   or P2pEngine (librqbit)│ ─▶ http://127.0.0.1
+              │  (open-media-stream)│             │   or P2pEngine (librqbit)│ ─▶ http://127.0.0.1
               └──────┬──────┘             └──────────────────────┘
                      │  Playback url
                      ▼
@@ -82,15 +82,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
   vlc (launch-only).
 - **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord presence.
-- **TUI**: `om` with no args → Search → Results → Seasons → Episodes → Sources →
+- **TUI**: `open-media` with no args → Search → Results → Seasons → Episodes → Sources →
   play, with a focusable filter/sort panel that persists to your config.
 
 ## Install
 
 **Prebuilt binaries (no compiling)** — each [GitHub Release](https://github.com/grok-insider/open-media/releases)
-attaches a static `om` for Linux (x86_64/aarch64, musl), macOS (x86_64/arm64), and
-Windows (x86_64) as `om-<version>-<target>.tar.gz` (+ `.sha256`). Download, verify,
-extract, and put `om` on your `PATH`.
+attaches a static `open-media` for Linux (x86_64/aarch64, musl), macOS (x86_64/arm64), and
+Windows (x86_64) as `open-media-<version>-<target>.tar.gz` (+ `.sha256`). Download, verify,
+extract, and put `open-media` on your `PATH`.
 
 **Nix / NixOS** (x86_64-linux; prebuilt on the `grok-insider` cachix cache):
 
@@ -98,7 +98,7 @@ extract, and put `om` on your `PATH`.
 # flake.nix inputs
 inputs.open-media.url = "github:grok-insider/open-media";
 
-# Home Manager — installs `om` (configure at runtime with `om init`; secrets
+# Home Manager — installs `open-media` (configure at runtime with `open-media init`; secrets
 # never enter the Nix store)
 imports = [ inputs.open-media.homeManagerModules.default ];
 programs.open-media.enable = true;
@@ -111,7 +111,7 @@ Or ad hoc: `nix run github:grok-insider/open-media -- search "frieren"`.
 ```sh
 git clone https://github.com/grok-insider/open-media
 cd open-media
-cargo build --release        # binary at target/release/om
+cargo build --release        # binary at target/release/open-media
 ```
 
 > Building from source needs a C toolchain plus **cmake** and **clang/libclang**
@@ -129,19 +129,19 @@ cargo build --release        # binary at target/release/om
 ## Usage
 
 ```sh
-om init                                  # create ~/.config/open-media/config.toml
-om config set real_debrid_token=...      # optional, recommended (instant cached playback)
-om config set tmdb_api_key=...           # optional (Cinemeta already works keyless)
-om                                       # interactive TUI
-om search "interstellar"                 # list matches
-om search "frieren" --kind anime
-om play "interstellar"                   # one-shot: search → best source → play
-om play "frieren" --season 1 --episode 1
-om config show                           # print resolved config (secrets masked)
-om config path                           # print the config file path
+open-media init                                  # create ~/.config/open-media/config.toml
+open-media config set real_debrid_token=...      # optional, recommended (instant cached playback)
+open-media config set tmdb_api_key=...           # optional (Cinemeta already works keyless)
+open-media                                # interactive TUI
+open-media search "interstellar"                 # list matches
+open-media search "frieren" --kind anime
+open-media play "interstellar"                   # one-shot: search → best source → play
+open-media play "frieren" --season 1 --episode 1
+open-media config show                           # print resolved config (secrets masked)
+open-media config path                           # print the config file path
 ```
 
-`om config set` edits these keys: `tmdb_api_key`, `real_debrid_token`,
+`open-media config set` edits these keys: `tmdb_api_key`, `real_debrid_token`,
 `anilist_token`, `mal_token`, `debrid_provider`, `player_command`, `telemetry`.
 Everything else is set by editing `config.toml` directly.
 
@@ -149,7 +149,7 @@ Everything else is set by editing `config.toml` directly.
 
 A single TOML file at `~/.config/open-media/config.toml` (respects
 `XDG_CONFIG_HOME`). **Secrets live only here** — never in the binary, the repo, or
-the Nix store. `om init` creates it.
+the Nix store. `open-media init` creates it.
 
 | Section / key | Default | Purpose |
 |---------------|---------|---------|
@@ -197,7 +197,7 @@ collector.
 **Opt out at any time:**
 
 ```sh
-om config set telemetry=false
+open-media config set telemetry=false
 ```
 
 Download counts are derived separately from GitHub Releases' own statistics — the
@@ -210,17 +210,17 @@ A Cargo workspace of 11 crates, one per concern (full table in
 
 ```
 crates/
-  om-core      domain model + ports (traits) + scoring   — no I/O
-  om-config    config schema + load/save + secrets policy
-  om-metadata  TMDB + Cinemeta (keyless) + AniList        (MetadataProvider)
-  om-sources   Torrentio, nyaa.si                         (SourceProvider)
-  om-debrid    Real-Debrid (+ future AllDebrid/Torbox)    (DebridProvider)
-  om-stream    librqbit P2P engine + hybrid resolver      (StreamResolver)
-  om-player    mpv (IPC) + vlc                            (Player)
-  om-track     AniList/MAL trackers + AniSkip + Discord   (Tracker/Enricher/…)
-  om-history   SQLite watch history + resume              (HistoryStore)
-  om-app       use-cases + Engine (composition)           — depends only on om-core
-  om-cli       the `om` binary (composition root + TUI)
+  open-media-core      domain model + ports (traits) + scoring   — no I/O
+  open-media-config    config schema + load/save + secrets policy
+  open-media-metadata  TMDB + Cinemeta (keyless) + AniList        (MetadataProvider)
+  open-media-sources   Torrentio, nyaa.si                         (SourceProvider)
+  open-media-debrid    Real-Debrid (+ future AllDebrid/Torbox)    (DebridProvider)
+  open-media-stream    librqbit P2P engine + hybrid resolver      (StreamResolver)
+  open-media-player    mpv (IPC) + vlc                            (Player)
+  open-media-track     AniList/MAL trackers + AniSkip + Discord   (Tracker/Enricher/…)
+  open-media-history   SQLite watch history + resume              (HistoryStore)
+  open-media-app       use-cases + Engine (composition)           — depends only on open-media-core
+  open-media-cli       the `open-media` binary (composition root + TUI)
 ```
 
 ## Development
@@ -233,7 +233,7 @@ cargo fmt --all
 
 Every network adapter has unit tests plus end-to-end integration tests against
 in-process mock servers (`wiremock`); a composition-root e2e
-(`crates/om-cli/tests/pipeline_e2e.rs`) drives search → details → sources →
+(`crates/open-media-cli/tests/pipeline_e2e.rs`) drives search → details → sources →
 resolve through the real `Engine`. Live integration tests (gated `#[ignore]` +
 env) cover real Real-Debrid, real mpv, and live P2P.
 

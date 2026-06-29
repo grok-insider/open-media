@@ -24,25 +24,25 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      # The `om` binary (crate om-cli). One output; `default` aliases it.
+      # The `open-media` binary (crate open-media-cli). One output; `default` aliases it.
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
           lib = nixpkgs.lib;
           version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
-          om = pkgs.rustPlatform.buildRustPackage {
-            pname = "om";
+          open-media = pkgs.rustPlatform.buildRustPackage {
+            pname = "open-media";
             inherit version;
             src = ./.;
 
-            # om-subs now consumes the open-subtitle engine from crates.io (the
+            # open-media-subs now consumes the open-subtitle engine from crates.io (the
             # open-subtitle-* crates), so there is no vendored git source and no
             # outputHashes entry is needed — the lockfile fully pins everything.
             cargoLock.lockFile = ./Cargo.lock;
 
             # Build only the binary crate (and its deps), not the whole workspace.
-            cargoBuildFlags = [ "-p" "om-cli" ];
+            cargoBuildFlags = [ "-p" "open-media-cli" ];
 
             # Native build glue:
             #   - cmake + bindgenHook: aws-lc-sys (rustls' default crypto backend)
@@ -64,22 +64,22 @@
               description = "Terminal media app: TMDB/AniList → Torrentio/nyaa → Real-Debrid/P2P → mpv";
               homepage = "https://github.com/grok-insider/open-media";
               license = lib.licenses.mit;
-              mainProgram = "om";
+              mainProgram = "open-media";
               platforms = systems;
             };
           };
         in
         {
-          inherit om;
-          default = om;
+          inherit open-media;
+          default = open-media;
         });
 
-      # Home Manager module: installs the `om` binary (prebuilt from the cache).
+      # Home Manager module: installs the `open-media` binary (prebuilt from the cache).
       #
       # NOTE: open-media's config (`~/.config/open-media/config.toml`) holds API
       # tokens (TMDB/Real-Debrid/AniList), so it is intentionally NOT managed
       # here — secrets must never enter the Nix store. Configure it at runtime
-      # with `om init` / `om config set key=value`.
+      # with `open-media init` / `open-media config set key=value`.
       #
       # Runtime dependency: an external player on PATH (mpv recommended; vlc
       # supported). It is not bundled — the host's own mpv is used.
@@ -95,7 +95,7 @@
               type = lib.types.package;
               default = pkgsFor.default;
               defaultText = lib.literalExpression "open-media.packages.\${system}.default";
-              description = "The open-media package providing the `om` binary.";
+              description = "The open-media package providing the `open-media` binary.";
             };
           };
           config = lib.mkIf cfg.enable {
