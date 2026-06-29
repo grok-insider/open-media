@@ -43,6 +43,52 @@ re!(
     r"(🇬🇧|🇺🇸|🇩🇪|🇫🇷|🇮🇹|🇪🇸|🇯🇵|🇰🇷|🇨🇳|🇧🇷|🇵🇹|🇷🇺|🇳🇱|🇵🇱|🇸🇪|🇳🇴|🇩🇰|🇫🇮|🇬🇷|🇹🇷|🇮🇳|🇹🇭|🇻🇳|🇮🇩|🇲🇽|🇦🇷)"
 );
 
+/// Known Torrentio sub-trackers, as `(needle_lowercase, canonical_name)` pairs.
+/// Keyless Torrentio streams name the originating tracker only in the release
+/// title (not in a `[...]` debrid tag), so we scan for these to give the TUI
+/// "Provider" filter something more useful than the literal "torrentio".
+/// Order matters: longer / more specific aliases come first so e.g. "tpb"
+/// doesn't shadow "thepiratebay" and "kat" is tried alongside the full name.
+const KNOWN_TRACKERS: &[(&str, &str)] = &[
+    ("1337x", "1337x"),
+    ("rarbg", "RARBG"),
+    ("yify", "YTS"),
+    ("yts", "YTS"),
+    ("thepiratebay", "ThePirateBay"),
+    ("tpb", "ThePirateBay"),
+    ("eztv", "EZTV"),
+    ("kickasstorrents", "KickassTorrents"),
+    ("kat", "KickassTorrents"),
+    ("magnetdl", "MagnetDL"),
+    ("horriblesubs", "HorribleSubs"),
+    ("nyaasi", "NyaaSi"),
+    ("nyaa", "NyaaSi"),
+    ("torrentgalaxy", "TorrentGalaxy"),
+];
+
+/// Scan free text (a release title, or non-bracket parts of `name`) for a known
+/// Torrentio tracker token, returning its canonical name. Case-insensitive,
+/// whole-word so an alias like "kat" doesn't match inside another word.
+fn detect_tracker(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    let bytes = lower.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric();
+    for (needle, canonical) in KNOWN_TRACKERS {
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(needle) {
+            let at = start + pos;
+            let before_ok = at == 0 || !is_word(bytes[at - 1]);
+            let after = at + needle.len();
+            let after_ok = after >= bytes.len() || !is_word(bytes[after]);
+            if before_ok && after_ok {
+                return Some(canonical);
+            }
+            start = at + 1;
+        }
+    }
+    None
+}
+
 fn flag_to_language(flag: &str) -> &'static str {
     match flag {
         "🇬🇧" | "🇺🇸" => "English",
@@ -147,12 +193,23 @@ pub fn parse_torrentio(name: &str, title: &str) -> ParsedRelease {
         languages,
     };
 
+    // Keyless streams have no `[...]` debrid tag, so `provider` is empty here.
+    // Before defaulting to the literal "torrentio", try to recover the real
+    // sub-tracker (1337x/RARBG/YTS/…) from the release title — and from any
+    // non-bracket text in `name` — so the TUI Provider filter stays useful
+    // without a debrid token. The bracket path above still wins when present.
+    let provider = if provider.is_empty() {
+        let name_no_brackets = name.replace(['[', ']'], " ");
+        detect_tracker(title)
+            .or_else(|| detect_tracker(&name_no_brackets))
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "torrentio".to_string())
+    } else {
+        provider
+    };
+
     ParsedRelease {
-        provider: if provider.is_empty() {
-            "torrentio".to_string()
-        } else {
-            provider
-        },
+        provider,
         quality,
         size_bytes,
         seeders,
@@ -365,6 +422,44 @@ mod tests {
         // No `[...]` tag → no provider segment → falls back to "torrentio",
         // never echoes the release name back as the provider.
         let p = parse_torrentio("Frieren S01E01 1080p WEB x264", "👤 10 💾 1.2 GB");
+        assert_eq!(p.provider, "torrentio");
+    }
+
+    #[test]
+    fn keyless_provider_recovered_from_tracker_in_title() {
+        // No debrid `[...]` tag, but the title names the real tracker → use it
+        // as the provider instead of the literal "torrentio".
+        let p = parse_torrentio(
+            "Frieren S01E01 1080p WEB x264",
+            "Frieren.S01E01.1080p.WEB.x264-RARBG\n👤 10 💾 1.2 GB",
+        );
+        assert_eq!(p.provider, "RARBG");
+
+        // YIFY/YTS alias canonicalizes to "YTS".
+        let p = parse_torrentio(
+            "Movie 2024 1080p",
+            "Movie.2024.1080p.BluRay.x264-YIFY\n👤 80 💾 2.0 GB",
+        );
+        assert_eq!(p.provider, "YTS");
+    }
+
+    #[test]
+    fn debrid_bracket_provider_still_wins_over_title_tracker() {
+        // The `[RD+] 1337x` bracket path must keep winning even if the title
+        // mentions a different tracker.
+        let p = parse_torrentio(
+            "[RD+] 1337x",
+            "Show.S01E01.1080p.WEB.x264-RARBG\n👤 5 💾 1 GB",
+        );
+        assert_eq!(p.provider, "1337x");
+    }
+
+    #[test]
+    fn keyless_without_known_tracker_falls_back_to_torrentio() {
+        let p = parse_torrentio(
+            "Frieren S01E01 1080p WEB x264",
+            "Frieren.S01E01.1080p.WEB.x264-NONAME\n👤 10 💾 1.2 GB",
+        );
         assert_eq!(p.provider, "torrentio");
     }
 
