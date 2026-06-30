@@ -1,11 +1,11 @@
-//! # om-config
+//! # open-media-config
 //!
 //! The on-disk configuration schema and its load/save logic.
 //!
 //! ## Secrets policy
 //! API tokens (debrid, TMDB, tracker OAuth) live in this file under the user's
 //! XDG config dir (`~/.config/open-media/config.toml`), **never** in the source
-//! tree, environment-baked binaries, or the Nix store. `om-config` owns the file
+//! tree, environment-baked binaries, or the Nix store. `open-media-config` owns the file
 //! so the rest of the app never reads tokens from anywhere else. Environment
 //! variables (`OPEN_MEDIA_*`) may override at runtime for ephemeral/CI use.
 //!
@@ -238,7 +238,7 @@ impl Default for Ui {
 }
 
 /// Persisted Sources-screen filter/sort selections. Stored as strings/bools so
-/// `om-config` stays free of the TUI's enums; the TUI maps them on load/save.
+/// `open-media-config` stays free of the TUI's enums; the TUI maps them on load/save.
 /// `"all"` means no filter. All five are remembered across sessions and applied
 /// literally; if a remembered filter hides everything on a later search, the
 /// panel shows `0 of N` and `Clear` resets it.
@@ -277,7 +277,7 @@ impl Default for SourcesUi {
 /// estimate how many active installs exist (DAU/MAU). The only data ever sent is
 /// the app version, host OS/arch, and the random [`install_id`](Telemetry::install_id);
 /// **never** anything about what is watched (no titles, queries, tokens, or
-/// history). Disable any time with `om config set telemetry=false`.
+/// history). Disable any time with `open-media config set telemetry=false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Telemetry {
     /// Send the anonymous usage ping once per launch. Default `true` (opt-out).

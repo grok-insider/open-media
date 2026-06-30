@@ -34,7 +34,7 @@ pub fn maybe_notify(cfg: &mut Config) {
     println!("version, and a random id) once per launch so we can count active");
     println!("installs. It never includes anything about what you watch.");
     println!("It is ON by default — disable any time with:");
-    println!("    om config set telemetry=false");
+    println!("    open-media config set telemetry=false");
     println!();
     cfg.telemetry.notified = true;
     // Best-effort persist; if it fails the notice simply shows again next run.

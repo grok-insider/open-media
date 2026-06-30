@@ -1,4 +1,4 @@
-//! # om-telemetry
+//! # open-media-telemetry
 //!
 //! The anonymous usage-analytics adapter: a [`UsageReporter`] that POSTs a
 //! [`UsageInfo`] snapshot to a collector so the project can estimate how many

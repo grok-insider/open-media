@@ -1,4 +1,4 @@
-//! `om login <provider>` — loopback OAuth to obtain and persist a tracker token.
+//! `open-media login <provider>` — loopback OAuth to obtain and persist a tracker token.
 //!
 //! AniList uses the OAuth 2.0 **implicit grant**: there is no client secret and
 //! no token-exchange step. The authorization server redirects back with the
@@ -35,7 +35,7 @@ const LOOPBACK_PORT: u16 = 42069;
 /// [`LOOPBACK_PORT`] and the AniList app settings byte-for-byte.
 const REDIRECT_URI: &str = "http://localhost:42069/callback";
 
-/// Dispatch `om login <provider>`. Validates the provider so the surface is
+/// Dispatch `open-media login <provider>`. Validates the provider so the surface is
 /// future-proof: unknown providers (including `mal`) get an actionable message
 /// rather than a panic.
 pub async fn cmd_login(provider: &str) -> Result<()> {

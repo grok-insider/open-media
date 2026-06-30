@@ -1,4 +1,4 @@
-//! # om-debrid
+//! # open-media-debrid
 //!
 //! [`DebridProvider`] adapters. A debrid service turns a magnet into an instant
 //! HTTPS link served from its own CDN — no P2P on the user's machine, no seeding,

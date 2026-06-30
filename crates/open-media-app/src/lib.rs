@@ -1,9 +1,9 @@
-//! # om-app
+//! # open-media-app
 //!
 //! The **application layer**: use-cases that orchestrate the ports defined in
-//! `om-core`. It depends *only* on `om-core` — it cannot name `TmdbProvider`,
+//! `open-media-core`. It depends *only* on `open-media-core` — it cannot name `TmdbProvider`,
 //! `RealDebrid`, `MpvPlayer`, etc. Concrete adapters are injected at the
-//! composition root (`om-cli`) as `Arc<dyn Port>`. That is the whole point of the
+//! composition root (`open-media-cli`) as `Arc<dyn Port>`. That is the whole point of the
 //! Dependency-Inversion boundary: business logic here is testable with fakes and
 //! never changes when an adapter is swapped (OCP).
 //!

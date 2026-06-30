@@ -7,7 +7,7 @@
 //! framing in [`crate::discord`] stays platform-agnostic: both backends
 //! implement `AsyncRead + AsyncWrite + Unpin`.
 //!
-//! (Deliberately a per-crate twin of `om-player`'s `ipc` module. Adapter crates
+//! (Deliberately a per-crate twin of `open-media-player`'s `ipc` module. Adapter crates
 //! don't depend on each other, and the seam is too small to justify a shared
 //! crate.)
 

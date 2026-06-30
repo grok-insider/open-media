@@ -1,4 +1,4 @@
-//! # om-player
+//! # open-media-player
 //!
 //! [`Player`] adapters and the mpv IPC control plane.
 //!

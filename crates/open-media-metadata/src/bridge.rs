@@ -300,7 +300,7 @@ impl IdBridge for FribbIdBridge {
 }
 
 /// `<cache>/open-media/anime-id-map.json`, honouring `XDG_CACHE_HOME` then
-/// `~/.cache` (mirrors the hand-rolled XDG resolution in om-history).
+/// `~/.cache` (mirrors the hand-rolled XDG resolution in open-media-history).
 fn default_cache_path() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

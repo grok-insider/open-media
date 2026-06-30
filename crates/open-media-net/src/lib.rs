@@ -1,7 +1,7 @@
 //! # om-net
 //!
 //! Shared HTTP plumbing for the network adapters. Two concerns live here so that
-//! `om-core` can stay strictly I/O-free (it must not name `reqwest`):
+//! `open-media-core` can stay strictly I/O-free (it must not name `reqwest`):
 //!
 //! - [`client`] / [`client_with`] — a [`reqwest::Client`] factory with sane
 //!   connect + overall timeouts and a stable user-agent. Every adapter builds its
@@ -13,7 +13,7 @@
 //!   / timeout), so a 404 or auth failure fails fast.
 //!
 //! This is a leaf I/O helper crate: adapters depend on it, it depends only on
-//! `reqwest` + `om-core` (for the error type the retry predicate keys off of).
+//! `reqwest` + `open-media-core` (for the error type the retry predicate keys off of).
 
 use std::time::Duration;
 

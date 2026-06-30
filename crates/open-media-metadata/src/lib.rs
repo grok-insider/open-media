@@ -1,4 +1,4 @@
-//! # om-metadata
+//! # open-media-metadata
 //!
 //! [`MetadataProvider`] adapters.
 //!
