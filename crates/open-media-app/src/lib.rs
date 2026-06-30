@@ -24,14 +24,14 @@ use std::time::Duration;
 use open_media_core::error::{CoreError, CoreResult};
 use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
-    Chapter, Enricher, HistoryStore, IdBridge, MetadataProvider, PlayOptions, PlaySession,
-    PlaybackControl, Player, PlaylistControl, PlaylistItem, PresenceReporter, SourceProvider,
-    SourceQuery, StreamResolver, SubtitleProvider, Tracker,
+    Chapter, Enricher, HistoryStore, IdBridge, LibraryStore, MetadataProvider, PlayOptions,
+    PlaySession, PlaybackControl, Player, PlaylistControl, PlaylistItem, PresenceReporter,
+    SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
 };
 use open_media_core::scoring::{self, ScoringPrefs};
 use open_media_core::stream::{Playback, SourceCandidate};
 use open_media_core::subtitle::{SubtitleQuery, SubtitleTrack};
-use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
+use open_media_core::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
 
 /// A request to play something, resolved into coordinates the engine understands.
 #[derive(Debug, Clone)]
@@ -62,6 +62,7 @@ pub struct Engine {
     tracker: Option<Arc<dyn Tracker>>,
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
+    library: Option<Arc<dyn LibraryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     /// Preferred subtitle languages (most-wanted first) for the [`SubtitleQuery`].
@@ -156,6 +157,32 @@ impl Engine {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// List locally persisted library items, optionally filtered by status.
+    pub fn list_library(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>> {
+        let store = self
+            .library
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no library store configured".into()))?;
+        store.list(status)
+    }
+
+    /// Add or update a local library entry and best-effort sync the status to any
+    /// configured remote tracker.
+    pub async fn set_library_status(
+        &self,
+        media: &Media,
+        status: ListStatus,
+    ) -> CoreResult<LibraryItem> {
+        let item = self.library_item(media, status, None, None, 0, 0);
+        self.save_library_item(&item)?;
+        if let Some(tracker) = &self.tracker {
+            if let Err(e) = tracker.set_status(&media.ids, status).await {
+                tracing::warn!(error = %e, "tracker status sync failed");
+            }
+        }
+        Ok(item)
     }
 
     /// Find playable candidates across every applicable source provider
@@ -480,6 +507,7 @@ impl Engine {
                 return Err(e);
             }
         };
+        self.mark_library_started(req, season, episode);
 
         let last_pos = Arc::new(AtomicU32::new(resume.unwrap_or(0)));
         let last_dur = Arc::new(AtomicU32::new(0));
@@ -563,6 +591,7 @@ impl Engine {
                 }
             }
         }
+        self.mark_library_after_progress(req, pos, dur, completed);
         if let Some(presence) = &self.presence {
             let _ = presence.clear().await;
         }
@@ -796,7 +825,97 @@ impl Engine {
                 }
             }
         }
+        self.mark_library_after_progress(req, pos, dur, completed);
         completed
+    }
+
+    fn mark_library_started(&self, req: &PlayRequest, season: u32, episode: u32) {
+        let item = self.library_item(
+            &req.media,
+            ListStatus::Watching,
+            req.media.kind.is_episodic().then_some(season),
+            req.media.kind.is_episodic().then_some(episode),
+            0,
+            0,
+        );
+        if let Err(e) = self.save_library_item(&item) {
+            tracing::debug!(error = %e, "local library start update failed");
+        }
+    }
+
+    fn mark_library_after_progress(&self, req: &PlayRequest, pos: u32, dur: u32, completed: bool) {
+        let status = if completed && self.media_completed_by_coordinate(req) {
+            ListStatus::Completed
+        } else {
+            ListStatus::Watching
+        };
+        let item = self.library_item(
+            &req.media,
+            status,
+            req.media
+                .kind
+                .is_episodic()
+                .then_some(req.season.unwrap_or(1)),
+            req.media
+                .kind
+                .is_episodic()
+                .then_some(req.episode.unwrap_or(1)),
+            pos,
+            dur,
+        );
+        if let Err(e) = self.save_library_item(&item) {
+            tracing::debug!(error = %e, "local library progress update failed");
+        }
+    }
+
+    fn media_completed_by_coordinate(&self, req: &PlayRequest) -> bool {
+        if !req.media.kind.is_episodic() {
+            return true;
+        }
+        let Some(last_episode) = req.media.episode_count else {
+            return false;
+        };
+        let season_done = req
+            .media
+            .season_count
+            .is_none_or(|count| req.season.unwrap_or(1) >= count);
+        season_done && req.episode.unwrap_or(1) >= last_episode
+    }
+
+    fn library_item(
+        &self,
+        media: &Media,
+        status: ListStatus,
+        last_season: Option<u32>,
+        last_episode: Option<u32>,
+        position_secs: u32,
+        duration_secs: u32,
+    ) -> LibraryItem {
+        LibraryItem {
+            media_key: media
+                .ids
+                .primary_key()
+                .unwrap_or_else(|| media.display_title().to_string()),
+            ids: media.ids.clone(),
+            title: media.display_title().to_string(),
+            kind: media.kind,
+            poster: media.poster.clone(),
+            year: media.year,
+            status,
+            last_season,
+            last_episode,
+            position_secs,
+            duration_secs,
+            updated_at: unix_now(),
+        }
+    }
+
+    fn save_library_item(&self, item: &LibraryItem) -> CoreResult<()> {
+        let store = self
+            .library
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no library store configured".into()))?;
+        store.upsert(item)
     }
 
     /// Find + rank sources for a request and return the resolvable candidates in
@@ -1070,6 +1189,15 @@ async fn monitor_playlist_playback(
                 chapters_from_skip(&guard.entries[guard.active].skip)
             };
             let _ = ctrl.set_chapters(&chapters).await;
+            let active_req = {
+                let guard = state.lock().unwrap();
+                guard.entries[guard.active].req.clone()
+            };
+            engine.mark_library_started(
+                &active_req,
+                active_req.season.unwrap_or(1),
+                active_req.episode.unwrap_or(1),
+            );
             engine
                 .append_next_playlist_item(&playlist, &state, &filler)
                 .await;
@@ -1204,6 +1332,7 @@ pub struct EngineBuilder {
     tracker: Option<Arc<dyn Tracker>>,
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
+    library: Option<Arc<dyn LibraryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     subtitle_languages: Vec<String>,
@@ -1242,6 +1371,10 @@ impl EngineBuilder {
     }
     pub fn history(mut self, h: Arc<dyn HistoryStore>) -> Self {
         self.history = Some(h);
+        self
+    }
+    pub fn library(mut self, l: Arc<dyn LibraryStore>) -> Self {
+        self.library = Some(l);
         self
     }
     pub fn presence(mut self, p: Arc<dyn PresenceReporter>) -> Self {
@@ -1307,6 +1440,7 @@ impl EngineBuilder {
             tracker: self.tracker,
             enricher: self.enricher,
             history: self.history,
+            library: self.library,
             presence: self.presence,
             subtitles: self.subtitles,
             subtitle_languages: self.subtitle_languages,
@@ -1970,6 +2104,52 @@ mod tests {
         saved: Arc<Mutex<Vec<u32>>>,
     }
 
+    #[derive(Default)]
+    struct MemoryLibrary {
+        items: Arc<Mutex<Vec<LibraryItem>>>,
+    }
+
+    impl LibraryStore for MemoryLibrary {
+        fn upsert(&self, item: &LibraryItem) -> CoreResult<()> {
+            let mut items = self.items.lock().unwrap();
+            if let Some(existing) = items.iter_mut().find(|i| i.media_key == item.media_key) {
+                *existing = item.clone();
+            } else {
+                items.push(item.clone());
+            }
+            Ok(())
+        }
+
+        fn list(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>> {
+            Ok(self
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|item| status.is_none_or(|s| item.status == s))
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct FailingStatusTracker;
+
+    #[async_trait]
+    impl Tracker for FailingStatusTracker {
+        fn name(&self) -> &str {
+            "failing-status"
+        }
+        async fn update_progress(&self, _ids: &IdSet, _episode: u32) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn set_status(&self, _ids: &IdSet, _status: ListStatus) -> CoreResult<()> {
+            Err(CoreError::Network("tracker down".into()))
+        }
+        async fn rate(&self, _ids: &IdSet, _score: f32) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
     impl HistoryStore for SavedHistory {
         fn save(&self, progress: &WatchProgress) -> CoreResult<()> {
             self.saved.lock().unwrap().push(progress.position_secs);
@@ -2043,6 +2223,73 @@ mod tests {
             episode_runtime_minutes: None,
             include_uncached: false,
         }
+    }
+
+    #[tokio::test]
+    async fn manual_library_status_persists_when_tracker_sync_fails() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .library(library.clone())
+            .tracker(Arc::new(FailingStatusTracker))
+            .build();
+
+        let item = engine
+            .set_library_status(&movie_request().media, ListStatus::Planning)
+            .await
+            .unwrap();
+
+        assert_eq!(item.status, ListStatus::Planning);
+        let items = library.list(Some(ListStatus::Planning)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Interstellar");
+    }
+
+    #[tokio::test]
+    async fn playback_updates_movie_library_to_completed() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: Arc::new(Mutex::new(Vec::new())),
+                fraction: 0.95,
+            }))
+            .library(library.clone())
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        let items = library.list(None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, ListStatus::Completed);
+        assert_eq!(items[0].position_secs, 95);
+        assert_eq!(items[0].duration_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn playback_updates_episodic_library_progress_as_watching() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: Arc::new(Mutex::new(Vec::new())),
+                fraction: 0.95,
+            }))
+            .library(library.clone())
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        let items = library.list(None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, ListStatus::Watching);
+        assert_eq!(items[0].last_season, Some(1));
+        assert_eq!(items[0].last_episode, Some(1));
     }
 
     #[tokio::test]
