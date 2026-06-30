@@ -70,7 +70,10 @@ enum ConfigAction {
     Set {
         /// `key=value`. Run `open-media config show` for current values; list/nested
         /// keys such as torrentio_providers, player.args, [subtitles], and [ui.sources]
-        /// are edited directly in config.toml for now.
+        /// are edited directly in config.toml for now. mpv thumbnail previews can
+        /// be toggled with player.thumbnail_previews=true; they require
+        /// user-installed mpv scripts such as thumbfast plus uosc or another
+        /// compatible OSC.
         kv: String,
     },
 }
@@ -199,6 +202,10 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
 
             println!("[player]");
             println!("  player_command        = {}", cfg.player.command);
+            println!(
+                "  player.thumbnail_previews = {}  # requires user-installed mpv scripts such as thumbfast + uosc/compatible OSC",
+                cfg.player.thumbnail_previews
+            );
             println!("  player.args           = {}", cfg.player.args.join(" "));
 
             println!("[streaming]");
@@ -264,6 +271,9 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 "resume" => cfg.behavior.resume = parse_bool(key, value)?,
                 "discord_presence" => cfg.behavior.discord_presence = parse_bool(key, value)?,
                 "telemetry" => cfg.telemetry.enabled = parse_bool(key, value)?,
+                "player.thumbnail_previews" | "thumbnail_previews" => {
+                    cfg.player.thumbnail_previews = parse_bool(key, value)?
+                }
                 "cleanup_after_playback" => {
                     cfg.streaming.cleanup_after_playback = parse_bool(key, value)?
                 }
