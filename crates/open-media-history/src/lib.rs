@@ -1,4 +1,4 @@
-//! # om-history
+//! # open-media-history
 //!
 //! [`HistoryStore`] implementation backed by SQLite. Persists [`WatchProgress`]
 //! so the engine can resume an episode at its last position and show a "continue

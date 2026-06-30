@@ -16,7 +16,7 @@
 //! absolute episode numbering (a sequel numbered `… - 21`): [`release_episode`]
 //! parses the episode coordinate so a marker-less release whose number is the
 //! franchise-continuous one can be matched, given an offset from AniList relations
-//! (`MetadataProvider::episode_offset`, applied in `om-app`).
+//! (`MetadataProvider::episode_offset`, applied in `open-media-app`).
 
 use std::sync::LazyLock;
 

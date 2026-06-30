@@ -1,9 +1,10 @@
 //! Ports — the trait boundaries of the hexagon.
 //!
 //! Every external capability open-media needs is expressed here as a small,
-//! focused trait. The application layer ([`om-app`]) depends only on these
-//! traits; concrete adapters (`om-metadata`, `om-sources`, `om-debrid`, ...)
-//! implement them and are injected at the composition root (`om-cli`). This is
+//! focused trait. The application layer ([`open-media-app`]) depends only on these
+//! traits; concrete adapters (`open-media-metadata`, `open-media-sources`,
+//! `open-media-debrid`, ...) implement them and are injected at the composition
+//! root (`open-media-cli`). This is
 //! the Dependency-Inversion boundary: core/app never name a concrete HTTP client
 //! or database.
 //!
@@ -14,7 +15,7 @@
 //! - **Object-safe**: all traits are usable as `Arc<dyn Trait>` so the engine can
 //!   hold heterogeneous, runtime-selected adapters.
 //!
-//! [`om-app`]: ../../open_media_app/index.html
+//! [`open-media-app`]: ../../open_media_app/index.html
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! # om-core
+//! # open-media-core
 //!
 //! The **domain core** of open-media: value types, the port traits every adapter
 //! implements, and pure ranking logic. This crate has **no I/O** — no HTTP, no

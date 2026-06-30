@@ -8,7 +8,7 @@
 [Real-Debrid](https://real-debrid.com/) (cached, no seeding, no VPN) or directly
 over P2P, streamed into **mpv** or **vlc**. One fast TUI for everything.
 
-> **Status: released — v0.2.0.** The full pipeline — discover → source → resolve
+> **Status: released — v0.6.1.** The full pipeline — discover → source → resolve
 > (Real-Debrid or P2P) → play in mpv/vlc — is implemented, tested, packaged
 > (Nix + prebuilt binaries), and runs on **Linux, macOS, and Windows**. See
 > [CHANGELOG.md](CHANGELOG.md).
@@ -82,15 +82,23 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
   vlc (launch-only).
 - **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord presence.
+- **Subtitles**: optional OpenSubtitles/SubDL/Jimaku fetch through the
+  `open-subtitle` engine, passed to players as temp `--sub-file` tracks.
 - **TUI**: `open-media` with no args → Search → Results → Seasons → Episodes → Sources →
   play, with a focusable filter/sort panel that persists to your config.
 
 ## Install
 
 **Prebuilt binaries (no compiling)** — each [GitHub Release](https://github.com/grok-insider/open-media/releases)
-attaches a static `open-media` for Linux (x86_64/aarch64, musl), macOS (x86_64/arm64), and
-Windows (x86_64) as `open-media-<version>-<target>.tar.gz` (+ `.sha256`). Download, verify,
-extract, and put `open-media` on your `PATH`.
+attaches `open-media-<version>-<target>.tar.gz` (+ `.sha256`) for static Linux
+(x86_64/aarch64 musl), native macOS (x86_64/arm64), and native Windows (x86_64).
+Download, verify, extract, and put `open-media` on your `PATH`.
+
+**Cargo / crates.io**:
+
+```sh
+cargo install open-media-cli
+```
 
 **Nix / NixOS** (x86_64-linux; prebuilt on the `grok-insider` cachix cache):
 
@@ -137,13 +145,19 @@ open-media search "interstellar"                 # list matches
 open-media search "frieren" --kind anime
 open-media play "interstellar"                   # one-shot: search → best source → play
 open-media play "frieren" --season 1 --episode 1
-open-media config show                           # print resolved config (secrets masked)
+open-media login anilist                         # optional anime progress tracking token
+open-media config show                           # print config summary (secrets masked)
 open-media config path                           # print the config file path
 ```
 
-`open-media config set` edits these keys: `tmdb_api_key`, `real_debrid_token`,
-`anilist_token`, `mal_token`, `debrid_provider`, `player_command`, `telemetry`.
-Everything else is set by editing `config.toml` directly.
+`open-media config set` supports the scalar keys most users need:
+`tmdb_api_key`, `real_debrid_token`, `anilist_token`, `mal_token`,
+`debrid_provider`, `player_command`, `quality`, `nyaa_category`, `theme`,
+`show_uncached`, `nyaa_direct`, `cinemeta`, `skip_intro_outro`, `skip_filler`,
+`autoplay_next`, `resume`, `discord_presence`, `telemetry`,
+`cleanup_after_playback`, `complete_threshold`, and `http_port`. List/nested
+values such as `torrentio_providers`, `player.args`, `[subtitles]`, and
+`[ui.sources]` are still edited directly in `config.toml`.
 
 ## Configuration
 
@@ -165,6 +179,8 @@ the Nix store. `open-media init` creates it.
 | `[streaming]` `http_port` / `cleanup_after_playback` | `3131` / `true` | local P2P stream server |
 | `[behavior]` `skip_intro_outro` / `resume` | `true` | AniSkip OP/ED; resume from last position |
 | `[behavior]` `skip_filler` / `complete_threshold` / `discord_presence` | `false` / `0.85` / `false` | binge filler-skip; mark-complete fraction; Discord RPC |
+| `[behavior]` `autoplay_next` | `false` | keep playing the next episode after completion |
+| `[subtitles]` `enabled` / `languages` | `false` / `["en"]` | optional external subtitle fetch, preferred languages first |
 | `[ui]` `theme` / `[ui.sources]` | `auto` | UI theme; persisted Sources filter/sort panel |
 | `[telemetry]` `enabled` | `true` | anonymous active-install ping (opt-out; see Telemetry below) |
 
@@ -174,10 +190,14 @@ the Nix store. `open-media init` creates it.
 
 ## Telemetry
 
-open-media sends a single **anonymous** usage ping once per launch so the project
-can estimate how many active installs exist. It is **on by default (opt-out)**.
+open-media has a single **anonymous** usage ping once per launch so the project
+can estimate how many active installs exist. It is **on by default (opt-out)**,
+but the shipped `0.6.1` binary still points at a placeholder collector endpoint,
+so the reporter is currently inert and sends nothing until a real endpoint is
+configured in a future release.
 
-**Exactly what is sent — and nothing else, ever:**
+When a collector endpoint is configured, this is exactly what is sent — and
+nothing else, ever:
 
 ```json
 { "v": "<app version>", "os": "<linux|macos|windows>", "arch": "<x86_64|aarch64>", "id": "<random uuid>" }
@@ -190,9 +210,9 @@ can estimate how many active installs exist. It is **on by default (opt-out)**.
   source names, file hashes, watch history — or any API token. That is a hard
   invariant of the telemetry code, not a setting.
 
-It is best-effort and fire-and-forget: it runs detached with a short timeout and
-never blocks or breaks playback, and silently does nothing if it can't reach the
-collector.
+It is best-effort and fire-and-forget: it runs detached with a short timeout,
+never blocks or breaks playback, and silently does nothing if no collector is
+configured or the collector cannot be reached.
 
 **Opt out at any time:**
 
@@ -205,20 +225,23 @@ app does not phone home to count downloads.
 
 ## Project layout
 
-A Cargo workspace of 11 crates, one per concern (full table in
+A Cargo workspace of 14 crates, one per concern (full table in
 [AGENTS.md](AGENTS.md#module-layout)):
 
 ```
 crates/
   open-media-core      domain model + ports (traits) + scoring   — no I/O
+  open-media-net       shared HTTP client, timeouts, retry helper
   open-media-config    config schema + load/save + secrets policy
   open-media-metadata  TMDB + Cinemeta (keyless) + AniList        (MetadataProvider)
   open-media-sources   Torrentio, nyaa.si                         (SourceProvider)
   open-media-debrid    Real-Debrid (+ future AllDebrid/Torbox)    (DebridProvider)
   open-media-stream    librqbit P2P engine + hybrid resolver      (StreamResolver)
   open-media-player    mpv (IPC) + vlc                            (Player)
+  open-media-subs      open-subtitle adapter                       (SubtitleProvider)
   open-media-track     AniList/MAL trackers + AniSkip + Discord   (Tracker/Enricher/…)
   open-media-history   SQLite watch history + resume              (HistoryStore)
+  open-media-telemetry anonymous usage ping adapter                (UsageReporter)
   open-media-app       use-cases + Engine (composition)           — depends only on open-media-core
   open-media-cli       the `open-media` binary (composition root + TUI)
 ```

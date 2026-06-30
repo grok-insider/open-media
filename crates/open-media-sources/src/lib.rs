@@ -1,4 +1,4 @@
-//! # om-sources
+//! # open-media-sources
 //!
 //! [`SourceProvider`] adapters — they find releasable files for a media item.
 //!

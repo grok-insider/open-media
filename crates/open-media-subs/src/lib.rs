@@ -1,4 +1,4 @@
-//! `om-subs` — a [`SubtitleProvider`] adapter backed by the **open-subtitle**
+//! `open-media-subs` — a [`SubtitleProvider`] adapter backed by the **open-subtitle**
 //! engine.
 //!
 //! open-subtitle is a sibling Rust workspace that already knows how to talk to
@@ -6,7 +6,7 @@
 //! to UTF-8. This crate is a thin boundary: it builds an [`os_engine::Engine`]
 //! once, translates open-media's [`SubtitleQuery`] into the engine's
 //! [`os_core::Media`] + language list, calls `download_best`, and maps the
-//! resulting [`os_core::SubtitleFile`]s back into om-core [`SubtitleTrack`]s. All
+//! resulting [`os_core::SubtitleFile`]s back into open-media-core [`SubtitleTrack`]s. All
 //! open-subtitle types are confined here — the rest of open-media depends only on
 //! the [`SubtitleProvider`] port.
 //!
@@ -107,7 +107,7 @@ async fn download_best(
     .map_err(|e| CoreError::Other(format!("subtitle task failed: {e}")))?
 }
 
-/// Map an om-core [`SubtitleQuery`] into an open-subtitle [`os_core::Media`].
+/// Map an open-media-core [`SubtitleQuery`] into an open-subtitle [`os_core::Media`].
 ///
 /// Pure (no engine, no network) so the mapping is unit-testable in isolation:
 /// - [`MediaKind::Movie`], or any kind without episode coordinates, → `movie`.
@@ -129,7 +129,7 @@ fn to_os_media(query: &SubtitleQuery) -> os_core::Media {
     }
 }
 
-/// Parse om-core language tags into open-subtitle [`os_core::Language`]s,
+/// Parse open-media-core language tags into open-subtitle [`os_core::Language`]s,
 /// dropping any the engine can't understand. Pure and order-preserving.
 fn parse_languages(tags: &[String]) -> Vec<os_core::Language> {
     tags.iter()
@@ -137,7 +137,7 @@ fn parse_languages(tags: &[String]) -> Vec<os_core::Language> {
         .collect()
 }
 
-/// Map a delivered [`os_core::SubtitleFile`] into an om-core [`SubtitleTrack`].
+/// Map a delivered [`os_core::SubtitleFile`] into an open-media-core [`SubtitleTrack`].
 ///
 /// The language is reported as the alpha-3 code (e.g. `eng`), the stable tag the
 /// engine carries; `title` is left `None` because open-media labels tracks from
@@ -151,7 +151,7 @@ fn to_track(file: os_core::SubtitleFile) -> SubtitleTrack {
     }
 }
 
-/// Map an open-subtitle [`os_core::CoreError`] into the om-core [`CoreError`].
+/// Map an open-subtitle [`os_core::CoreError`] into the open-media-core [`CoreError`].
 ///
 /// Note `NotFound` is handled at the call site (it means "no subtitles", which is
 /// `Ok(vec![])` for us) and so is intentionally not special-cased here.

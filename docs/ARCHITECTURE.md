@@ -27,16 +27,19 @@ pieces are shaped the way they are.
 ## 2. Layers and the dependency rule
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│  Interface         open-media-cli  (clap CLI, ratatui TUI, composition root)    │
-├───────────────────────────────────────────────────────────────────────┤
-│  Application       open-media-app  (Engine + use-cases)   depends ONLY on core  │
-├───────────────────────────────────────────────────────────────────────┤
-│  Domain / Ports    open-media-core (models, traits, scoring)   depends on nothing│
-├───────────────────────────────────────────────────────────────────────┤
-│  Adapters          open-media-metadata open-media-sources open-media-debrid open-media-stream           │
-│  (infrastructure)  open-media-player open-media-track open-media-history   each impl a port      │
-└───────────────────────────────────────────────────────────────────────┘
+open-media-cli  (clap CLI, ratatui TUI, composition root)
+      │
+      ▼
+open-media-app  (Engine + use-cases; depends only on core)
+      │
+      ▼
+open-media-core (domain models, ports, errors, scoring; no I/O)
+      ▲
+      │
+Adapter crates implement ports:
+open-media-metadata, open-media-sources, open-media-debrid, open-media-stream,
+open-media-player, open-media-subs, open-media-track, open-media-history,
+open-media-telemetry. open-media-net is shared HTTP plumbing for network adapters.
 ```
 
 - Dependencies point **inward**: adapters → core, app → core, cli → {app, core,
@@ -76,7 +79,7 @@ backend knows nothing about trackers.
 
 | Port | Responsibility | Adapters |
 |------|----------------|----------|
-| `MetadataProvider` | search / details / seasons / episodes | TMDB, AniList |
+| `MetadataProvider` | search / details / seasons / episodes / absolute episode offsets | TMDB, Cinemeta, AniList |
 | `SourceProvider` | find candidate files for a media+episode | Torrentio, nyaa |
 | `DebridProvider` | magnet → instant CDN link; cache check | Real-Debrid (+future) |
 | `StreamResolver` | chosen candidate → `Playback` (debrid or P2P) | HybridResolver |
@@ -85,7 +88,10 @@ backend knows nothing about trackers.
 | `Tracker` | sync progress/status/score to a list service | AniList, MAL, Composite |
 | `Enricher` | skip-times + filler/recap flags for an episode | AniSkip, Jikan |
 | `HistoryStore` | persist/resume local watch progress | SQLite |
+| `SubtitleProvider` | find/decode external subtitles for a title/episode | open-subtitle adapter |
+| `IdBridge` | bridge AniList/MAL ids to IMDB for source providers | Fribb anime-lists bridge |
 | `PresenceReporter` | "now watching" rich presence | Discord |
+| `UsageReporter` | anonymous active-install ping | HTTP telemetry adapter |
 
 **Why `Player` and `PlaybackControl` are separate.** Launching and controlling
 are different capabilities (ISP). vlc can only be launched; mpv additionally
@@ -107,9 +113,11 @@ add→poll→select→poll→unrestrict flow inside the adapter.
   failures are logged, not fatal.
 - `find_sources(req)` — fan out across applicable `SourceProvider`s (skipping
   ones whose `supports(kind)` is false), merge, and rank with
-  `om_core::scoring`. Ranking lives in core so it is identical regardless of
+  `open_media_core::scoring`. Ranking lives in core so it is identical regardless of
   which providers ran.
 - `play(req, candidate)` — the orchestrator (next section).
+- `play_with_fallback(req, candidates)` — try ranked candidates in order, falling
+  through when one cannot resolve or launch.
 
 `EngineBuilder` assembles an `Engine`; optional ports left unset disable their
 features (no tracker token ⇒ no tracking; vlc ⇒ no resume).
@@ -128,8 +136,9 @@ play(req, candidate):
                       └─ else -> P2pEngine.stream_magnet(magnet)  (local HTTP, Range)
   2. enrich (anime) Enricher::skip_times(ids, ep)  +  (binge) filler_episodes
   3. resume         HistoryStore::resume(key, s, e) -> start position
-  4. launch         Player::play(playback, {title, start_at}) -> PlaySession
-  5. if control = session.control():            // mpv only
+  4. subtitles      SubtitleProvider::fetch(query) -> temp .srt/.vtt --sub-file args
+  5. launch         Player::play(playback, {title, start_at, sub-file args}) -> PlaySession
+  6. if control = session.control():            // mpv only
        spawn concurrent tasks over the IPC channel:
          • resume-seek: once playback starts, seek_absolute(resume_pos)
          • skip-loop:   poll time-pos; when inside OP/ED window -> seek_absolute(end)
@@ -137,12 +146,12 @@ play(req, candidate):
          • progress:    poll time-pos ~1s -> HistoryStore::save; on >= threshold
                         -> Tracker::update_progress(ids, ep)
          • presence:    on pause/episode change -> PresenceReporter::update
-  6. await           session.wait()              // blocks until player exits
-  7. teardown        persist final position; StreamResolver::cleanup()
-  8. advance         (binge) next non-filler episode -> recurse
+  7. await           session.wait()              // blocks until player exits
+  8. teardown        persist final position; StreamResolver::cleanup(); temp subtitles removed
+  9. advance         (binge) next non-filler episode -> recurse
 ```
 
-Everything in step 5 flows through the *one* `PlaybackControl` channel — seek
+Everything in the control step flows through the *one* `PlaybackControl` channel — seek
 (resume + skip), time-pos (progress/tracking), pause (presence), chapters
 (AniSkip). That single control plane is built first; every higher feature is a
 task that polls or seeks it.
@@ -154,8 +163,8 @@ task that polls or seeks it.
 direct URLs and `[RD+]` flags → score → chosen candidate already has
 `direct_url` → resolver returns it verbatim → mpv. *No torrent, no wait.*
 
-**Anime via Real-Debrid.** AniList search → `Media{anilist, mal}` (+ TMDB/imdb
-bridge) → Torrentio (`nyaasi` provider) and direct nyaa → cached `[RD+]` picks →
+**Anime via Real-Debrid.** AniList search → `Media{anilist, mal}` (+ Fribb IMDB
+bridge when available) → Torrentio (`nyaasi` provider) and direct nyaa → cached `[RD+]` picks →
 resolver returns RD URL → mpv, with AniSkip (keyed by `mal`) driving auto-skip
 and AniList progress updates.
 
@@ -208,6 +217,11 @@ app can branch on failure *category* (e.g. retry on `Network`, prompt re-auth on
 - **Secrets (tokens) live only in that file.** Never compiled in, never in the
   repo, never logged (masked on display). Optional `OPEN_MEDIA_*` env overrides
   for CI/ephemeral use.
+- Subtitle fetching is opt-in under `[subtitles]`. Returned tracks are decoded to
+  UTF-8, written to temporary files, passed as `--sub-file` args, then removed
+  after playback.
+- Telemetry is opt-out in the config, but the shipped reporter is inert until a
+  real collector endpoint replaces the placeholder in the composition root.
 
 ## 12. Scoring (`open-media-core::scoring`)
 
@@ -225,6 +239,8 @@ and trivially testable.
 - **App**: fake ports (see `open-media-app`'s `FakeMeta` test) to assert orchestration
   branching, merge, and ranking without a network.
 - **Gate**: `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace`.
+- **Live checks**: real Real-Debrid, real mpv, and live P2P tests are present but
+  gated behind `#[ignore]` and env vars so CI remains hermetic.
 
 ## 14. Mapping to SOLID
 
@@ -238,7 +254,7 @@ and trivially testable.
 
 ## 15. Known deferrals
 
-See `docs/ROADMAP.md` for phase ordering and `future-features.md` for the
-backlog (subtitles/OpenSubtitles, poster art via terminal image protocols,
-syncplay/watch-together, a Jellyfin/Zurg-style library mode, additional debrid
-backends, Trakt tracking).
+See `docs/ROADMAP.md` for phase ordering, `continue-plan.md` for actionable
+follow-ups, and `future-features.md` for the broader backlog (additional debrid
+backends, MAL OAuth refresh, Trakt tracking, local subtitle sidecars,
+syncplay/watch-together, a Jellyfin/Zurg-style library mode, rich stream progress).

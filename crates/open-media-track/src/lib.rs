@@ -1,4 +1,4 @@
-//! # om-track
+//! # open-media-track
 //!
 //! Anime-power ports grouped because they share the AniList/MAL id plumbing:
 //!

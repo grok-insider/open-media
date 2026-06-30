@@ -1,8 +1,8 @@
-//! `om` — open-media command-line entrypoint.
+//! open-media command-line entrypoint.
 //!
 //! This binary is intentionally thin: parse args, load config, build the
 //! [`Engine`] via [`compose::build_engine`], and dispatch. All real work lives in
-//! `om-app` (orchestration) and the adapter crates (I/O).
+//! `open-media-app` (orchestration) and the adapter crates (I/O).
 //!
 //! [`Engine`]: open_media_app::Engine
 
@@ -21,7 +21,7 @@ use open_media_core::model::MediaKind;
 #[command(name = "open-media", version, about, long_about = None)]
 struct Cli {
     /// Free-text query that opens the TUI pre-filled and immediately searches
-    /// (e.g. `om "frieren"`). Ignored when a subcommand is given.
+    /// (e.g. `open-media "frieren"`). Ignored when a subcommand is given.
     query: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -62,14 +62,15 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
-    /// Print the resolved configuration (secrets masked).
+    /// Print a resolved configuration summary (secrets masked).
     Show,
     /// Print the config file path.
     Path,
-    /// Set a key: `om config set tmdb_api_key=...`.
+    /// Set a scalar key: `open-media config set tmdb_api_key=...`.
     Set {
-        /// `key=value`. Keys: tmdb_api_key, real_debrid_token, anilist_token,
-        /// mal_token, debrid_provider, player_command, telemetry.
+        /// `key=value`. Run `open-media config show` for current values; list/nested
+        /// keys such as torrentio_providers, player.args, [subtitles], and [ui.sources]
+        /// are edited directly in config.toml for now.
         kv: String,
     },
 }
@@ -114,7 +115,7 @@ async fn run_interactive(initial_query: Option<String>) -> anyhow::Result<()> {
     let mut cfg = match open_media_config::load() {
         Ok(c) => c,
         Err(_) => {
-            println!("No configuration found. Run `om init` first.");
+            println!("No configuration found. Run `open-media init` first.");
             return Ok(());
         }
     };
@@ -127,7 +128,7 @@ fn cmd_init() -> anyhow::Result<()> {
     let path = open_media_config::config_path();
     if open_media_config::load().is_ok() {
         println!("Config already exists at {}", path.display());
-        println!("Edit it directly, or use `om config set key=value`.");
+        println!("Edit it directly, or use `open-media config set key=value`.");
         return Ok(());
     }
     let mut cfg = open_media_config::Config::default();
@@ -139,8 +140,8 @@ fn cmd_init() -> anyhow::Result<()> {
     println!("Created {}", path.display());
     println!();
     println!("Next steps (all optional — search works keyless via Cinemeta + AniList):");
-    println!("  om config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
-    println!("  om config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
+    println!("  open-media config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
+    println!("  open-media config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
     println!();
     println!(
         "Get keys: https://real-debrid.com/apitoken  +  https://www.themoviedb.org/settings/api"
@@ -148,7 +149,7 @@ fn cmd_init() -> anyhow::Result<()> {
     println!();
     println!("Anonymous usage analytics (OS, arch, version, a random id) are ON by");
     println!("default to count active installs — never anything you watch. Opt out with:");
-    println!("  om config set telemetry=false");
+    println!("  open-media config set telemetry=false");
     Ok(())
 }
 
@@ -394,7 +395,8 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
 }
 
 fn load_or_hint() -> anyhow::Result<open_media_config::Config> {
-    open_media_config::load().map_err(|_| anyhow::anyhow!("no config found — run `om init` first"))
+    open_media_config::load()
+        .map_err(|_| anyhow::anyhow!("no config found — run `open-media init` first"))
 }
 
 fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {

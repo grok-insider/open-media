@@ -7,13 +7,13 @@ name: Release
 #                           [workspace.package].version + Cargo.lock, regenerates
 #                           CHANGELOG.md from Conventional Commits).
 #   * release-plz-release — when that PR is merged, creates the `vX.Y.Z` tag +
-#                           GitHub Release from the changelog.
-#   * upload-binary       — builds a portable static `open-media` and attaches it.
+#                           GitHub Release from the changelog and publishes crates.
+#   * artifacts           — builds release archives for Linux/macOS/Windows.
 #
 # Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
 # master push and pushes `open-media-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
-# version straight from Cargo.toml). Nothing is published to crates.io — see the
-# `git_only` setting in release-plz.toml.
+# version straight from Cargo.toml). Crates.io publishing is handled by the
+# release-plz release job below.
 
 on:
   push:
@@ -82,7 +82,7 @@ jobs:
         with:
           version: ${{ env.RP_VER }}
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
-          project-description: "Linux media streaming app: debrid/torrent sources, mpv playback, Discord RPC, watch history (open-media)"
+          project-description: "Cross-platform terminal media streaming app: debrid/torrent sources, mpv playback, Discord RPC, watch history (open-media)"
       - name: Commit AI changelog to the Release PR
         if: ${{ env.RP_PR != '' }}
         run: |

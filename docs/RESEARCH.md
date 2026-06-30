@@ -137,17 +137,19 @@ from the addon (Torrentio/Comet flags), not RD. Respect ~250 req/min; add backof
 
 ### AniList / MAL OAuth
 - AniList: GraphQL `POST https://graphql.anilist.co`, `Authorization: Bearer`.
-  Auth = code-grant via a loopback `http://localhost:PORT/oauth/callback` server,
-  exchange at `https://anilist.co/api/v2/oauth/token`. `SaveMediaListEntry`
-  mutation updates progress/status/score.
-- MAL: OAuth2 + PKCE, API base `https://api.myanimelist.net/v2`.
+  Implemented login uses AniList's implicit grant: a fixed loopback callback serves
+  a tiny bridge page that copies the URL fragment token into a query string the
+  local listener can read. `SaveMediaListEntry` mutation updates progress/status.
+- MAL: OAuth2 + PKCE, API base `https://api.myanimelist.net/v2`; token refresh and
+  `open-media login mal` are still open work.
 
 ### librqbit mapping (the Rust port of toru's engine)
 `anacrolix/torrent` → `librqbit`. `add_torrent(AddTorrent::from_url(magnet))` →
 `wait_until_initialized()` (≈ `<-GotInfo()`). Largest video file by extension.
 Serve via librqbit's built-in `/torrents/{id}/stream/{file_idx}` (Range-aware,
 piece-prioritized) — bind `127.0.0.1`. `session.delete(id, delete_files)` on
-cleanup. Vendored OpenSSL feature avoids a system `libssl` dependency.
+cleanup. The crate is built through rustls/aws-lc, so there is no system OpenSSL
+runtime dependency.
 
 ## 4. Credits
 

@@ -606,8 +606,9 @@ pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> 
 
     let mut app = App::new(engine, cfg, tx, stills, still_tx, initial_query);
 
-    // A pre-filled query (`om "frieren"`) searches immediately; start_search
-    // no-ops on an empty query, so bare `om` still lands on an idle search box.
+    // A pre-filled query (`open-media "frieren"`) searches immediately;
+    // start_search no-ops on an empty query, so bare `open-media` still lands on
+    // an idle search box.
     start_search(&mut app);
 
     let result = run_loop(&mut term, &mut app, &mut rx, &mut still_rx).await;

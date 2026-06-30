@@ -6,7 +6,7 @@
 //! framing in [`crate::mpv`] stays platform-agnostic: both backends implement
 //! `AsyncRead + AsyncWrite + Unpin`, which is all the control plane needs.
 //!
-//! (Deliberately duplicated, ~per-crate, in `om-track` — see that crate's
+//! (Deliberately duplicated, ~per-crate, in `open-media-track` — see that crate's
 //! `ipc` module. Adapter crates don't depend on each other, so a shared
 //! transport would have to live in a new crate; the seam is too small to
 //! warrant one.)

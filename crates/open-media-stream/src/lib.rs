@@ -1,4 +1,4 @@
-//! # om-stream
+//! # open-media-stream
 //!
 //! Resolution: turning a chosen [`SourceCandidate`] into a player-openable
 //! [`Playback`], and the local P2P streaming engine that backs the non-debrid
