@@ -100,7 +100,9 @@ Releases use release-plz plus the GitHub workflow:
 
 - Feature/fix work lands in `dev`; only `dev` and `release-plz-*` PRs may target
   `master`.
-- `feat:`/`fix:` commits on `master` make release-plz maintain a release PR.
+- `feat:`/`fix:` commits on `master` make release-plz maintain a patch release PR;
+  repo admins use the Manual Version Bump workflow for deliberate minor/major
+  milestones.
 - Merging the release PR tags `vX.Y.Z`, publishes every `open-media-*` crate to
   crates.io in dependency order, creates the GitHub Release, uploads prebuilt
   archives, and lets CI push the Nix closure to cachix.

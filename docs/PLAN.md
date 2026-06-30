@@ -113,10 +113,11 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 - [x] Wired into the NixOS host (`~/.config/nixos` flake input + HM module);
       `rebuild` installs `open-media` from the cache (no compile).
 - [x] Automated releases (`release-plz.toml` + `.github/workflows/release.yml`):
-      `dev` → `master` integration → release PR (version bump + `CHANGELOG`) →
-      merging it tags `vX.Y.Z`, publishes crates to crates.io, creates the GitHub
-      Release + prebuilt `open-media` archives, and cachix gets
-      `open-media-X.Y.Z`. Conventional Commits drive the bump (see CONTRIBUTING).
+      `dev` → `master` integration → patch release PR (version bump +
+      `CHANGELOG`) → merging it tags `vX.Y.Z`, publishes crates to crates.io,
+      creates the GitHub Release + prebuilt `open-media` archives, and cachix gets
+      `open-media-X.Y.Z`. Conventional Commits drive patch releases; repo admins
+      use the Manual Version Bump workflow for minor/major milestones.
 - [x] Bootstrap: `v0.1.0` tagged + GitHub Release published (anchors release-plz).
       Pipeline verified live — the release PR opens on `feat`/`fix` and no-ops
       otherwise, and the `v*` tag's CI pushed `open-media-0.1.0` to cachix.
