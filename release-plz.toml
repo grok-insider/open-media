@@ -34,10 +34,11 @@ release_always = true
 release_commits = "^(feat|fix)"
 # Internal libs + one bin, not a published API: skip cargo-semver-checks.
 semver_check = false
-# This is an end-user app (not a published library), so treat `feat:` as a
-# minor bump even on 0.x — more communicative than the Cargo-SemVer 0.x default
-# (where features are patch and only breaking changes bump the minor).
-features_always_increment_minor = true
+# Automatic releases stay on the patch line: repo admins use the manual version
+# bump workflow for deliberate major/minor milestones. On 0.x this makes `feat:`
+# commits bump patch versions; avoid `feat!`/`BREAKING CHANGE` in the automatic
+# stream because release-plz still treats breaking commits as a minor bump.
+features_always_increment_minor = false
 # Defaults for the library crates below: no own tag/release/changelog. open-media-cli
 # overrides these to true.
 git_tag_enable = false

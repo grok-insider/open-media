@@ -167,11 +167,13 @@ go in `future-features.md`.
 Releases are automated with **release-plz** (`release-plz.toml` +
 `.github/workflows/release.yml`); see `CONTRIBUTING.md` → Releases.
 
-- **Conventional Commits are required** — the history drives the version bump and
-  the changelog. `feat:` → minor, `fix:` → patch (this is an app, so
-  `features_always_increment_minor` makes `feat` bump minor even on 0.x); `feat!:` /
-  `BREAKING CHANGE:` → breaking; `docs/refactor/perf/test/chore/ci` don't trigger a
-  release on their own (only `feat`/`fix` open a release PR — `release_commits`).
+- **Conventional Commits are required** — the history drives patch release PRs and
+  the changelog. `feat:` and `fix:` both trigger automatic **patch** releases;
+  repo-admin-only manual version-bump PRs own deliberate minor/major milestones.
+  Avoid `feat!:` / `BREAKING CHANGE:` in the normal automatic stream because
+  release-plz treats breaking commits as minor/major signals.
+  `docs/refactor/perf/test/chore/ci` don't trigger a release on their own (only
+  `feat`/`fix` open a release PR — `release_commits`).
 - **One version, single-sourced:** root `Cargo.toml` `[workspace.package].version`;
   every crate inherits it (`version.workspace = true`). Never bump it by hand —
   release-plz does, in lockstep across all crates (`version_group`). Internal path
@@ -179,11 +181,12 @@ Releases are automated with **release-plz** (`release-plz.toml` +
   in lockstep; don't edit those by hand.
 - **Flow:** land feature/fix PRs in `dev`, then open the single sanctioned
   `dev`→`master` integration PR (release-plz PRs are the only other branch allowed
-  into `master`). A `feat:`/`fix:` on `master` makes release-plz maintain a release
-  PR (version bump + `CHANGELOG` + `Cargo.lock`); merging it tags `vX.Y.Z`,
-  publishes crates to crates.io in dependency order, creates the GitHub Release +
-  prebuilt `open-media` archives, and CI pushes `open-media-X.Y.Z` to cachix
-  (`flake.nix` reads the version).
+  into `master`). A `feat:`/`fix:` on `master` makes release-plz maintain a patch
+  release PR (version bump + `CHANGELOG` + `Cargo.lock`); merging it tags
+  `vX.Y.Z`, publishes crates to crates.io in dependency order, creates the GitHub
+  Release + prebuilt `open-media` archives, and CI pushes `open-media-X.Y.Z` to
+  cachix (`flake.nix` reads the version). Repo admins can run the Manual Version
+  Bump workflow when a minor/major milestone should ship.
 
 ## Conventions
 

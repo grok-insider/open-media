@@ -1,6 +1,8 @@
 name: Release
 
-# Automated versioning + GitHub Releases via release-plz (config: release-plz.toml).
+# Automated patch-line versioning + GitHub Releases via release-plz (config:
+# release-plz.toml). Repo admins use Manual Version Bump for deliberate
+# major/minor releases.
 #
 # Flow on every push to master:
 #   * release-plz-pr      — opens/updates the "release PR" (bumps the single
