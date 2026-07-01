@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use open_media_app::{Engine, PlayRequest};
+use open_media_app::{Engine, PlayRequest, SearchProgress};
 use open_media_config::Config;
 use open_media_core::model::{Episode, Media, MediaKind, Season};
 use open_media_core::stream::{CacheState, Quality, SourceCandidate};
@@ -412,7 +412,14 @@ fn cycle_quality(current: Option<Quality>, dir: i32) -> Option<Quality> {
 
 /// Async results posted back to the UI loop.
 enum Msg {
-    Results(Vec<Media>),
+    SearchProgress {
+        search_id: u64,
+        progress: SearchProgress,
+    },
+    SearchError {
+        search_id: u64,
+        error: String,
+    },
     /// Multi-season series → show the season picker.
     Seasons(Media, Vec<Season>),
     /// Episodes for a resolved season (real titles when the provider has them).
@@ -430,6 +437,7 @@ struct App {
     engine: Arc<Engine>,
     screen: Screen,
     query: String,
+    search_id: u64,
     status: String,
     busy: bool,
     should_quit: bool,
@@ -510,6 +518,7 @@ impl App {
                 Screen::Home
             },
             query: initial_query.unwrap_or_default(),
+            search_id: 0,
             status: "Browse your library or press / to search".into(),
             busy: false,
             should_quit: false,
@@ -651,16 +660,25 @@ impl App {
     }
 
     fn handle_msg(&mut self, msg: Msg) {
-        self.busy = false;
         match msg {
-            Msg::Results(r) => {
-                self.results = r;
-                self.results_state
-                    .select((!self.results.is_empty()).then_some(0));
-                self.screen = Screen::Results;
-                self.status = format!("{} results", self.results.len());
+            Msg::SearchProgress {
+                search_id,
+                progress,
+            } => {
+                if search_id != self.search_id {
+                    return;
+                }
+                self.apply_search_progress(progress);
+            }
+            Msg::SearchError { search_id, error } => {
+                if search_id != self.search_id {
+                    return;
+                }
+                self.busy = false;
+                self.status = format!("Error: {error}");
             }
             Msg::Seasons(media, seasons) => {
+                self.busy = false;
                 self.seasons = seasons;
                 self.seasons_state
                     .select((!self.seasons.is_empty()).then_some(0));
@@ -669,6 +687,7 @@ impl App {
                 self.status = "Pick a season".into();
             }
             Msg::Episodes(media, season, episodes) => {
+                self.busy = false;
                 self.episodes = episodes;
                 self.episodes_state
                     .select((!self.episodes.is_empty()).then_some(0));
@@ -678,6 +697,7 @@ impl App {
                 self.status = "Pick an episode".into();
             }
             Msg::Sources { media, candidates } => {
+                self.busy = false;
                 self.candidates = candidates;
                 self.languages = distinct_languages(&self.candidates);
                 self.providers = distinct_providers(&self.candidates);
@@ -689,13 +709,34 @@ impl App {
                 self.screen = Screen::Sources;
                 self.recompute_visible();
             }
-            Msg::PlayEnded => self.status = "Playback ended".into(),
+            Msg::PlayEnded => {
+                self.busy = false;
+                self.status = "Playback ended".into();
+            }
             Msg::Status(s) => {
                 self.busy = true;
                 self.status = s;
             }
-            Msg::Error(e) => self.status = format!("Error: {e}"),
+            Msg::Error(e) => {
+                self.busy = false;
+                self.status = format!("Error: {e}");
+            }
         }
+    }
+
+    fn apply_search_progress(&mut self, progress: SearchProgress) {
+        self.results = progress.results;
+        self.results_state
+            .select((!self.results.is_empty()).then_some(0));
+        if !self.results.is_empty() || progress.finished {
+            self.screen = Screen::Results;
+        }
+        self.busy = !progress.finished;
+        self.status = search_status(
+            self.results.len(),
+            progress.failed_providers,
+            progress.finished,
+        );
     }
 
     fn list_move(state: &mut ListState, len: usize, delta: i32) {
@@ -1051,16 +1092,48 @@ fn start_search(app: &mut App) {
     if query.is_empty() {
         return;
     }
+    app.search_id = app.search_id.wrapping_add(1);
+    let search_id = app.search_id;
     app.busy = true;
+    app.results.clear();
+    app.results_state.select(None);
+    app.screen = Screen::Search;
     app.status = format!("Searching “{query}”…");
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
-        let _ = match engine.search(&query, None).await {
-            Ok(r) => tx.send(Msg::Results(r)),
-            Err(e) => tx.send(Msg::Error(e.to_string())),
+        let result = engine
+            .search_incremental(&query, None, |progress| {
+                let _ = tx.send(Msg::SearchProgress {
+                    search_id,
+                    progress,
+                });
+            })
+            .await;
+        if let Err(e) = result {
+            let _ = tx.send(Msg::SearchError {
+                search_id,
+                error: e.to_string(),
+            });
         };
     });
+}
+
+fn search_status(results: usize, failed_providers: usize, finished: bool) -> String {
+    let mut status = if finished {
+        format!("{results} results")
+    } else {
+        format!("{results} results · still searching...")
+    };
+    if failed_providers > 0 {
+        let noun = if failed_providers == 1 {
+            "provider"
+        } else {
+            "providers"
+        };
+        status.push_str(&format!(" · {failed_providers} {noun} failed"));
+    }
+    status
 }
 
 fn select_result(app: &mut App) {
@@ -2284,5 +2357,18 @@ mod tests {
         assert_eq!(LibraryFilter::Dropped.cycle(1), LibraryFilter::All);
         assert_eq!(LibraryFilter::Planned.status(), Some(ListStatus::Planning));
         assert_eq!(LibraryFilter::All.status(), None);
+    }
+
+    #[test]
+    fn search_status_distinguishes_partial_final_and_failures() {
+        assert_eq!(
+            search_status(12, 0, false),
+            "12 results · still searching..."
+        );
+        assert_eq!(search_status(12, 0, true), "12 results");
+        assert_eq!(
+            search_status(12, 2, false),
+            "12 results · still searching... · 2 providers failed"
+        );
     }
 }
