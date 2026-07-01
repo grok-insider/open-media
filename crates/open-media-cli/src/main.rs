@@ -13,7 +13,8 @@ mod telemetry;
 mod tui;
 
 use clap::{Parser, Subcommand};
-use open_media_core::model::MediaKind;
+use open_media_core::model::{Media, MediaKind};
+use open_media_core::tracking::ListStatus;
 
 /// open-media: watch movies, series, and anime from the terminal — via
 /// Real-Debrid (instant, cached) or direct P2P, into mpv/vlc.
@@ -58,6 +59,36 @@ enum Command {
         /// Tracker to authorize: `anilist` (MAL coming soon).
         provider: String,
     },
+    /// Manage the local library/watchlist.
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LibraryAction {
+    /// List locally saved library items.
+    List {
+        /// Filter by status: watching | completed | planning | paused | dropped | repeating.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Add the best search result as plan-to-watch.
+    Plan {
+        /// Free-text query.
+        query: String,
+    },
+    /// Mark the best search result as currently watching.
+    Watching {
+        /// Free-text query.
+        query: String,
+    },
+    /// Mark the best search result as watched/completed.
+    Watched {
+        /// Free-text query.
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -96,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             episode,
         }) => cmd_play(&query, season, episode).await,
         Some(Command::Login { provider }) => login::cmd_login(&provider).await,
+        Some(Command::Library { action }) => cmd_library(action).await,
     }
 }
 
@@ -405,6 +437,78 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
     Ok(())
 }
 
+async fn cmd_library(action: LibraryAction) -> anyhow::Result<()> {
+    let mut cfg = load_or_hint()?;
+    telemetry::startup(&mut cfg);
+    let engine = compose::build_engine(&cfg);
+    match action {
+        LibraryAction::List { status } => {
+            let status = parse_status(status.as_deref())?;
+            let items = engine.list_library(status)?;
+            if items.is_empty() {
+                println!("Library is empty.");
+                return Ok(());
+            }
+            for item in items {
+                let progress = if item.duration_secs > 0 {
+                    format!(" {:.0}%", item.progress_fraction() * 100.0)
+                } else {
+                    String::new()
+                };
+                let coordinate = match (item.last_season, item.last_episode) {
+                    (Some(s), Some(e)) => format!(" S{s:02}E{e:02}"),
+                    _ => String::new(),
+                };
+                println!(
+                    "[{:<9}] [{:<6}] {} ({}){}{}",
+                    status_label(item.status),
+                    item.kind.label(),
+                    item.title,
+                    item.year
+                        .map(|y| y.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    coordinate,
+                    progress,
+                );
+            }
+        }
+        LibraryAction::Plan { query } => {
+            mark_library_query(&engine, &query, ListStatus::Planning).await?;
+        }
+        LibraryAction::Watching { query } => {
+            mark_library_query(&engine, &query, ListStatus::Watching).await?;
+        }
+        LibraryAction::Watched { query } => {
+            mark_library_query(&engine, &query, ListStatus::Completed).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn mark_library_query(
+    engine: &open_media_app::Engine,
+    query: &str,
+    status: ListStatus,
+) -> anyhow::Result<()> {
+    let media = best_media(engine, query).await?;
+    let item = engine.set_library_status(&media, status).await?;
+    println!(
+        "Marked {} as {}.",
+        item.title,
+        status_label(item.status).to_ascii_lowercase()
+    );
+    Ok(())
+}
+
+async fn best_media(engine: &open_media_app::Engine, query: &str) -> anyhow::Result<Media> {
+    let results = engine.search(query, None).await?;
+    let top = results
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no results for `{query}`"))?;
+    Ok(engine.details(&top.ids).await.unwrap_or(top))
+}
+
 fn load_or_hint() -> anyhow::Result<open_media_config::Config> {
     open_media_config::load()
         .map_err(|_| anyhow::anyhow!("no config found — run `open-media init` first"))
@@ -416,6 +520,33 @@ fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {
         "series" | "tv" => Some(MediaKind::Series),
         "anime" => Some(MediaKind::Anime),
         _ => None,
+    }
+}
+
+fn parse_status(status: Option<&str>) -> anyhow::Result<Option<ListStatus>> {
+    status.map(parse_required_status).transpose()
+}
+
+fn parse_required_status(status: &str) -> anyhow::Result<ListStatus> {
+    match status.to_ascii_lowercase().as_str() {
+        "watching" => Ok(ListStatus::Watching),
+        "completed" | "watched" => Ok(ListStatus::Completed),
+        "planning" | "plan" | "plan-to-watch" => Ok(ListStatus::Planning),
+        "paused" => Ok(ListStatus::Paused),
+        "dropped" => Ok(ListStatus::Dropped),
+        "repeating" | "rewatching" => Ok(ListStatus::Repeating),
+        other => anyhow::bail!("unknown library status `{other}`"),
+    }
+}
+
+fn status_label(status: ListStatus) -> &'static str {
+    match status {
+        ListStatus::Watching => "Watching",
+        ListStatus::Completed => "Completed",
+        ListStatus::Planning => "Planning",
+        ListStatus::Paused => "Paused",
+        ListStatus::Dropped => "Dropped",
+        ListStatus::Repeating => "Repeating",
     }
 }
 
