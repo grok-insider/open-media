@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use open_media_core::error::{CoreError, CoreResult};
 use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
@@ -48,6 +49,18 @@ pub struct PlayRequest {
     /// skip intervals against the episode length; `None` disables that check.
     pub episode_runtime_minutes: Option<u32>,
     pub include_uncached: bool,
+}
+
+/// Snapshot emitted by [`Engine::search_incremental`] as provider batches arrive.
+#[derive(Debug, Clone)]
+pub struct SearchProgress {
+    /// Deduplicated results accumulated so far, in stable first-seen order.
+    pub results: Vec<Media>,
+    /// Number of providers that failed. Failures are non-fatal when at least one
+    /// metadata provider is configured.
+    pub failed_providers: usize,
+    /// `true` once every configured provider has completed or failed.
+    pub finished: bool,
 }
 
 /// The composed application engine. Cheap to clone-share via `Arc` fields.
@@ -106,6 +119,55 @@ impl Engine {
             }
         }
         Ok(dedup_by_imdb(out))
+    }
+
+    /// Search metadata providers concurrently and report deduplicated snapshots as
+    /// each provider finishes.
+    ///
+    /// This is intended for interactive UIs. Unlike [`Self::search`], result order
+    /// follows provider completion so the first visible rows can render
+    /// immediately. Once a row appears it is not moved: later duplicates sharing an
+    /// IMDB id only donate missing ids to the first-seen row.
+    pub async fn search_incremental<F>(
+        &self,
+        query: &str,
+        kind: Option<MediaKind>,
+        mut on_progress: F,
+    ) -> CoreResult<Vec<Media>>
+    where
+        F: FnMut(SearchProgress),
+    {
+        if self.metadata.is_empty() {
+            return Err(CoreError::Config("no metadata providers configured".into()));
+        }
+
+        let total = self.metadata.len();
+        let mut calls = self
+            .metadata
+            .iter()
+            .map(|provider| async move { (provider.name(), provider.search(query, kind).await) })
+            .collect::<FuturesUnordered<_>>();
+        let mut acc = SearchAccumulator::default();
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+
+        while let Some((name, result)) = calls.next().await {
+            completed += 1;
+            match result {
+                Ok(items) => acc.extend(items),
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(provider = name, error = %e, "metadata search failed");
+                }
+            }
+            on_progress(SearchProgress {
+                results: acc.results().to_vec(),
+                failed_providers: failed,
+                finished: completed == total,
+            });
+        }
+
+        Ok(acc.into_results())
     }
 
     /// Hydrate full details (and extra ids, e.g. IMDB) for a known item by trying
@@ -798,19 +860,51 @@ fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {
 /// ids the kept entry lacks. Items without an IMDB id (e.g. AniList anime) are
 /// never collapsed.
 fn dedup_by_imdb(items: Vec<Media>) -> Vec<Media> {
-    let mut out: Vec<Media> = Vec::with_capacity(items.len());
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for item in items {
-        if let Some(imdb) = item.ids.imdb.clone() {
-            if let Some(&idx) = seen.get(&imdb) {
-                out[idx].ids.merge(&item.ids);
-                continue;
-            }
-            seen.insert(imdb, out.len());
+    let mut acc = SearchAccumulator::with_capacity(items.len());
+    acc.extend(items);
+    acc.into_results()
+}
+
+/// Incremental IMDB-keyed deduplicator. First visible row wins to avoid list
+/// jumping; duplicate rows only merge ids into that row.
+#[derive(Default)]
+struct SearchAccumulator {
+    out: Vec<Media>,
+    seen: std::collections::HashMap<String, usize>,
+}
+
+impl SearchAccumulator {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            out: Vec::with_capacity(capacity),
+            seen: std::collections::HashMap::new(),
         }
-        out.push(item);
     }
-    out
+
+    fn extend(&mut self, items: impl IntoIterator<Item = Media>) {
+        for item in items {
+            self.push(item);
+        }
+    }
+
+    fn push(&mut self, item: Media) {
+        if let Some(imdb) = item.ids.imdb.clone() {
+            if let Some(&idx) = self.seen.get(&imdb) {
+                self.out[idx].ids.merge(&item.ids);
+                return;
+            }
+            self.seen.insert(imdb, self.out.len());
+        }
+        self.out.push(item);
+    }
+
+    fn results(&self) -> &[Media] {
+        &self.out
+    }
+
+    fn into_results(self) -> Vec<Media> {
+        self.out
+    }
 }
 
 fn unix_now() -> i64 {
@@ -1097,6 +1191,142 @@ mod tests {
         ];
         let out = dedup_by_imdb(items);
         assert_eq!(out.len(), 2);
+    }
+
+    struct BatchMeta {
+        name: &'static str,
+        delay_ms: u64,
+        items: Vec<Media>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl MetadataProvider for BatchMeta {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn search(&self, _query: &str, _kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            if self.fail {
+                Err(CoreError::Network(format!("{} failed", self.name)))
+            } else {
+                Ok(self.items.clone())
+            }
+        }
+        async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+            Err(CoreError::NotImplemented("batch.details"))
+        }
+        async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+            Ok(vec![])
+        }
+        async fn episodes(&self, _ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_search_emits_each_completed_provider() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "slow",
+                delay_ms: 40,
+                items: vec![media_with_ids("Slow", IdSet::default().with_imdb("tt2"))],
+                fail: false,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "fast",
+                delay_ms: 1,
+                items: vec![media_with_ids("Fast", IdSet::default().with_imdb("tt1"))],
+                fail: false,
+            }))
+            .build();
+
+        let mut snapshots = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                snapshots.push((progress.results, progress.finished));
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].0[0].title, "Fast");
+        assert!(!snapshots[0].1);
+        assert_eq!(snapshots[1].0.len(), 2);
+        assert!(snapshots[1].1);
+        assert_eq!(final_results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn incremental_search_dedups_without_reordering_visible_rows() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "slow-primary",
+                delay_ms: 40,
+                items: vec![media_with_ids(
+                    "Primary",
+                    IdSet::default().with_imdb("tt1").with_tmdb(1),
+                )],
+                fail: false,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "fast-duplicate",
+                delay_ms: 1,
+                items: vec![media_with_ids(
+                    "First Seen",
+                    IdSet::default().with_imdb("tt1"),
+                )],
+                fail: false,
+            }))
+            .build();
+
+        let mut titles = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                titles.push(
+                    progress
+                        .results
+                        .iter()
+                        .map(|m| m.title.clone())
+                        .collect::<Vec<_>>(),
+                );
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(titles, vec![vec!["First Seen"], vec!["First Seen"]]);
+        assert_eq!(final_results.len(), 1);
+        assert_eq!(final_results[0].title, "First Seen");
+        assert_eq!(final_results[0].ids.tmdb, Some(1));
+    }
+
+    #[tokio::test]
+    async fn incremental_search_reports_provider_failures_without_failing() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "bad",
+                delay_ms: 1,
+                items: vec![],
+                fail: true,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "good",
+                delay_ms: 5,
+                items: vec![media_with_ids("Good", IdSet::default().with_imdb("tt1"))],
+                fail: false,
+            }))
+            .build();
+
+        let mut failed_counts = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                failed_counts.push((progress.failed_providers, progress.finished));
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(failed_counts, vec![(1, false), (1, true)]);
+        assert_eq!(final_results.len(), 1);
     }
 
     // ---- Binge / auto-advance ------------------------------------------------
