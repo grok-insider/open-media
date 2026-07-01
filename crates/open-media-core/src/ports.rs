@@ -26,7 +26,7 @@ use crate::error::CoreResult;
 use crate::model::{Episode, IdSet, Media, MediaKind, Season};
 use crate::stream::{Playback, SourceCandidate};
 use crate::subtitle::{SubtitleQuery, SubtitleTrack};
-use crate::tracking::{Activity, ListStatus, SkipTimes, WatchProgress};
+use crate::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
 use crate::usage::UsageInfo;
 
 /// Discovers and describes media (TMDB, AniList).
@@ -290,6 +290,15 @@ pub trait HistoryStore: Send + Sync {
         episode: u32,
     ) -> CoreResult<Option<WatchProgress>>;
     fn recent(&self, limit: usize) -> CoreResult<Vec<WatchProgress>>;
+}
+
+/// Persists the user's local library/watchlist.
+///
+/// Kept separate from [`HistoryStore`] because this is a media-level list with
+/// display metadata and user status, not just per-episode resume positions.
+pub trait LibraryStore: Send + Sync {
+    fn upsert(&self, item: &LibraryItem) -> CoreResult<()>;
+    fn list(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>>;
 }
 
 /// Finds external subtitles for a media item (OpenSubtitles, …).

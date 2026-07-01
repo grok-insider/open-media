@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::{IdSet, MediaKind};
+
 /// A half-open time interval in whole seconds, `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interval {
@@ -67,6 +69,41 @@ pub struct WatchProgress {
     pub duration_secs: u32,
     /// Unix epoch seconds of last update.
     pub updated_at: i64,
+}
+
+/// A locally persisted library/watchlist row.
+///
+/// This denormalized snapshot keeps enough metadata to render a useful local
+/// library without re-querying metadata providers for every saved item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryItem {
+    /// Stable media key (see [`IdSet::primary_key`]).
+    pub media_key: String,
+    pub ids: IdSet,
+    pub title: String,
+    pub kind: MediaKind,
+    pub poster: Option<String>,
+    pub year: Option<i32>,
+    pub status: ListStatus,
+    /// Last watched season, when applicable. `None` for movies without progress.
+    pub last_season: Option<u32>,
+    /// Last watched episode, when applicable. `None` for movies without progress.
+    pub last_episode: Option<u32>,
+    pub position_secs: u32,
+    pub duration_secs: u32,
+    /// Unix epoch seconds of last update.
+    pub updated_at: i64,
+}
+
+impl LibraryItem {
+    /// Fraction watched in `[0.0, 1.0]` for the latest stored progress.
+    pub fn progress_fraction(&self) -> f32 {
+        if self.duration_secs == 0 {
+            0.0
+        } else {
+            (self.position_secs as f32 / self.duration_secs as f32).clamp(0.0, 1.0)
+        }
+    }
 }
 
 impl WatchProgress {

@@ -105,9 +105,10 @@ pub fn build_engine(cfg: &Config) -> Engine {
         builder = builder.enricher(Arc::new(AniSkipEnricher::new()));
     }
 
-    // --- History ---
+    // --- History + local library ---
     if let Ok(history) = SqliteHistory::open(SqliteHistory::default_path()) {
-        builder = builder.history(Arc::new(history));
+        let history = Arc::new(history);
+        builder = builder.history(history.clone()).library(history);
     }
 
     // --- Presence ---
