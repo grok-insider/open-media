@@ -4,6 +4,14 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.2
+
+- Added local watchlist tracking
+- Added support for mpv playlist next episode playback
+- Added opt-in mpv thumbnail preview support
+- Stream search results into the TUI for faster browsing
+- Improved the TUI library and overall browsing experience
+
 ## 0.6.1
 
 - Fixed the `--version` output to display "open-media" instead of "om".
