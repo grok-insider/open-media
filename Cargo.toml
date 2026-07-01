@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 # Minimum supported Rust version. Pinned conservatively; CI uses stable (>= this)
 # and the nix devshell's rustc is canonical.
