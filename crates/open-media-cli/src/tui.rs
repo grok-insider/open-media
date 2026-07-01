@@ -7,9 +7,12 @@
 
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::{execute, terminal};
 use open_media_app::{Engine, PlayRequest, SearchProgress};
 use open_media_config::Config;
@@ -116,7 +119,7 @@ impl Theme {
 }
 
 /// Which screen is active.
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Home,
     Library,
@@ -226,7 +229,7 @@ impl SortKey {
 }
 
 /// Rows in the filter/sort panel (the focusable controls).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum PanelControl {
     Sort,
     Quality,
@@ -433,6 +436,14 @@ enum Msg {
     Error(String),
 }
 
+#[derive(Clone, Copy)]
+struct LastMouseClick {
+    screen: Screen,
+    x: u16,
+    y: u16,
+    at: Instant,
+}
+
 struct App {
     engine: Arc<Engine>,
     screen: Screen,
@@ -495,6 +506,8 @@ struct App {
     still_tx: mpsc::UnboundedSender<StillMsg>,
 
     tx: mpsc::UnboundedSender<Msg>,
+
+    last_click: Option<LastMouseClick>,
 }
 
 impl App {
@@ -557,6 +570,7 @@ impl App {
             stills,
             still_tx,
             tx,
+            last_click: None,
         }
     }
 
@@ -790,10 +804,14 @@ async fn run_loop(
         term.draw(|f| draw(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, key.code, key.modifiers);
                 }
+                Event::Mouse(mouse) => {
+                    handle_mouse(app, mouse, term.size()?.into());
+                }
+                _ => {}
             }
         }
         while let Ok(msg) = rx.try_recv() {
@@ -973,6 +991,169 @@ fn handle_sources_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, area: Rect) {
+    if app.help {
+        match mouse.kind {
+            MouseEventKind::Down(_) => {
+                app.help = false;
+                app.last_click = None;
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {}
+            _ => {}
+        }
+        return;
+    }
+
+    let layout = top_level_layout(area);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let double = is_double_click(app, mouse.column, mouse.row);
+            handle_left_click(app, layout.body, mouse.column, mouse.row, double);
+        }
+        MouseEventKind::ScrollUp => handle_wheel(app, layout.body, mouse.column, mouse.row, -1),
+        MouseEventKind::ScrollDown => handle_wheel(app, layout.body, mouse.column, mouse.row, 1),
+        _ => {}
+    }
+}
+
+fn is_double_click(app: &mut App, x: u16, y: u16) -> bool {
+    let now = Instant::now();
+    let double = app
+        .last_click
+        .map(|last| {
+            last.screen == app.screen
+                && last.x == x
+                && last.y == y
+                && now.duration_since(last.at) <= Duration::from_millis(500)
+        })
+        .unwrap_or(false);
+    app.last_click = Some(LastMouseClick {
+        screen: app.screen,
+        x,
+        y,
+        at: now,
+    });
+    double
+}
+
+fn handle_left_click(app: &mut App, body: Rect, x: u16, y: u16, double: bool) {
+    match app.screen {
+        Screen::Home => {
+            if let Some(idx) = list_index_at(body, x, y, 4) {
+                app.home_state.select(Some(idx));
+                if double {
+                    select_home(app);
+                }
+            }
+        }
+        Screen::Library => {
+            if let Some(idx) = list_index_at(body, x, y, app.library.len()) {
+                app.library_state.select(Some(idx));
+                if double {
+                    select_library_item(app);
+                }
+            }
+        }
+        Screen::Search => {
+            let _focused = rect_contains(body, x, y);
+        }
+        Screen::Results => {
+            let layout = results_layout(body);
+            if let Some(idx) = list_index_at(layout.list, x, y, app.results.len()) {
+                app.results_state.select(Some(idx));
+                if double {
+                    select_result(app);
+                }
+            }
+        }
+        Screen::Seasons => {
+            if let Some(idx) = list_index_at(body, x, y, app.seasons.len()) {
+                app.seasons_state.select(Some(idx));
+                if double {
+                    select_season(app);
+                }
+            }
+        }
+        Screen::Episodes => {
+            let layout = episodes_layout(body);
+            if let Some(idx) = list_index_at(layout.list, x, y, app.episodes.len()) {
+                app.episodes_state.select(Some(idx));
+                if double {
+                    select_episode(app);
+                }
+            }
+        }
+        Screen::Sources => handle_sources_click(app, body, x, y, double),
+    }
+}
+
+fn handle_sources_click(app: &mut App, body: Rect, x: u16, y: u16, double: bool) {
+    let layout = sources_layout(body);
+    if let Some(idx) = list_index_at(layout.list, x, y, app.visible.len()) {
+        app.candidates_state.select(Some(idx));
+        app.focus = Focus::List;
+        if double {
+            play_selected(app);
+        }
+        return;
+    }
+
+    let Some(panel) = layout.panel else {
+        return;
+    };
+    let panel_layout = sources_side_panel_layout(panel);
+    if let Some(control) = panel_control_at(panel_layout.filters, x, y) {
+        app.focus = Focus::Panel;
+        let idx = PanelControl::ALL
+            .iter()
+            .position(|&c| c == control)
+            .unwrap_or(0);
+        app.panel_state.select(Some(idx));
+        if double {
+            activate_control(app);
+        }
+    }
+}
+
+fn handle_wheel(app: &mut App, body: Rect, x: u16, y: u16, delta: i32) {
+    match app.screen {
+        Screen::Home if rect_contains(body, x, y) => App::list_move(&mut app.home_state, 4, delta),
+        Screen::Library if rect_contains(body, x, y) => {
+            App::list_move(&mut app.library_state, app.library.len(), delta)
+        }
+        Screen::Results => {
+            let layout = results_layout(body);
+            if rect_contains(layout.list, x, y) {
+                App::list_move(&mut app.results_state, app.results.len(), delta);
+            }
+        }
+        Screen::Seasons if rect_contains(body, x, y) => {
+            App::list_move(&mut app.seasons_state, app.seasons.len(), delta)
+        }
+        Screen::Episodes => {
+            let layout = episodes_layout(body);
+            if rect_contains(layout.list, x, y) {
+                App::list_move(&mut app.episodes_state, app.episodes.len(), delta);
+            }
+        }
+        Screen::Sources => {
+            let layout = sources_layout(body);
+            if rect_contains(layout.list, x, y) {
+                App::list_move(&mut app.candidates_state, app.visible.len(), delta);
+                return;
+            }
+            if let Some(panel) = layout.panel {
+                let panel_layout = sources_side_panel_layout(panel);
+                if rect_contains(panel_layout.filters, x, y) {
+                    App::list_move(&mut app.panel_state, PanelControl::ALL.len(), delta);
+                }
+            }
+        }
+        Screen::Search => {}
+        _ => {}
     }
 }
 
@@ -1320,15 +1501,112 @@ fn ep_coordinate(ep: &Episode) -> String {
     format!("S{:02}E{:02}", ep.season, ep.number)
 }
 
-// --- Rendering ---
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TopLevelLayout {
+    header: Rect,
+    body: Rect,
+    footer: Rect,
+}
 
-fn draw(f: &mut Frame, app: &App) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitPanelLayout {
+    list: Rect,
+    panel: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourcesPanelLayout {
+    filters: Rect,
+    details: Rect,
+}
+
+fn top_level_layout(area: Rect) -> TopLevelLayout {
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(3),
     ])
-    .split(f.area());
+    .split(area);
+    TopLevelLayout {
+        header: chunks[0],
+        body: chunks[1],
+        footer: chunks[2],
+    }
+}
+
+fn results_layout(area: Rect) -> SplitPanelLayout {
+    split_optional_panel(area, RESULT_PANEL_WIDTH)
+}
+
+fn episodes_layout(area: Rect) -> SplitPanelLayout {
+    split_optional_panel(area, EPISODE_PANEL_WIDTH)
+}
+
+fn sources_layout(area: Rect) -> SplitPanelLayout {
+    split_optional_panel(area, PANEL_WIDTH)
+}
+
+fn split_optional_panel(area: Rect, panel_width: u16) -> SplitPanelLayout {
+    if area.width >= PANEL_MIN_WIDTH {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(panel_width)]).split(area);
+        SplitPanelLayout {
+            list: cols[0],
+            panel: Some(cols[1]),
+        }
+    } else {
+        SplitPanelLayout {
+            list: area,
+            panel: None,
+        }
+    }
+}
+
+fn sources_side_panel_layout(area: Rect) -> SourcesPanelLayout {
+    let rows = Layout::vertical([Constraint::Length(8), Constraint::Min(0)]).split(area);
+    SourcesPanelLayout {
+        filters: rows[0],
+        details: rows[1],
+    }
+}
+
+fn help_layout(area: Rect) -> Rect {
+    centered_rect(72, 60, area)
+}
+
+fn rect_contains(area: Rect, x: u16, y: u16) -> bool {
+    x >= area.x
+        && x < area.x.saturating_add(area.width)
+        && y >= area.y
+        && y < area.y.saturating_add(area.height)
+}
+
+fn border_inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn list_index_at(area: Rect, x: u16, y: u16, item_count: usize) -> Option<usize> {
+    let inner = border_inner(area);
+    if !rect_contains(inner, x, y) {
+        return None;
+    }
+    let idx = y.saturating_sub(inner.y) as usize;
+    (idx < item_count).then_some(idx)
+}
+
+fn panel_control_at(area: Rect, x: u16, y: u16) -> Option<PanelControl> {
+    list_index_at(area, x, y, PanelControl::ALL.len()).map(|idx| PanelControl::ALL[idx])
+}
+
+// --- Rendering ---
+
+fn draw(f: &mut Frame, app: &App) {
+    let layout = top_level_layout(f.area());
 
     // Header
     let title = format!("open-media — {}", breadcrumbs(app));
@@ -1336,30 +1614,30 @@ fn draw(f: &mut Frame, app: &App) {
         Paragraph::new(title)
             .style(Style::new().fg(app.theme.accent).bold())
             .block(Block::default().borders(Borders::ALL)),
-        chunks[0],
+        layout.header,
     );
 
     match app.screen {
-        Screen::Home => draw_home(f, app, chunks[1]),
-        Screen::Library => draw_library(f, app, chunks[1]),
-        Screen::Search => draw_search(f, app, chunks[1]),
-        Screen::Results => draw_results(f, app, chunks[1]),
-        Screen::Seasons => draw_seasons(f, app, chunks[1]),
-        Screen::Episodes => draw_episodes(f, app, chunks[1]),
-        Screen::Sources => draw_sources_screen(f, app, chunks[1]),
+        Screen::Home => draw_home(f, app, layout.body),
+        Screen::Library => draw_library(f, app, layout.body),
+        Screen::Search => draw_search(f, app, layout.body),
+        Screen::Results => draw_results(f, app, layout.body),
+        Screen::Seasons => draw_seasons(f, app, layout.body),
+        Screen::Episodes => draw_episodes(f, app, layout.body),
+        Screen::Sources => draw_sources_screen(f, app, layout.body),
     }
 
     // Footer / status
     let hints = match app.screen {
-        Screen::Home => "Enter: open · /: search · ?: help · q: quit",
-        Screen::Library => "h/l: filter · Enter: open · /: search · ?: help",
+        Screen::Home => "click: select · Enter/double-click: open · /: search · ?: help · q: quit",
+        Screen::Library => "click: select · double-click: open · h/l: filter · /: search · ?: help",
         Screen::Search => "Enter: search · ?: help · Esc: quit",
-        Screen::Results => "Enter: select · /: search · ?: help",
-        Screen::Seasons => "Enter: select · Esc: back · ?: help",
-        Screen::Episodes => "Enter: select · Esc: back · ?: help",
+        Screen::Results => "click: select · double-click/Enter: select · /: search · ?: help",
+        Screen::Seasons => "click: select · double-click/Enter: open · Esc: back · ?: help",
+        Screen::Episodes => "click: select · double-click/Enter: open · Esc: back · ?: help",
         Screen::Sources => match app.focus {
-            Focus::List => "Tab: filters · Enter: play · Esc: back · ?: help",
-            Focus::Panel => "Tab: list · h/l: change · Enter: apply · ?: help",
+            Focus::List => "click: select · double-click/Enter: play · Tab: filters · Esc: back",
+            Focus::Panel => "click: control · double-click/Enter: apply · h/l: change · Tab: list",
         },
     };
     let spin = if app.busy { "⏳ " } else { "" };
@@ -1367,7 +1645,7 @@ fn draw(f: &mut Frame, app: &App) {
         Paragraph::new(format!("{spin}{}", app.status))
             .style(Style::new().fg(app.theme.status))
             .block(Block::default().borders(Borders::ALL).title(hints)),
-        chunks[2],
+        layout.footer,
     );
 
     if app.help {
@@ -1509,14 +1787,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_results(f: &mut Frame, app: &App, area: Rect) {
-    let show_panel = area.width >= PANEL_MIN_WIDTH;
-    let (list_area, panel_area) = if show_panel {
-        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(RESULT_PANEL_WIDTH)])
-            .split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
+    let layout = results_layout(area);
     let items: Vec<ListItem> = app
         .results
         .iter()
@@ -1533,13 +1804,13 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
     render_list(
         f,
         &app.theme,
-        list_area,
+        layout.list,
         "Results",
         items,
         &app.results_state,
         true,
     );
-    if let Some(panel) = panel_area {
+    if let Some(panel) = layout.panel {
         draw_media_panel(f, app, panel);
     }
 }
@@ -1642,15 +1913,7 @@ fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
 fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
     // Split off a passive detail panel when there's room; otherwise the list
     // takes the full width (narrow terminals aren't squeezed).
-    let show_panel = area.width >= PANEL_MIN_WIDTH;
-    let (list_area, panel_area) = if show_panel {
-        let cols =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(EPISODE_PANEL_WIDTH)])
-                .split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
+    let layout = episodes_layout(area);
 
     let items: Vec<ListItem> = app
         .episodes
@@ -1660,14 +1923,14 @@ fn draw_episodes(f: &mut Frame, app: &App, area: Rect) {
     render_list(
         f,
         &app.theme,
-        list_area,
+        layout.list,
         "Episodes",
         items,
         &app.episodes_state,
         true,
     );
 
-    if let Some(panel) = panel_area {
+    if let Some(panel) = layout.panel {
         draw_episode_panel(f, app, panel);
     }
 }
@@ -1809,17 +2072,11 @@ fn draw_image(f: &mut Frame, app: &App, area: Rect, url: Option<&str>) {
 
 fn draw_sources_screen(f: &mut Frame, app: &App, area: Rect) {
     // Split off the side panel when there's room; otherwise list takes it all.
-    let show_panel = area.width >= PANEL_MIN_WIDTH;
-    let (list_area, panel_area) = if show_panel {
-        let cols =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(PANEL_WIDTH)]).split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
+    let layout = sources_layout(area);
+    let show_panel = layout.panel.is_some();
 
-    draw_sources_list(f, app, list_area, show_panel);
-    if let Some(panel) = panel_area {
+    draw_sources_list(f, app, layout.list, show_panel);
+    if let Some(panel) = layout.panel {
         draw_sources_panel(f, app, panel);
     }
 }
@@ -1930,7 +2187,7 @@ fn status_label(status: ListStatus) -> &'static str {
 }
 
 fn draw_help(f: &mut Frame, app: &App) {
-    let area = centered_rect(72, 60, f.area());
+    let area = help_layout(f.area());
     f.render_widget(ratatui::widgets::Clear, area);
     let text = help_lines(app);
     f.render_widget(
@@ -1999,9 +2256,9 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn draw_sources_panel(f: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::vertical([Constraint::Length(8), Constraint::Min(0)]).split(area);
-    draw_filter_box(f, app, rows[0]);
-    draw_details_box(f, app, rows[1]);
+    let layout = sources_side_panel_layout(area);
+    draw_filter_box(f, app, layout.filters);
+    draw_details_box(f, app, layout.details);
 }
 
 fn draw_filter_box(f: &mut Frame, app: &App, area: Rect) {
@@ -2146,13 +2403,17 @@ fn render_list(
 fn setup_terminal() -> anyhow::Result<Term> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen)?;
+    execute!(stdout, terminal::EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal(term: &mut Term) -> anyhow::Result<()> {
     terminal::disable_raw_mode()?;
-    execute!(term.backend_mut(), terminal::LeaveAlternateScreen)?;
+    execute!(
+        term.backend_mut(),
+        DisableMouseCapture,
+        terminal::LeaveAlternateScreen
+    )?;
     term.show_cursor()?;
     Ok(())
 }
@@ -2225,6 +2486,60 @@ mod tests {
             provider: None,
             cached_only: false,
         }
+    }
+
+    #[test]
+    fn list_click_maps_first_interior_row_to_index_zero() {
+        let area = Rect::new(10, 5, 20, 6);
+        assert_eq!(list_index_at(area, 11, 6, 3), Some(0));
+    }
+
+    #[test]
+    fn list_border_clicks_return_none() {
+        let area = Rect::new(10, 5, 20, 6);
+        assert_eq!(list_index_at(area, 10, 6, 3), None);
+        assert_eq!(list_index_at(area, 11, 5, 3), None);
+    }
+
+    #[test]
+    fn list_clicks_below_item_count_return_none() {
+        let area = Rect::new(10, 5, 20, 6);
+        assert_eq!(list_index_at(area, 11, 8, 2), None);
+    }
+
+    #[test]
+    fn results_layout_shows_and_hides_detail_panel_by_width() {
+        let wide = results_layout(Rect::new(0, 0, PANEL_MIN_WIDTH, 20));
+        assert_eq!(wide.list.width, PANEL_MIN_WIDTH - RESULT_PANEL_WIDTH);
+        assert_eq!(wide.panel.map(|r| r.width), Some(RESULT_PANEL_WIDTH));
+
+        let narrow = results_layout(Rect::new(0, 0, PANEL_MIN_WIDTH - 1, 20));
+        assert_eq!(narrow.list.width, PANEL_MIN_WIDTH - 1);
+        assert_eq!(narrow.panel, None);
+    }
+
+    #[test]
+    fn sources_layout_shows_and_hides_side_panel_by_width() {
+        let wide = sources_layout(Rect::new(0, 0, PANEL_MIN_WIDTH, 20));
+        assert_eq!(wide.list.width, PANEL_MIN_WIDTH - PANEL_WIDTH);
+        assert_eq!(wide.panel.map(|r| r.width), Some(PANEL_WIDTH));
+
+        let narrow = sources_layout(Rect::new(0, 0, PANEL_MIN_WIDTH - 1, 20));
+        assert_eq!(narrow.list.width, PANEL_MIN_WIDTH - 1);
+        assert_eq!(narrow.panel, None);
+    }
+
+    #[test]
+    fn filter_box_rows_map_to_panel_controls() {
+        let panel = Rect::new(50, 3, PANEL_WIDTH, 20);
+        let filters = sources_side_panel_layout(panel).filters;
+        assert_eq!(panel_control_at(filters, 51, 4), Some(PanelControl::Sort));
+        assert_eq!(
+            panel_control_at(filters, 51, 6),
+            Some(PanelControl::Language)
+        );
+        assert_eq!(panel_control_at(filters, 51, 9), Some(PanelControl::Clear));
+        assert_eq!(panel_control_at(filters, 51, 3), None);
     }
 
     #[test]
