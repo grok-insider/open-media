@@ -4,6 +4,16 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2](https://github.com/grok-insider/open-media/compare/v0.6.1...v0.6.2) - 2026-07-01
+
+### Added
+
+- improve tui library and browsing experience
+- add local watchlist tracking
+- support mpv playlist next episode playback
+- add opt-in mpv thumbnail preview support
+- stream search results into the tui
+
 ## 0.6.1
 
 - Fixed the `--version` output to display "open-media" instead of "om".
