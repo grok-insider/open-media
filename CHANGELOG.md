@@ -4,6 +4,12 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3](https://github.com/grok-insider/open-media/compare/v0.6.2...v0.6.3) - 2026-07-01
+
+### Added
+
+- *(cli)* add mouse support to tui
+
 ## 0.6.2
 
 - Added local watchlist tracking
