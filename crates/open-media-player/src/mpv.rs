@@ -25,13 +25,15 @@ static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct MpvPlayer {
     command: String,
     args: Vec<String>,
+    thumbnail_previews: bool,
 }
 
 impl MpvPlayer {
-    pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
+    pub fn new(command: impl Into<String>, args: Vec<String>, thumbnail_previews: bool) -> Self {
         Self {
             command: command.into(),
             args,
+            thumbnail_previews,
         }
     }
 }
@@ -60,23 +62,9 @@ impl Player for MpvPlayer {
 
         let socket = unique_socket_path();
         let mut cmd = tokio::process::Command::new(&self.command);
-        cmd.arg("--no-terminal")
-            .arg("--really-quiet")
-            .arg("--force-window=yes")
-            .arg(format!("--input-ipc-server={}", socket.display()));
-        if let Some(title) = &opts.title {
-            cmd.arg(format!("--force-media-title={title}"));
-        }
-        if let Some(secs) = opts.start_at_secs {
-            cmd.arg(format!("--start=+{secs}"));
-        }
-        for a in &self.args {
+        for a in self.launch_args(playback, opts, &socket) {
             cmd.arg(a);
         }
-        for a in &opts.extra_args {
-            cmd.arg(a);
-        }
-        cmd.arg(&playback.url);
 
         tracing::info!(url = %playback.url, socket = %socket.display(), "launching mpv");
         let child = cmd
@@ -92,6 +80,33 @@ impl Player for MpvPlayer {
             socket,
             control,
         }))
+    }
+}
+
+impl MpvPlayer {
+    fn launch_args(&self, playback: &Playback, opts: &PlayOptions, socket: &Path) -> Vec<String> {
+        let mut args = vec![
+            "--no-terminal".to_string(),
+            "--really-quiet".to_string(),
+            "--force-window=yes".to_string(),
+            format!("--input-ipc-server={}", socket.display()),
+        ];
+        if let Some(title) = &opts.title {
+            args.push(format!("--force-media-title={title}"));
+        }
+        if let Some(secs) = opts.start_at_secs {
+            args.push(format!("--start=+{secs}"));
+        }
+        if self.thumbnail_previews {
+            // thumbfast disables remote/network thumbnails by default. This is
+            // harmless when the user has not installed thumbfast; mpv just stores
+            // the script option for scripts that choose to read it.
+            args.push("--script-opts=thumbfast-network=yes".to_string());
+        }
+        args.extend(self.args.iter().cloned());
+        args.extend(opts.extra_args.iter().cloned());
+        args.push(playback.url.clone());
+        args
     }
 }
 
@@ -281,5 +296,65 @@ async fn wait_for_socket(path: &Path, timeout: Duration) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_media_core::stream::PlaybackOrigin;
+
+    fn playback() -> Playback {
+        Playback {
+            url: "https://example.invalid/video.mkv".into(),
+            origin: PlaybackOrigin::Debrid,
+            file_name: "video.mkv".into(),
+        }
+    }
+
+    #[test]
+    fn thumbnail_previews_add_thumbfast_network_before_user_args() {
+        let player = MpvPlayer::new("mpv", vec!["--fullscreen".into()], true);
+        let opts = PlayOptions {
+            extra_args: vec!["--sid=no".into()],
+            ..PlayOptions::default()
+        };
+
+        let args = player.launch_args(&playback(), &opts, Path::new("/tmp/open-media-mpv.sock"));
+
+        let thumbfast = args
+            .iter()
+            .position(|arg| arg == "--script-opts=thumbfast-network=yes")
+            .expect("thumbnail opt is present");
+        let player_arg = args
+            .iter()
+            .position(|arg| arg == "--fullscreen")
+            .expect("player args are preserved");
+        let extra_arg = args
+            .iter()
+            .position(|arg| arg == "--sid=no")
+            .expect("extra args are preserved");
+
+        assert!(thumbfast < player_arg);
+        assert!(player_arg < extra_arg);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://example.invalid/video.mkv")
+        );
+    }
+
+    #[test]
+    fn thumbnail_previews_disabled_keeps_launch_args_unchanged() {
+        let player = MpvPlayer::new("mpv", vec!["--fullscreen".into()], false);
+        let args = player.launch_args(
+            &playback(),
+            &PlayOptions::default(),
+            Path::new("/tmp/open-media-mpv.sock"),
+        );
+
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--script-opts=thumbfast-network=yes"));
+        assert!(args.iter().any(|arg| arg == "--fullscreen"));
     }
 }
