@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use open_media_core::error::{CoreError, CoreResult};
-use open_media_core::ports::{Chapter, PlayOptions, PlaySession, PlaybackControl, Player};
+use open_media_core::ports::{
+    Chapter, PlayOptions, PlaySession, PlaybackControl, Player, PlaylistControl, PlaylistItem,
+};
 use open_media_core::stream::Playback;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -133,6 +135,10 @@ impl PlaySession for MpvSession {
     fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
         Some(self.control.clone())
     }
+
+    fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+        Some(self.control.clone())
+    }
 }
 
 impl Drop for MpvSession {
@@ -250,6 +256,28 @@ impl PlaybackControl for MpvControl {
     }
 }
 
+#[async_trait]
+impl PlaylistControl for MpvControl {
+    async fn append(&self, item: &PlaylistItem) -> CoreResult<()> {
+        self.request(append_command(item)).await?;
+        Ok(())
+    }
+
+    async fn active_index(&self) -> CoreResult<Option<usize>> {
+        let data = self
+            .request(json!(["get_property", "playlist-pos"]))
+            .await?;
+        Ok(data.as_u64().map(|v| v as usize))
+    }
+}
+
+fn append_command(item: &PlaylistItem) -> Value {
+    match &item.title {
+        Some(title) => json!(["loadfile", item.url, "append-play", { "force-media-title": title }]),
+        None => json!(["loadfile", item.url, "append-play"]),
+    }
+}
+
 /// A process/instance-unique IPC endpoint name shared by both platforms.
 fn unique_token() -> String {
     let id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -356,5 +384,18 @@ mod tests {
             .iter()
             .any(|arg| arg == "--script-opts=thumbfast-network=yes"));
         assert!(args.iter().any(|arg| arg == "--fullscreen"));
+    }
+
+    #[test]
+    fn append_command_includes_title_metadata_when_present() {
+        let item = PlaylistItem {
+            url: "https://example.invalid/e2.mkv".into(),
+            title: Some("Show S01E02 - Two".into()),
+        };
+
+        assert_eq!(
+            append_command(&item),
+            json!(["loadfile", "https://example.invalid/e2.mkv", "append-play", { "force-media-title": "Show S01E02 - Two" }])
+        );
     }
 }

@@ -170,6 +170,13 @@ pub struct PlayOptions {
     pub extra_args: Vec<String>,
 }
 
+/// Metadata for an item appended to a live player playlist.
+#[derive(Debug, Clone)]
+pub struct PlaylistItem {
+    pub url: String,
+    pub title: Option<String>,
+}
+
 /// A chapter marker (used to expose AniSkip OP/ED segments in the player UI).
 #[derive(Debug, Clone)]
 pub struct Chapter {
@@ -205,6 +212,13 @@ pub trait PlaySession: Send {
     /// A control handle, if the player supports IPC (mpv). `None` for players
     /// that can only be launched (vlc), which disables resume/auto-skip for them.
     fn control(&self) -> Option<Arc<dyn PlaybackControl>>;
+
+    /// Optional live-playlist support. Players that expose this can keep one
+    /// process alive and append the next episode so the player's own Next button
+    /// has a target; launch-only players keep returning `None`.
+    fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+        None
+    }
 }
 
 /// Live control of a playing session over the player's IPC channel (mpv).
@@ -219,6 +233,16 @@ pub trait PlaybackControl: Send + Sync {
     async fn seek_absolute(&self, secs: u32) -> CoreResult<()>;
     async fn set_chapters(&self, chapters: &[Chapter]) -> CoreResult<()>;
     async fn quit(&self) -> CoreResult<()>;
+}
+
+/// Optional live playlist operations for players that support them (mpv IPC).
+#[async_trait]
+pub trait PlaylistControl: Send + Sync {
+    /// Append an item without interrupting current playback.
+    async fn append(&self, item: &PlaylistItem) -> CoreResult<()>;
+
+    /// Zero-based active playlist index, when the player exposes it.
+    async fn active_index(&self) -> CoreResult<Option<usize>>;
 }
 
 /// Syncs watch state to a remote list service (AniList, MyAnimeList).
