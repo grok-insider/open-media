@@ -147,6 +147,7 @@ async fn full_pipeline_search_details_sources_resolve() {
         season: None,
         episode: None,
         episode_title: None,
+        episode_still: None,
         episode_runtime_minutes: None,
         include_uncached: true,
     };
