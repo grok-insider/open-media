@@ -19,6 +19,7 @@ async fn real_mpv_launch_ipc_and_exit() {
     let player = MpvPlayer::new(
         "mpv",
         vec!["--vo=null".into(), "--ao=null".into(), "--no-config".into()],
+        false,
     );
     if !player.is_available() {
         eprintln!("mpv not on PATH — skipping");

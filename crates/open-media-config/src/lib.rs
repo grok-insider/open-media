@@ -121,6 +121,11 @@ pub struct Player {
     /// Player binary: `"mpv"` (default, enables IPC features) or `"vlc"`.
     #[serde(default = "default_player")]
     pub command: String,
+    /// Enable best-effort mpv seekbar thumbnail script compatibility. Requires
+    /// user-installed mpv scripts such as thumbfast plus uosc or another
+    /// thumbfast-compatible OSC; open-media does not bundle scripts.
+    #[serde(default)]
+    pub thumbnail_previews: bool,
     /// Extra args appended to the player invocation.
     #[serde(default = "default_player_args")]
     pub args: Vec<String>,
@@ -130,6 +135,7 @@ impl Default for Player {
     fn default() -> Self {
         Self {
             command: default_player(),
+            thumbnail_previews: false,
             args: default_player_args(),
         }
     }
@@ -509,9 +515,28 @@ tmdb_api_key = "abc"
         assert!(cfg.is_usable());
         assert!(!cfg.has_debrid());
         assert_eq!(cfg.player.command, "mpv");
+        assert!(!cfg.player.thumbnail_previews);
         assert!(cfg.providers.nyaa_direct);
         assert!(cfg.providers.cinemeta);
         assert!(cfg.behavior.skip_intro_outro);
+    }
+
+    #[test]
+    fn player_thumbnail_previews_default_and_roundtrip() {
+        // Off by default on an empty document, matching the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.player.thumbnail_previews);
+        assert_eq!(
+            cfg.player.thumbnail_previews,
+            Player::default().thumbnail_previews
+        );
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.player.thumbnail_previews = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.player.thumbnail_previews);
     }
 
     #[test]

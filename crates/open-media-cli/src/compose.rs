@@ -82,6 +82,7 @@ pub fn build_engine(cfg: &Config) -> Engine {
         builder = builder.player(Arc::new(MpvPlayer::new(
             cfg.player.command.clone(),
             cfg.player.args.clone(),
+            cfg.player.thumbnail_previews,
         )));
     }
 
