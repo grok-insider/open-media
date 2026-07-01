@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use open_media_app::{Engine, PlayRequest};
+use open_media_app::{Engine, PlayRequest, SearchProgress};
 use open_media_config::Config;
 use open_media_core::model::{Episode, Media, MediaKind, Season};
 use open_media_core::stream::{CacheState, Quality, SourceCandidate};
+use open_media_core::tracking::{LibraryItem, ListStatus};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::Image;
@@ -38,6 +39,11 @@ const STILL_ROWS: u16 = 11;
 /// panel interior (border-inset); `Resize::Fit` keeps the aspect ratio within
 /// this, so landscape stills won't use the full height.
 const STILL_TARGET_CELLS: (u16, u16) = (EPISODE_PANEL_WIDTH - 2, STILL_ROWS);
+/// Width of the passive Results detail panel.
+const RESULT_PANEL_WIDTH: u16 = 42;
+/// Rows reserved for posters in media detail panels.
+const POSTER_ROWS: u16 = 16;
+const POSTER_TARGET_CELLS: (u16, u16) = (RESULT_PANEL_WIDTH - 2, POSTER_ROWS);
 
 /// Semantic colors the TUI draws with. Replaces scattered `Color::*` literals
 /// so the palette can be swapped wholesale by `ui.theme`. Two presets exist:
@@ -112,6 +118,8 @@ impl Theme {
 /// Which screen is active.
 #[derive(PartialEq)]
 enum Screen {
+    Home,
+    Library,
     Search,
     Results,
     Seasons,
@@ -133,6 +141,50 @@ enum SortKey {
     Seeders,
     Quality,
     Size,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LibraryFilter {
+    All,
+    Watching,
+    Planned,
+    Completed,
+    Dropped,
+}
+
+impl LibraryFilter {
+    const ALL: [LibraryFilter; 5] = [
+        LibraryFilter::All,
+        LibraryFilter::Watching,
+        LibraryFilter::Planned,
+        LibraryFilter::Completed,
+        LibraryFilter::Dropped,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            LibraryFilter::All => "All",
+            LibraryFilter::Watching => "Watching",
+            LibraryFilter::Planned => "Planned",
+            LibraryFilter::Completed => "Completed",
+            LibraryFilter::Dropped => "Dropped",
+        }
+    }
+
+    fn status(self) -> Option<ListStatus> {
+        match self {
+            LibraryFilter::All => None,
+            LibraryFilter::Watching => Some(ListStatus::Watching),
+            LibraryFilter::Planned => Some(ListStatus::Planning),
+            LibraryFilter::Completed => Some(ListStatus::Completed),
+            LibraryFilter::Dropped => Some(ListStatus::Dropped),
+        }
+    }
+
+    fn cycle(self, dir: i32) -> Self {
+        let pos = Self::ALL.iter().position(|&f| f == self).unwrap_or(0) as i32;
+        Self::ALL[(pos + dir).rem_euclid(Self::ALL.len() as i32) as usize]
+    }
 }
 
 impl SortKey {
@@ -360,7 +412,14 @@ fn cycle_quality(current: Option<Quality>, dir: i32) -> Option<Quality> {
 
 /// Async results posted back to the UI loop.
 enum Msg {
-    Results(Vec<Media>),
+    SearchProgress {
+        search_id: u64,
+        progress: SearchProgress,
+    },
+    SearchError {
+        search_id: u64,
+        error: String,
+    },
     /// Multi-season series → show the season picker.
     Seasons(Media, Vec<Season>),
     /// Episodes for a resolved season (real titles when the provider has them).
@@ -378,9 +437,18 @@ struct App {
     engine: Arc<Engine>,
     screen: Screen,
     query: String,
+    search_id: u64,
     status: String,
     busy: bool,
     should_quit: bool,
+    help: bool,
+
+    home_state: ListState,
+
+    library: Vec<LibraryItem>,
+    all_library: Vec<LibraryItem>,
+    library_state: ListState,
+    library_filter: LibraryFilter,
 
     results: Vec<Media>,
     results_state: ListState,
@@ -399,6 +467,7 @@ struct App {
     sel_season: Option<u32>,
     sel_episode: Option<u32>,
     sel_episode_title: Option<String>,
+    sel_episode_still: Option<String>,
     /// Selected episode's runtime (minutes), forwarded to AniSkip for interval
     /// validation. `None` for movies/unknown.
     sel_episode_runtime: Option<u32>,
@@ -443,11 +512,26 @@ impl App {
         panel_state.select(Some(0));
         Self {
             engine,
-            screen: Screen::Search,
+            screen: if initial_query.is_some() {
+                Screen::Search
+            } else {
+                Screen::Home
+            },
             query: initial_query.unwrap_or_default(),
-            status: "Type a title and press Enter".into(),
+            search_id: 0,
+            status: "Browse your library or press / to search".into(),
             busy: false,
             should_quit: false,
+            help: false,
+            home_state: {
+                let mut s = ListState::default();
+                s.select(Some(0));
+                s
+            },
+            library: Vec::new(),
+            all_library: Vec::new(),
+            library_state: ListState::default(),
+            library_filter: LibraryFilter::All,
             results: Vec::new(),
             results_state: ListState::default(),
             media: None,
@@ -458,6 +542,7 @@ impl App {
             sel_season: None,
             sel_episode: None,
             sel_episode_title: None,
+            sel_episode_still: None,
             sel_episode_runtime: None,
             candidates: Vec::new(),
             candidates_state: ListState::default(),
@@ -520,31 +605,80 @@ impl App {
             .or(self.media.as_ref().and_then(|m| m.poster.as_deref()))
     }
 
+    fn current_result_poster_url(&self) -> Option<&str> {
+        let media = self.results.get(self.results_state.selected()?)?;
+        media.poster.as_deref()
+    }
+
     /// Ask the still loader to fetch the image for the selected episode. Cheap
     /// to call every frame: it only acts on the Episodes screen when images are
     /// supported, and the loader ignores URLs already loading/ready/failed.
-    fn request_visible_still(&mut self) {
-        if self.screen != Screen::Episodes || !self.stills.enabled() {
+    fn request_visible_image(&mut self) {
+        if !self.stills.enabled() {
             return;
         }
-        let Some(url) = self.current_still_url().map(str::to_string) else {
+        let target = match self.screen {
+            Screen::Episodes => STILL_TARGET_CELLS,
+            Screen::Results => POSTER_TARGET_CELLS,
+            _ => return,
+        };
+        let url = match self.screen {
+            Screen::Episodes => self.current_still_url(),
+            Screen::Results => self.current_result_poster_url(),
+            _ => None,
+        };
+        let Some(url) = url.map(str::to_string) else {
             return;
         };
-        self.stills
-            .request(&url, STILL_TARGET_CELLS, self.still_tx.clone());
+        self.stills.request(&url, target, self.still_tx.clone());
+    }
+
+    fn load_library(&mut self) {
+        if let Ok(items) = self.engine.list_library(None) {
+            self.all_library = items;
+        }
+        match self.engine.list_library(self.library_filter.status()) {
+            Ok(items) => {
+                self.library = items;
+                self.library_state
+                    .select((!self.library.is_empty()).then_some(0));
+                self.status = if self.library.is_empty() {
+                    format!(
+                        "No {} items yet",
+                        self.library_filter.label().to_ascii_lowercase()
+                    )
+                } else {
+                    format!(
+                        "{} {} items",
+                        self.library.len(),
+                        self.library_filter.label()
+                    )
+                };
+            }
+            Err(e) => self.status = format!("Library unavailable: {e}"),
+        }
     }
 
     fn handle_msg(&mut self, msg: Msg) {
-        self.busy = false;
         match msg {
-            Msg::Results(r) => {
-                self.results = r;
-                self.results_state
-                    .select((!self.results.is_empty()).then_some(0));
-                self.screen = Screen::Results;
-                self.status = format!("{} results", self.results.len());
+            Msg::SearchProgress {
+                search_id,
+                progress,
+            } => {
+                if search_id != self.search_id {
+                    return;
+                }
+                self.apply_search_progress(progress);
+            }
+            Msg::SearchError { search_id, error } => {
+                if search_id != self.search_id {
+                    return;
+                }
+                self.busy = false;
+                self.status = format!("Error: {error}");
             }
             Msg::Seasons(media, seasons) => {
+                self.busy = false;
                 self.seasons = seasons;
                 self.seasons_state
                     .select((!self.seasons.is_empty()).then_some(0));
@@ -553,6 +687,7 @@ impl App {
                 self.status = "Pick a season".into();
             }
             Msg::Episodes(media, season, episodes) => {
+                self.busy = false;
                 self.episodes = episodes;
                 self.episodes_state
                     .select((!self.episodes.is_empty()).then_some(0));
@@ -562,6 +697,7 @@ impl App {
                 self.status = "Pick an episode".into();
             }
             Msg::Sources { media, candidates } => {
+                self.busy = false;
                 self.candidates = candidates;
                 self.languages = distinct_languages(&self.candidates);
                 self.providers = distinct_providers(&self.candidates);
@@ -573,13 +709,34 @@ impl App {
                 self.screen = Screen::Sources;
                 self.recompute_visible();
             }
-            Msg::PlayEnded => self.status = "Playback ended".into(),
+            Msg::PlayEnded => {
+                self.busy = false;
+                self.status = "Playback ended".into();
+            }
             Msg::Status(s) => {
                 self.busy = true;
                 self.status = s;
             }
-            Msg::Error(e) => self.status = format!("Error: {e}"),
+            Msg::Error(e) => {
+                self.busy = false;
+                self.status = format!("Error: {e}");
+            }
         }
+    }
+
+    fn apply_search_progress(&mut self, progress: SearchProgress) {
+        self.results = progress.results;
+        self.results_state
+            .select((!self.results.is_empty()).then_some(0));
+        if !self.results.is_empty() || progress.finished {
+            self.screen = Screen::Results;
+        }
+        self.busy = !progress.finished;
+        self.status = search_status(
+            self.results.len(),
+            progress.failed_providers,
+            progress.finished,
+        );
     }
 
     fn list_move(state: &mut ListState, len: usize, delta: i32) {
@@ -605,9 +762,11 @@ pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> 
     let stills = Stills::detect();
 
     let mut app = App::new(engine, cfg, tx, stills, still_tx, initial_query);
+    app.load_library();
 
-    // A pre-filled query (`om "frieren"`) searches immediately; start_search
-    // no-ops on an empty query, so bare `om` still lands on an idle search box.
+    // A pre-filled query (`open-media "frieren"`) searches immediately;
+    // start_search no-ops on an empty query, so bare `open-media` still lands on
+    // an idle search box.
     start_search(&mut app);
 
     let result = run_loop(&mut term, &mut app, &mut rx, &mut still_rx).await;
@@ -645,7 +804,7 @@ async fn run_loop(
         while let Ok(msg) = still_rx.try_recv() {
             app.stills.apply(msg);
         }
-        app.request_visible_still();
+        app.request_visible_image();
 
         if app.should_quit {
             return Ok(());
@@ -659,7 +818,57 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    if app.help {
+        match code {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Enter => app.help = false,
+            _ => {}
+        }
+        return;
+    }
+
+    if code == KeyCode::Char('?') {
+        app.help = true;
+        return;
+    }
+
+    if code == KeyCode::Char('/') && app.screen != Screen::Search {
+        app.screen = Screen::Search;
+        app.status = "Type a title and press Enter".into();
+        return;
+    }
+
     match app.screen {
+        Screen::Home => match code {
+            KeyCode::Char('j') | KeyCode::Down => App::list_move(&mut app.home_state, 4, 1),
+            KeyCode::Char('k') | KeyCode::Up => App::list_move(&mut app.home_state, 4, -1),
+            KeyCode::Enter => select_home(app),
+            KeyCode::Char('l') => {
+                app.screen = Screen::Library;
+                app.load_library();
+            }
+            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+            _ => {}
+        },
+        Screen::Library => match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                App::list_move(&mut app.library_state, app.library.len(), 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                App::list_move(&mut app.library_state, app.library.len(), -1)
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                app.library_filter = app.library_filter.cycle(-1);
+                app.load_library();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                app.library_filter = app.library_filter.cycle(1);
+                app.load_library();
+            }
+            KeyCode::Enter => select_library_item(app),
+            KeyCode::Esc => app.screen = Screen::Home,
+            KeyCode::Char('q') => app.should_quit = true,
+            _ => {}
+        },
         Screen::Search => match code {
             KeyCode::Enter => start_search(app),
             KeyCode::Char(c) => app.query.push(c),
@@ -677,7 +886,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 App::list_move(&mut app.results_state, app.results.len(), -1)
             }
             KeyCode::Enter => select_result(app),
-            KeyCode::Char('/') | KeyCode::Esc => app.screen = Screen::Search,
+            KeyCode::Esc => app.screen = Screen::Search,
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -804,21 +1013,127 @@ fn activate_control(app: &mut App) {
     }
 }
 
+fn select_home(app: &mut App) {
+    match app.home_state.selected().unwrap_or(0) {
+        0 => {
+            app.library_filter = LibraryFilter::Watching;
+            app.screen = Screen::Library;
+            app.load_library();
+        }
+        1 => {
+            app.library_filter = LibraryFilter::Planned;
+            app.screen = Screen::Library;
+            app.load_library();
+        }
+        2 => {
+            app.library_filter = LibraryFilter::Completed;
+            app.screen = Screen::Library;
+            app.load_library();
+        }
+        _ => {
+            app.screen = Screen::Search;
+            app.status = "Type a title and press Enter".into();
+        }
+    }
+}
+
+fn select_library_item(app: &mut App) {
+    let Some(idx) = app.library_state.selected() else {
+        return;
+    };
+    let Some(item) = app.library.get(idx).cloned() else {
+        return;
+    };
+    let media = media_from_library_item(&item);
+    app.results = vec![media.clone()];
+    app.results_state.select(Some(0));
+    app.query = item.title.clone();
+    if media.kind.is_episodic() && item.last_episode.is_some() {
+        app.media = Some(media.clone());
+        app.sel_season = item.last_season.or(Some(1));
+        app.sel_episode = item.last_episode;
+        app.sel_episode_title = None;
+        app.sel_episode_still = None;
+        app.sel_episode_runtime = None;
+        app.busy = true;
+        app.status = "Finding saved episode sources…".into();
+        let engine = app.engine.clone();
+        let tx = app.tx.clone();
+        let season = app.sel_season;
+        let episode = app.sel_episode;
+        tokio::spawn(async move {
+            let media = engine.details(&media.ids).await.unwrap_or(media);
+            send_sources(&engine, &tx, media, season, episode, None, None, None).await;
+        });
+        return;
+    }
+    select_result(app);
+}
+
+fn media_from_library_item(item: &LibraryItem) -> Media {
+    Media {
+        kind: item.kind,
+        ids: item.ids.clone(),
+        title: item.title.clone(),
+        original_title: None,
+        year: item.year,
+        score: None,
+        overview: None,
+        poster: item.poster.clone(),
+        genres: Vec::new(),
+        status: None,
+        episode_count: None,
+        season_count: None,
+    }
+}
+
 fn start_search(app: &mut App) {
     let query = app.query.trim().to_string();
     if query.is_empty() {
         return;
     }
+    app.search_id = app.search_id.wrapping_add(1);
+    let search_id = app.search_id;
     app.busy = true;
+    app.results.clear();
+    app.results_state.select(None);
+    app.screen = Screen::Search;
     app.status = format!("Searching “{query}”…");
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
-        let _ = match engine.search(&query, None).await {
-            Ok(r) => tx.send(Msg::Results(r)),
-            Err(e) => tx.send(Msg::Error(e.to_string())),
+        let result = engine
+            .search_incremental(&query, None, |progress| {
+                let _ = tx.send(Msg::SearchProgress {
+                    search_id,
+                    progress,
+                });
+            })
+            .await;
+        if let Err(e) = result {
+            let _ = tx.send(Msg::SearchError {
+                search_id,
+                error: e.to_string(),
+            });
         };
     });
+}
+
+fn search_status(results: usize, failed_providers: usize, finished: bool) -> String {
+    let mut status = if finished {
+        format!("{results} results")
+    } else {
+        format!("{results} results · still searching...")
+    };
+    if failed_providers > 0 {
+        let noun = if failed_providers == 1 {
+            "provider"
+        } else {
+            "providers"
+        };
+        status.push_str(&format!(" · {failed_providers} {noun} failed"));
+    }
+    status
 }
 
 fn select_result(app: &mut App) {
@@ -835,6 +1150,7 @@ fn select_result(app: &mut App) {
     app.sel_season = None;
     app.sel_episode = None;
     app.sel_episode_title = None;
+    app.sel_episode_still = None;
     app.sel_episode_runtime = None;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
@@ -843,7 +1159,7 @@ fn select_result(app: &mut App) {
         let media = engine.details(&media.ids).await.unwrap_or(media);
         if media.kind == MediaKind::Movie {
             // Movies have no coordinates or episode title.
-            send_sources(&engine, &tx, media, None, None, None, None).await;
+            send_sources(&engine, &tx, media, None, None, None, None, None).await;
             return;
         }
         // Episodic: list seasons. >1 → picker; otherwise jump straight to the
@@ -918,19 +1234,21 @@ fn select_episode(app: &mut App) {
     app.sel_season = Some(ep.season);
     app.sel_episode = Some(ep.number);
     app.sel_episode_title = ep.title.clone();
+    app.sel_episode_still = ep.still.clone();
     app.sel_episode_runtime = ep.runtime_minutes;
     app.busy = true;
     app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
     let tx = app.tx.clone();
-    let (season, episode, title, runtime) = (
+    let (season, episode, title, still, runtime) = (
         Some(ep.season),
         Some(ep.number),
         ep.title,
+        ep.still,
         ep.runtime_minutes,
     );
     tokio::spawn(async move {
-        send_sources(&engine, &tx, media, season, episode, title, runtime).await;
+        send_sources(&engine, &tx, media, season, episode, title, still, runtime).await;
     });
 }
 
@@ -942,6 +1260,7 @@ async fn send_sources(
     season: Option<u32>,
     episode: Option<u32>,
     episode_title: Option<String>,
+    episode_still: Option<String>,
     episode_runtime_minutes: Option<u32>,
 ) {
     let req = PlayRequest {
@@ -949,6 +1268,7 @@ async fn send_sources(
         season,
         episode,
         episode_title,
+        episode_still,
         episode_runtime_minutes,
         include_uncached: true,
     };
@@ -970,6 +1290,7 @@ fn play_selected(app: &mut App) {
     let season = app.sel_season;
     let episode = app.sel_episode;
     let episode_title = app.sel_episode_title.clone();
+    let episode_still = app.sel_episode_still.clone();
     let episode_runtime_minutes = app.sel_episode_runtime;
     app.busy = true;
     app.status = format!("Playing {}…", media.display_title());
@@ -982,6 +1303,7 @@ fn play_selected(app: &mut App) {
             season,
             episode,
             episode_title,
+            episode_still,
             episode_runtime_minutes,
             include_uncached: true,
         };
@@ -1009,13 +1331,7 @@ fn draw(f: &mut Frame, app: &App) {
     .split(f.area());
 
     // Header
-    let title = match app.screen {
-        Screen::Search => "open-media — Search",
-        Screen::Results => "open-media — Results",
-        Screen::Seasons => "open-media — Seasons",
-        Screen::Episodes => "open-media — Episodes",
-        Screen::Sources => "open-media — Sources",
-    };
+    let title = format!("open-media — {}", breadcrumbs(app));
     f.render_widget(
         Paragraph::new(title)
             .style(Style::new().fg(app.theme.accent).bold())
@@ -1024,6 +1340,8 @@ fn draw(f: &mut Frame, app: &App) {
     );
 
     match app.screen {
+        Screen::Home => draw_home(f, app, chunks[1]),
+        Screen::Library => draw_library(f, app, chunks[1]),
         Screen::Search => draw_search(f, app, chunks[1]),
         Screen::Results => draw_results(f, app, chunks[1]),
         Screen::Seasons => draw_seasons(f, app, chunks[1]),
@@ -1033,13 +1351,15 @@ fn draw(f: &mut Frame, app: &App) {
 
     // Footer / status
     let hints = match app.screen {
-        Screen::Search => "type query · Enter: search · Esc: quit",
-        Screen::Results => "j/k: move · Enter: select · /: search · q: quit",
-        Screen::Seasons => "j/k: move · Enter: select · Esc: back · q: quit",
-        Screen::Episodes => "j/k: move · Enter: select · Esc: back · q: quit",
+        Screen::Home => "Enter: open · /: search · ?: help · q: quit",
+        Screen::Library => "h/l: filter · Enter: open · /: search · ?: help",
+        Screen::Search => "Enter: search · ?: help · Esc: quit",
+        Screen::Results => "Enter: select · /: search · ?: help",
+        Screen::Seasons => "Enter: select · Esc: back · ?: help",
+        Screen::Episodes => "Enter: select · Esc: back · ?: help",
         Screen::Sources => match app.focus {
-            Focus::List => "Tab: filters · j/k: move · Enter: play · Esc: back · q: quit",
-            Focus::Panel => "Tab: list · j/k: control · ←/→: change · Enter: apply · Esc: list",
+            Focus::List => "Tab: filters · Enter: play · Esc: back · ?: help",
+            Focus::Panel => "Tab: list · h/l: change · Enter: apply · ?: help",
         },
     };
     let spin = if app.busy { "⏳ " } else { "" };
@@ -1049,11 +1369,139 @@ fn draw(f: &mut Frame, app: &App) {
             .block(Block::default().borders(Borders::ALL).title(hints)),
         chunks[2],
     );
+
+    if app.help {
+        draw_help(f, app);
+    }
+}
+
+fn breadcrumbs(app: &App) -> String {
+    let title = app.media.as_ref().map(|m| m.display_title());
+    match app.screen {
+        Screen::Home => "Home".into(),
+        Screen::Library => format!("Home > Library ({})", app.library_filter.label()),
+        Screen::Search => "Search".into(),
+        Screen::Results => "Search > Results".into(),
+        Screen::Seasons => format!("Search > {} > Seasons", title.unwrap_or("Title")),
+        Screen::Episodes => match (title, app.sel_season) {
+            (Some(t), Some(s)) => format!("Search > {t} > Season {s}"),
+            (Some(t), None) => format!("Search > {t} > Episodes"),
+            _ => "Search > Episodes".into(),
+        },
+        Screen::Sources => match (title, app.sel_season) {
+            (Some(t), Some(s)) => format!("Search > {t} > Season {s} > Sources"),
+            (Some(t), None) => format!("Search > {t} > Sources"),
+            _ => "Search > Sources".into(),
+        },
+    }
+}
+
+fn draw_home(f: &mut Frame, app: &App, area: Rect) {
+    let counts = library_counts(&app.all_library);
+    let rows = [
+        format!("Continue Watching   {}", counts.0),
+        format!("Planned             {}", counts.1),
+        format!("Completed           {}", counts.2),
+        "Search              press / or Enter".to_string(),
+    ];
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|r| ListItem::new(Line::from(r.clone())))
+        .collect();
+    render_list(f, &app.theme, area, "Home", items, &app.home_state, true);
+}
+
+fn library_counts(items: &[LibraryItem]) -> (usize, usize, usize) {
+    let watching = items
+        .iter()
+        .filter(|i| i.status == ListStatus::Watching)
+        .count();
+    let planned = items
+        .iter()
+        .filter(|i| i.status == ListStatus::Planning)
+        .count();
+    let completed = items
+        .iter()
+        .filter(|i| i.status == ListStatus::Completed)
+        .count();
+    (watching, planned, completed)
+}
+
+fn draw_library(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<ListItem> = if app.library.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "No saved items in this filter. Press / to search, then use library commands to plan titles.",
+            Style::new().fg(app.theme.dim),
+        )]))]
+    } else {
+        app.library
+            .iter()
+            .map(|item| ListItem::new(library_row(item)))
+            .collect()
+    };
+    let title = format!("Library [{}]", app.library_filter.label());
+    render_list(f, &app.theme, area, &title, items, &app.library_state, true);
+}
+
+fn library_row(item: &LibraryItem) -> String {
+    let year = item
+        .year
+        .map(|y| y.to_string())
+        .unwrap_or_else(|| "—".into());
+    let coord = match (item.last_season, item.last_episode) {
+        (Some(s), Some(e)) => format!(" S{s:02}E{e:02}"),
+        _ => String::new(),
+    };
+    let progress = if item.duration_secs > 0 {
+        format!(" {:>3.0}%", item.progress_fraction() * 100.0)
+    } else {
+        String::new()
+    };
+    format!(
+        "[{:<9}] [{:<6}] {} ({year}){coord}{progress}",
+        status_label(item.status),
+        item.kind.label(),
+        item.title
+    )
 }
 
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Search", Style::new().fg(app.theme.accent).bold()),
+            Span::raw(" movies, series, and anime"),
+        ]),
+        Line::from(""),
+        Line::from(format!("› {}", app.query)),
+    ];
+    if app.busy {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Searching configured metadata providers… results will appear as soon as the lookup finishes.",
+            Style::new().fg(app.theme.dim),
+        )));
+    } else if app.query.is_empty() {
+        let suggestions: Vec<&str> = app
+            .library
+            .iter()
+            .take(3)
+            .map(|i| i.title.as_str())
+            .collect();
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Type a title and press Enter. Esc returns home/quit.",
+            Style::new().fg(app.theme.dim),
+        )));
+        if !suggestions.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("Recent: {}", suggestions.join(" · ")),
+                Style::new().fg(app.theme.dim),
+            )));
+        }
+    }
     f.render_widget(
-        Paragraph::new(format!("› {}", app.query))
+        Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("Query"))
             .wrap(Wrap { trim: true }),
         area,
@@ -1061,6 +1509,14 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_results(f: &mut Frame, app: &App, area: Rect) {
+    let show_panel = area.width >= PANEL_MIN_WIDTH;
+    let (list_area, panel_area) = if show_panel {
+        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(RESULT_PANEL_WIDTH)])
+            .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
     let items: Vec<ListItem> = app
         .results
         .iter()
@@ -1077,12 +1533,87 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
     render_list(
         f,
         &app.theme,
-        area,
+        list_area,
         "Results",
         items,
         &app.results_state,
         true,
     );
+    if let Some(panel) = panel_area {
+        draw_media_panel(f, app, panel);
+    }
+}
+
+fn draw_media_panel(f: &mut Frame, app: &App, area: Rect) {
+    let media = app
+        .results_state
+        .selected()
+        .and_then(|i| app.results.get(i));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(app.theme.dim))
+        .title("Details");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let (image_area, text_area) = if app.stills.enabled() && inner.height > POSTER_ROWS + 2 {
+        let rows =
+            Layout::vertical([Constraint::Length(POSTER_ROWS), Constraint::Min(0)]).split(inner);
+        (Some(rows[0]), rows[1])
+    } else {
+        (None, inner)
+    };
+    if let Some(img_area) = image_area {
+        draw_image(f, app, img_area, media.and_then(|m| m.poster.as_deref()));
+    }
+    f.render_widget(
+        Paragraph::new(media.map(media_detail_lines).unwrap_or_else(|| {
+            vec![Line::from(Span::styled(
+                "No result selected.",
+                Style::new().fg(app.theme.dim),
+            ))]
+        }))
+        .wrap(Wrap { trim: true }),
+        text_area,
+    );
+}
+
+fn media_detail_lines(m: &Media) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        m.display_title().to_string(),
+        Style::new().bold(),
+    ))];
+    let mut facts = vec![m.kind.label().to_string()];
+    if let Some(y) = m.year {
+        facts.push(y.to_string());
+    }
+    if let Some(score) = m.score.filter(|s| *s > 0.0) {
+        facts.push(format!("score {score:.1}"));
+    }
+    if let Some(status) = &m.status {
+        facts.push(status.clone());
+    }
+    if let (Some(s), Some(e)) = (m.season_count, m.episode_count) {
+        facts.push(format!("{s} seasons · {e} eps"));
+    } else if let Some(e) = m.episode_count {
+        facts.push(format!("{e} eps"));
+    }
+    lines.push(Line::from(Span::styled(
+        facts.join("   "),
+        Style::new().fg(Color::Gray),
+    )));
+    if !m.genres.is_empty() {
+        lines.push(Line::from(Span::styled(
+            m.genres.join(", "),
+            Style::new().fg(Color::Gray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        m.overview
+            .clone()
+            .unwrap_or_else(|| "No overview available.".into()),
+    ));
+    lines
 }
 
 fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
@@ -1248,15 +1779,14 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
     };
 
     if let Some(img_area) = image_area {
-        draw_still(f, app, img_area);
+        draw_image(f, app, img_area, app.current_still_url());
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), text_area);
 }
 
-/// Render the still for the selected episode into `area`: the decoded image
-/// when ready, otherwise a centered status line (loading / unavailable).
-fn draw_still(f: &mut Frame, app: &App, area: Rect) {
-    let url = app.current_still_url();
+/// Render an image URL into `area`: the decoded image when ready, otherwise a
+/// centered status line (loading / unavailable).
+fn draw_image(f: &mut Frame, app: &App, area: Rect, url: Option<&str>) {
     if let Some(protocol) = url.and_then(|u| app.stills.ready(u)) {
         // Cheap render of the already-resized+encoded protocol image.
         f.render_widget(Image::new(protocol), area);
@@ -1299,7 +1829,7 @@ fn draw_sources_list(f: &mut Frame, app: &App, area: Rect, show_panel: bool) {
         .visible
         .iter()
         .filter_map(|&i| app.candidates.get(i))
-        .map(|c| ListItem::new(source_row(c)))
+        .map(|c| ListItem::new(source_row_line(c)))
         .collect();
     let focused = !show_panel || app.focus == Focus::List;
     let title = format!("Sources ({})", app.visible.len());
@@ -1314,27 +1844,158 @@ fn draw_sources_list(f: &mut Frame, app: &App, area: Rect, show_panel: bool) {
     );
 }
 
-/// One scannable line per candidate: cache · quality · size · seeders · provider
-/// · release name (first line of the raw title, the full text lives in the panel).
+/// One scannable line per candidate: cache, quality, seed health, provider, size,
+/// and release name (the full text lives in the panel).
+#[cfg(test)]
 fn source_row(c: &SourceCandidate) -> String {
-    let cache = match c.cache {
-        CacheState::Cached => "⚡",
-        CacheState::Uncached => "⬇",
-        CacheState::Unknown => " ",
-    };
-    let seeders = c
-        .seeders
-        .map(|s| format!("{s}S"))
-        .unwrap_or_else(|| "—".into());
+    let cache = cache_badge(c.cache);
+    let seeders = seed_badge(c.seeders);
     let name = c.title.lines().next().unwrap_or(&c.title).trim();
     format!(
-        "{cache} {:<5} {:>9} {:>6}  {:<12} {}",
+        "{cache:<8} [{:<5}] {seeders:<10} {:<12} {:>9}  {}",
         c.quality.label(),
-        c.human_size(),
-        seeders,
         truncate(&c.provider, 12),
+        c.human_size(),
         name,
     )
+}
+
+fn source_row_line(c: &SourceCandidate) -> Line<'static> {
+    let style = match seed_health(c.seeders) {
+        SeedHealth::Hot => Style::new().fg(Color::Green),
+        SeedHealth::Ok => Style::new().fg(Color::Yellow),
+        SeedHealth::Cold => Style::new().fg(Color::Red),
+        SeedHealth::Unknown => Style::new().fg(Color::Gray),
+    };
+    let name = c
+        .title
+        .lines()
+        .next()
+        .unwrap_or(&c.title)
+        .trim()
+        .to_string();
+    Line::from(vec![
+        Span::raw(format!("{:<8} ", cache_badge(c.cache))),
+        Span::styled(format!("[{:<5}] ", c.quality.label()), Style::new().bold()),
+        Span::styled(format!("{:<10} ", seed_badge(c.seeders)), style),
+        Span::raw(format!("{:<12} ", truncate(&c.provider, 12))),
+        Span::raw(format!("{:>9}  ", c.human_size())),
+        Span::raw(name),
+    ])
+}
+
+fn cache_badge(cache: CacheState) -> &'static str {
+    match cache {
+        CacheState::Cached => "[cached]",
+        CacheState::Uncached => "[fetch]",
+        CacheState::Unknown => "[?]",
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SeedHealth {
+    Hot,
+    Ok,
+    Cold,
+    Unknown,
+}
+
+fn seed_health(seeders: Option<u32>) -> SeedHealth {
+    match seeders {
+        Some(s) if s >= 100 => SeedHealth::Hot,
+        Some(s) if s >= 10 => SeedHealth::Ok,
+        Some(_) => SeedHealth::Cold,
+        None => SeedHealth::Unknown,
+    }
+}
+
+fn seed_badge(seeders: Option<u32>) -> String {
+    match (seed_health(seeders), seeders) {
+        (SeedHealth::Hot, Some(s)) => format!("HOT {s}S"),
+        (SeedHealth::Ok, Some(s)) => format!("OK {s}S"),
+        (SeedHealth::Cold, Some(s)) => format!("LOW {s}S"),
+        _ => "SEEDS ?".into(),
+    }
+}
+
+fn status_label(status: ListStatus) -> &'static str {
+    match status {
+        ListStatus::Watching => "watching",
+        ListStatus::Completed => "completed",
+        ListStatus::Planning => "planned",
+        ListStatus::Paused => "paused",
+        ListStatus::Dropped => "dropped",
+        ListStatus::Repeating => "repeating",
+    }
+}
+
+fn draw_help(f: &mut Frame, app: &App) {
+    let area = centered_rect(72, 60, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+    let text = help_lines(app);
+    f.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::new().fg(app.theme.accent))
+                    .title("Help"),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            breadcrumbs(app),
+            Style::new().fg(app.theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from("j/k or arrows  move selection"),
+        Line::from("/              jump to search"),
+        Line::from("?              toggle this help"),
+        Line::from("q or Ctrl-C     quit"),
+    ];
+    match app.screen {
+        Screen::Home => lines.extend([
+            Line::from(""),
+            Line::from("Enter opens the selected shelf or search action."),
+            Line::from("l opens the full library."),
+        ]),
+        Screen::Library => lines.extend([
+            Line::from(""),
+            Line::from("h/l or Left/Right cycles library filters."),
+            Line::from("Enter resumes a saved episode when possible."),
+        ]),
+        Screen::Sources => lines.extend([
+            Line::from(""),
+            Line::from("Tab switches between source list and filters."),
+            Line::from("In filters, h/l changes values and Enter applies."),
+        ]),
+        _ => lines.extend([
+            Line::from(""),
+            Line::from("Enter follows the selected result, season, episode, or source."),
+            Line::from("Esc goes back where available."),
+        ]),
+    }
+    lines
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
 }
 
 fn draw_sources_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -1663,5 +2324,51 @@ mod tests {
         assert_eq!(f.language, None);
         assert_eq!(f.provider, None);
         assert_eq!(f.sort, SortKey::Relevance);
+    }
+
+    #[test]
+    fn source_row_uses_scannable_badges() {
+        let c = cand(
+            "Torrentio",
+            Quality::P1080,
+            2_000,
+            Some(400),
+            CacheState::Cached,
+            &["English"],
+        );
+        let row = source_row(&c);
+        assert!(row.contains("[cached]"));
+        assert!(row.contains("[1080p]"));
+        assert!(row.contains("HOT 400S"));
+        assert!(row.contains("Torrentio"));
+    }
+
+    #[test]
+    fn seed_health_tiers_are_stable() {
+        assert_eq!(seed_health(Some(100)), SeedHealth::Hot);
+        assert_eq!(seed_health(Some(10)), SeedHealth::Ok);
+        assert_eq!(seed_health(Some(1)), SeedHealth::Cold);
+        assert_eq!(seed_health(None), SeedHealth::Unknown);
+    }
+
+    #[test]
+    fn library_filter_cycles_and_maps_status() {
+        assert_eq!(LibraryFilter::All.cycle(1), LibraryFilter::Watching);
+        assert_eq!(LibraryFilter::Dropped.cycle(1), LibraryFilter::All);
+        assert_eq!(LibraryFilter::Planned.status(), Some(ListStatus::Planning));
+        assert_eq!(LibraryFilter::All.status(), None);
+    }
+
+    #[test]
+    fn search_status_distinguishes_partial_final_and_failures() {
+        assert_eq!(
+            search_status(12, 0, false),
+            "12 results · still searching..."
+        );
+        assert_eq!(search_status(12, 0, true), "12 results");
+        assert_eq!(
+            search_status(12, 2, false),
+            "12 results · still searching... · 2 providers failed"
+        );
     }
 }

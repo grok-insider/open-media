@@ -1,9 +1,9 @@
-//! # om-app
+//! # open-media-app
 //!
 //! The **application layer**: use-cases that orchestrate the ports defined in
-//! `om-core`. It depends *only* on `om-core` — it cannot name `TmdbProvider`,
+//! `open-media-core`. It depends *only* on `open-media-core` — it cannot name `TmdbProvider`,
 //! `RealDebrid`, `MpvPlayer`, etc. Concrete adapters are injected at the
-//! composition root (`om-cli`) as `Arc<dyn Port>`. That is the whole point of the
+//! composition root (`open-media-cli`) as `Arc<dyn Port>`. That is the whole point of the
 //! Dependency-Inversion boundary: business logic here is testable with fakes and
 //! never changes when an adapter is swapped (OCP).
 //!
@@ -17,21 +17,22 @@
 //!
 //! Build one with [`EngineBuilder`].
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use open_media_core::error::{CoreError, CoreResult};
 use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
-    Chapter, Enricher, HistoryStore, IdBridge, MetadataProvider, PlayOptions, PlaybackControl,
-    Player, PresenceReporter, SourceProvider, SourceQuery, StreamResolver, SubtitleProvider,
-    Tracker,
+    Chapter, Enricher, HistoryStore, IdBridge, LibraryStore, MetadataProvider, PlayOptions,
+    PlaySession, PlaybackControl, Player, PlaylistControl, PlaylistItem, PresenceReporter,
+    SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
 };
 use open_media_core::scoring::{self, ScoringPrefs};
 use open_media_core::stream::{Playback, SourceCandidate};
 use open_media_core::subtitle::{SubtitleQuery, SubtitleTrack};
-use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
+use open_media_core::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
 
 /// A request to play something, resolved into coordinates the engine understands.
 #[derive(Debug, Clone)]
@@ -43,11 +44,26 @@ pub struct PlayRequest {
     /// one. Threaded into the player's media-title; `None` degrades gracefully to
     /// just the `S01E01` coordinate. Always `None` for movies.
     pub episode_title: Option<String>,
+    /// Selected episode still/thumbnail URL. Presence and other activity UIs use
+    /// this before falling back to the series poster. Always `None` for movies.
+    pub episode_still: Option<String>,
     /// Selected episode's runtime in minutes, when the metadata provider supplied
     /// one. Forwarded (as seconds) to the [`Enricher`] so AniSkip can validate
     /// skip intervals against the episode length; `None` disables that check.
     pub episode_runtime_minutes: Option<u32>,
     pub include_uncached: bool,
+}
+
+/// Snapshot emitted by [`Engine::search_incremental`] as provider batches arrive.
+#[derive(Debug, Clone)]
+pub struct SearchProgress {
+    /// Deduplicated results accumulated so far, in stable first-seen order.
+    pub results: Vec<Media>,
+    /// Number of providers that failed. Failures are non-fatal when at least one
+    /// metadata provider is configured.
+    pub failed_providers: usize,
+    /// `true` once every configured provider has completed or failed.
+    pub finished: bool,
 }
 
 /// The composed application engine. Cheap to clone-share via `Arc` fields.
@@ -59,6 +75,7 @@ pub struct Engine {
     tracker: Option<Arc<dyn Tracker>>,
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
+    library: Option<Arc<dyn LibraryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     /// Preferred subtitle languages (most-wanted first) for the [`SubtitleQuery`].
@@ -108,6 +125,55 @@ impl Engine {
         Ok(dedup_by_imdb(out))
     }
 
+    /// Search metadata providers concurrently and report deduplicated snapshots as
+    /// each provider finishes.
+    ///
+    /// This is intended for interactive UIs. Unlike [`Self::search`], result order
+    /// follows provider completion so the first visible rows can render
+    /// immediately. Once a row appears it is not moved: later duplicates sharing an
+    /// IMDB id only donate missing ids to the first-seen row.
+    pub async fn search_incremental<F>(
+        &self,
+        query: &str,
+        kind: Option<MediaKind>,
+        mut on_progress: F,
+    ) -> CoreResult<Vec<Media>>
+    where
+        F: FnMut(SearchProgress),
+    {
+        if self.metadata.is_empty() {
+            return Err(CoreError::Config("no metadata providers configured".into()));
+        }
+
+        let total = self.metadata.len();
+        let mut calls = self
+            .metadata
+            .iter()
+            .map(|provider| async move { (provider.name(), provider.search(query, kind).await) })
+            .collect::<FuturesUnordered<_>>();
+        let mut acc = SearchAccumulator::default();
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+
+        while let Some((name, result)) = calls.next().await {
+            completed += 1;
+            match result {
+                Ok(items) => acc.extend(items),
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(provider = name, error = %e, "metadata search failed");
+                }
+            }
+            on_progress(SearchProgress {
+                results: acc.results().to_vec(),
+                failed_providers: failed,
+                finished: completed == total,
+            });
+        }
+
+        Ok(acc.into_results())
+    }
+
     /// Hydrate full details (and extra ids, e.g. IMDB) for a known item by trying
     /// each metadata provider until one understands the id dialect.
     pub async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
@@ -153,6 +219,32 @@ impl Engine {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// List locally persisted library items, optionally filtered by status.
+    pub fn list_library(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>> {
+        let store = self
+            .library
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no library store configured".into()))?;
+        store.list(status)
+    }
+
+    /// Add or update a local library entry and best-effort sync the status to any
+    /// configured remote tracker.
+    pub async fn set_library_status(
+        &self,
+        media: &Media,
+        status: ListStatus,
+    ) -> CoreResult<LibraryItem> {
+        let item = self.library_item(media, status, None, None, 0, 0);
+        self.save_library_item(&item)?;
+        if let Some(tracker) = &self.tracker {
+            if let Err(e) = tracker.set_status(&media.ids, status).await {
+                tracing::warn!(error = %e, "tracker status sync failed");
+            }
+        }
+        Ok(item)
     }
 
     /// Find playable candidates across every applicable source provider
@@ -308,13 +400,16 @@ impl Engine {
         candidates: &[SourceCandidate],
     ) -> CoreResult<()> {
         // Play the first episode, falling through candidates on failure.
-        let completed = self.play_episode_with_fallback(req, candidates).await?;
+        let first = self.play_episode_with_fallback(req, candidates).await?;
+        if first.playlist_autoplay {
+            return Ok(());
+        }
 
         // Binge: when enabled and the episode was actually watched to completion,
         // keep advancing to the next (non-filler) episode until we run out of
         // episodes, sources, or the viewer quits early. An owned loop (not
         // recursion) keeps the stack flat across an arbitrarily long binge.
-        if !self.autoplay_next || !req.media.kind.is_episodic() || !completed {
+        if !self.autoplay_next || !req.media.kind.is_episodic() || !first.completed {
             return Ok(());
         }
 
@@ -340,8 +435,8 @@ impl Engine {
                 .await
             {
                 // Quit / low-progress exit ends the binge.
-                Ok(false) => break,
-                Ok(true) => {}
+                Ok(outcome) if !outcome.completed || outcome.playlist_autoplay => break,
+                Ok(_) => {}
                 // Every candidate for this episode failed to play. Stop the binge
                 // here rather than aborting the whole session with an error — the
                 // viewer keeps what they watched and can resume manually.
@@ -364,13 +459,13 @@ impl Engine {
         &self,
         req: &PlayRequest,
         candidates: &[SourceCandidate],
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<PlayOnceOutcome> {
         let mut last_err: Option<CoreError> = None;
         let mut tried = 0usize;
         for candidate in candidates.iter().filter(|c| c.is_resolvable()) {
             tried += 1;
             match self.play_once(req, candidate).await {
-                Ok(completed) => return Ok(completed),
+                Ok(outcome) => return Ok(outcome),
                 Err(e) => {
                     tracing::warn!(
                         provider = %candidate.provider,
@@ -394,7 +489,11 @@ impl Engine {
     /// episode crossed [`Self::complete_threshold`] (i.e. was actually watched to
     /// the end, as opposed to a quit at low progress) — the binge loop uses this
     /// to decide whether to advance.
-    async fn play_once(&self, req: &PlayRequest, candidate: &SourceCandidate) -> CoreResult<bool> {
+    async fn play_once(
+        &self,
+        req: &PlayRequest,
+        candidate: &SourceCandidate,
+    ) -> CoreResult<PlayOnceOutcome> {
         let player = self
             .player
             .as_ref()
@@ -470,6 +569,7 @@ impl Engine {
                 return Err(e);
             }
         };
+        self.mark_library_started(req, season, episode);
 
         let last_pos = Arc::new(AtomicU32::new(resume.unwrap_or(0)));
         let last_dur = Arc::new(AtomicU32::new(0));
@@ -488,8 +588,37 @@ impl Engine {
                 episode,
                 req.episode_title.as_deref(),
             ),
-            image: req.media.poster.clone(),
+            image: req
+                .episode_still
+                .clone()
+                .or_else(|| req.media.poster.clone()),
         };
+        if self.autoplay_next && req.media.kind.is_episodic() {
+            if let Some(playlist) = session.playlist_control() {
+                let completed = self
+                    .monitor_playlist_session(
+                        &mut session,
+                        playlist,
+                        req.clone(),
+                        ctx,
+                        skip,
+                        last_pos.clone(),
+                        last_dur.clone(),
+                    )
+                    .await?;
+                cleanup_subtitle_files(&subtitle_files);
+                if let Some(resolver) = &self.resolver {
+                    resolver.cleanup().await;
+                }
+                if let Some(presence) = &self.presence {
+                    let _ = presence.clear().await;
+                }
+                return Ok(PlayOnceOutcome {
+                    completed,
+                    playlist_autoplay: true,
+                });
+            }
+        }
         let monitor = monitor_playback(
             session.control(),
             self.history.clone(),
@@ -524,11 +653,15 @@ impl Engine {
                 }
             }
         }
+        self.mark_library_after_progress(req, pos, dur, completed);
         if let Some(presence) = &self.presence {
             let _ = presence.clear().await;
         }
 
-        Ok(completed)
+        Ok(PlayOnceOutcome {
+            completed,
+            playlist_autoplay: false,
+        })
     }
 
     /// Filler/recap episode numbers to skip when bingeing, or an empty set when
@@ -578,19 +711,273 @@ impl Engine {
         }
 
         // Carry the next episode's title/runtime when the season list knows them.
-        let (episode_title, episode_runtime_minutes) = episodes
+        let (episode_title, episode_runtime_minutes, episode_still) = episodes
             .and_then(|eps| eps.into_iter().find(|ep| ep.number == next))
-            .map(|ep| (ep.title, ep.runtime_minutes))
-            .unwrap_or((None, None));
+            .map(|ep| (ep.title, ep.runtime_minutes, ep.still))
+            .unwrap_or((None, None, None));
 
         Some(PlayRequest {
             media: current.media.clone(),
             season: Some(season),
             episode: Some(next),
             episode_title,
+            episode_still,
             episode_runtime_minutes,
             include_uncached: current.include_uncached,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn monitor_playlist_session(
+        &self,
+        session: &mut Box<dyn PlaySession>,
+        playlist: Arc<dyn PlaylistControl>,
+        first_req: PlayRequest,
+        first_ctx: MonitorCtx,
+        first_skip: SkipTimes,
+        last_pos: Arc<AtomicU32>,
+        last_dur: Arc<AtomicU32>,
+    ) -> CoreResult<bool> {
+        let filler = self.filler_episodes(&first_req.media.ids).await;
+        let completed = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(PlaylistMonitorState {
+            entries: vec![PlaylistEntry {
+                req: first_req,
+                ctx: first_ctx,
+                skip: first_skip,
+            }],
+            active: 0,
+            appended_until: 0,
+            marked_complete: Vec::new(),
+        }));
+
+        self.append_next_playlist_item(&playlist, &state, &filler)
+            .await;
+
+        let monitor = monitor_playlist_playback(
+            session.control(),
+            playlist.clone(),
+            self.history.clone(),
+            self.presence.clone(),
+            self.tracker.clone(),
+            self.complete_threshold,
+            completed.clone(),
+            state.clone(),
+            last_pos.clone(),
+            last_dur.clone(),
+            self,
+            filler,
+        );
+
+        let wait_result = tokio::select! {
+            r = session.wait() => r,
+            _ = monitor => Ok(()),
+        };
+        wait_result?;
+
+        let (req, pos, dur) = {
+            let guard = state.lock().unwrap();
+            let active = guard.active.min(guard.entries.len().saturating_sub(1));
+            (
+                guard.entries[active].req.clone(),
+                last_pos.load(Ordering::Relaxed),
+                last_dur.load(Ordering::Relaxed),
+            )
+        };
+        if self.mark_completed_if_needed(&req, pos, dur).await {
+            completed.store(true, Ordering::Relaxed);
+        }
+        Ok(completed.load(Ordering::Relaxed))
+    }
+
+    async fn append_next_playlist_item(
+        &self,
+        playlist: &Arc<dyn PlaylistControl>,
+        state: &Arc<Mutex<PlaylistMonitorState>>,
+        filler: &[u32],
+    ) {
+        let current = {
+            let guard = state.lock().unwrap();
+            if guard.appended_until + 1 < guard.entries.len() {
+                return;
+            }
+            guard.entries[guard.appended_until].req.clone()
+        };
+        let Some(next) = self.next_request(&current, filler).await else {
+            return;
+        };
+        let Some(playback) = self.resolve_first_playback(&next).await else {
+            return;
+        };
+        let title = Some(open_media_core::title::media_title(
+            &next.media,
+            next.season.unwrap_or(1),
+            next.episode.unwrap_or(1),
+            next.episode_title.as_deref(),
+        ));
+        if playlist
+            .append(&PlaylistItem {
+                url: playback.url,
+                title: title.clone(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let season = next.season.unwrap_or(1);
+        let episode = next.episode.unwrap_or(1);
+        let skip = match &self.enricher {
+            Some(e) => e
+                .skip_times(
+                    &next.media.ids,
+                    episode,
+                    next.episode_runtime_minutes.map(|m| m * 60),
+                )
+                .await
+                .unwrap_or_default(),
+            None => SkipTimes::default(),
+        };
+        let media_key = next
+            .media
+            .ids
+            .primary_key()
+            .unwrap_or_else(|| next.media.display_title().to_string());
+        let ctx = MonitorCtx {
+            media_key,
+            season,
+            episode,
+            title: next.media.display_title().to_string(),
+            detail: open_media_core::title::episode_detail(
+                &next.media,
+                season,
+                episode,
+                next.episode_title.as_deref(),
+            ),
+            image: next
+                .episode_still
+                .clone()
+                .or_else(|| next.media.poster.clone()),
+        };
+        let mut guard = state.lock().unwrap();
+        guard.entries.push(PlaylistEntry {
+            req: next,
+            ctx,
+            skip,
+        });
+        guard.appended_until += 1;
+    }
+
+    async fn resolve_first_playback(&self, req: &PlayRequest) -> Option<Playback> {
+        for candidate in self.pick_candidates(req).await {
+            match self.resolve(&candidate).await {
+                Ok(playback) => return Some(playback),
+                Err(e) => tracing::warn!(error = %e, "next episode source failed; trying fallback"),
+            }
+        }
+        None
+    }
+
+    async fn mark_completed_if_needed(&self, req: &PlayRequest, pos: u32, dur: u32) -> bool {
+        let completed = dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold;
+        if completed {
+            if let (Some(tracker), Some(episode)) = (&self.tracker, req.episode) {
+                if let Err(e) = tracker.update_progress(&req.media.ids, episode).await {
+                    tracing::warn!(error = %e, "tracker progress update failed");
+                }
+            }
+        }
+        self.mark_library_after_progress(req, pos, dur, completed);
+        completed
+    }
+
+    fn mark_library_started(&self, req: &PlayRequest, season: u32, episode: u32) {
+        let item = self.library_item(
+            &req.media,
+            ListStatus::Watching,
+            req.media.kind.is_episodic().then_some(season),
+            req.media.kind.is_episodic().then_some(episode),
+            0,
+            0,
+        );
+        if let Err(e) = self.save_library_item(&item) {
+            tracing::debug!(error = %e, "local library start update failed");
+        }
+    }
+
+    fn mark_library_after_progress(&self, req: &PlayRequest, pos: u32, dur: u32, completed: bool) {
+        let status = if completed && self.media_completed_by_coordinate(req) {
+            ListStatus::Completed
+        } else {
+            ListStatus::Watching
+        };
+        let item = self.library_item(
+            &req.media,
+            status,
+            req.media
+                .kind
+                .is_episodic()
+                .then_some(req.season.unwrap_or(1)),
+            req.media
+                .kind
+                .is_episodic()
+                .then_some(req.episode.unwrap_or(1)),
+            pos,
+            dur,
+        );
+        if let Err(e) = self.save_library_item(&item) {
+            tracing::debug!(error = %e, "local library progress update failed");
+        }
+    }
+
+    fn media_completed_by_coordinate(&self, req: &PlayRequest) -> bool {
+        if !req.media.kind.is_episodic() {
+            return true;
+        }
+        let Some(last_episode) = req.media.episode_count else {
+            return false;
+        };
+        let season_done = req
+            .media
+            .season_count
+            .is_none_or(|count| req.season.unwrap_or(1) >= count);
+        season_done && req.episode.unwrap_or(1) >= last_episode
+    }
+
+    fn library_item(
+        &self,
+        media: &Media,
+        status: ListStatus,
+        last_season: Option<u32>,
+        last_episode: Option<u32>,
+        position_secs: u32,
+        duration_secs: u32,
+    ) -> LibraryItem {
+        LibraryItem {
+            media_key: media
+                .ids
+                .primary_key()
+                .unwrap_or_else(|| media.display_title().to_string()),
+            ids: media.ids.clone(),
+            title: media.display_title().to_string(),
+            kind: media.kind,
+            poster: media.poster.clone(),
+            year: media.year,
+            status,
+            last_season,
+            last_episode,
+            position_secs,
+            duration_secs,
+            updated_at: unix_now(),
+        }
+    }
+
+    fn save_library_item(&self, item: &LibraryItem) -> CoreResult<()> {
+        let store = self
+            .library
+            .as_ref()
+            .ok_or_else(|| CoreError::Config("no library store configured".into()))?;
+        store.upsert(item)
     }
 
     /// Find + rank sources for a request and return the resolvable candidates in
@@ -690,6 +1077,24 @@ struct MonitorCtx {
     image: Option<String>,
 }
 
+struct PlayOnceOutcome {
+    completed: bool,
+    playlist_autoplay: bool,
+}
+
+struct PlaylistEntry {
+    req: PlayRequest,
+    ctx: MonitorCtx,
+    skip: SkipTimes,
+}
+
+struct PlaylistMonitorState {
+    entries: Vec<PlaylistEntry>,
+    active: usize,
+    appended_until: usize,
+    marked_complete: Vec<usize>,
+}
+
 /// Poll the player's IPC channel ~1×/s: auto-skip OP/ED, persist progress, and
 /// push presence. Returns only if there is no control channel (it then waits
 /// forever, deferring to the player-exit branch of the caller's `select!`).
@@ -765,6 +1170,164 @@ async fn monitor_playback(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn monitor_playlist_playback(
+    control: Option<Arc<dyn PlaybackControl>>,
+    playlist: Arc<dyn PlaylistControl>,
+    history: Option<Arc<dyn HistoryStore>>,
+    presence: Option<Arc<dyn PresenceReporter>>,
+    tracker: Option<Arc<dyn Tracker>>,
+    complete_threshold: f32,
+    any_completed: Arc<AtomicBool>,
+    state: Arc<Mutex<PlaylistMonitorState>>,
+    last_pos: Arc<AtomicU32>,
+    last_dur: Arc<AtomicU32>,
+    engine: &Engine,
+    filler: Vec<u32>,
+) {
+    let Some(ctrl) = control else {
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    let initial_chapters = {
+        let guard = state.lock().unwrap();
+        chapters_from_skip(&guard.entries[guard.active].skip)
+    };
+    if !initial_chapters.is_empty() {
+        let _ = ctrl.set_chapters(&initial_chapters).await;
+    }
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let playlist_idx = playlist
+            .active_index()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                let guard = state.lock().unwrap();
+                guard.active
+            });
+        let active_changed = {
+            let mut guard = state.lock().unwrap();
+            let bounded = playlist_idx.min(guard.entries.len().saturating_sub(1));
+            if bounded != guard.active {
+                let previous = guard.active;
+                guard.active = bounded;
+                Some(previous)
+            } else {
+                None
+            }
+        };
+        if let Some(previous) = active_changed {
+            let (req, already_marked, pos, dur) = {
+                let mut guard = state.lock().unwrap();
+                let already = guard.marked_complete.contains(&previous);
+                if !already {
+                    guard.marked_complete.push(previous);
+                }
+                (
+                    guard.entries[previous].req.clone(),
+                    already,
+                    last_pos.load(Ordering::Relaxed),
+                    last_dur.load(Ordering::Relaxed),
+                )
+            };
+            if !already_marked {
+                let completed = dur > 0 && (pos as f32 / dur as f32) >= complete_threshold;
+                if completed {
+                    any_completed.store(true, Ordering::Relaxed);
+                    if let (Some(t), Some(ep)) = (&tracker, req.episode) {
+                        let _ = t.update_progress(&req.media.ids, ep).await;
+                    }
+                }
+            }
+            last_pos.store(0, Ordering::Relaxed);
+            last_dur.store(0, Ordering::Relaxed);
+            let chapters = {
+                let guard = state.lock().unwrap();
+                chapters_from_skip(&guard.entries[guard.active].skip)
+            };
+            let _ = ctrl.set_chapters(&chapters).await;
+            let active_req = {
+                let guard = state.lock().unwrap();
+                guard.entries[guard.active].req.clone()
+            };
+            engine.mark_library_started(
+                &active_req,
+                active_req.season.unwrap_or(1),
+                active_req.episode.unwrap_or(1),
+            );
+            engine
+                .append_next_playlist_item(&playlist, &state, &filler)
+                .await;
+        }
+
+        let pos = ctrl.position().await.ok().flatten().unwrap_or(0);
+        let dur = ctrl.duration().await.ok().flatten().unwrap_or(0);
+        if pos > 0 {
+            last_pos.store(pos, Ordering::Relaxed);
+        }
+        if dur > 0 {
+            last_dur.store(dur, Ordering::Relaxed);
+        }
+
+        let (ctx, skip) = {
+            let guard = state.lock().unwrap();
+            let entry = &guard.entries[guard.active];
+            (
+                MonitorCtx {
+                    media_key: entry.ctx.media_key.clone(),
+                    season: entry.ctx.season,
+                    episode: entry.ctx.episode,
+                    title: entry.ctx.title.clone(),
+                    detail: entry.ctx.detail.clone(),
+                    image: entry.ctx.image.clone(),
+                },
+                entry.skip,
+            )
+        };
+
+        if let Some(op) = skip.opening {
+            if op.is_meaningful() && pos >= op.start && pos < op.start + 2 {
+                let _ = ctrl.seek_absolute(op.end).await;
+            }
+        }
+        if let Some(ed) = skip.ending {
+            if ed.is_meaningful() && pos >= ed.start && pos < ed.start + 2 {
+                let _ = ctrl.seek_absolute(ed.end).await;
+            }
+        }
+
+        if let Some(h) = &history {
+            let _ = h.save(&WatchProgress {
+                media_key: ctx.media_key.clone(),
+                season: ctx.season,
+                episode: ctx.episode,
+                position_secs: pos,
+                duration_secs: dur,
+                updated_at: unix_now(),
+            });
+        }
+
+        if let Some(p) = &presence {
+            let paused = ctrl.is_paused().await.ok().flatten().unwrap_or(false);
+            let _ = p
+                .update(&Activity {
+                    title: ctx.title,
+                    detail: ctx.detail,
+                    paused,
+                    position_secs: pos,
+                    duration_secs: dur,
+                    image_url: ctx.image,
+                })
+                .await;
+        }
+    }
+}
+
 fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {
     let mut chapters = Vec::new();
     if let Some(op) = skip.opening {
@@ -798,19 +1361,51 @@ fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {
 /// ids the kept entry lacks. Items without an IMDB id (e.g. AniList anime) are
 /// never collapsed.
 fn dedup_by_imdb(items: Vec<Media>) -> Vec<Media> {
-    let mut out: Vec<Media> = Vec::with_capacity(items.len());
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for item in items {
-        if let Some(imdb) = item.ids.imdb.clone() {
-            if let Some(&idx) = seen.get(&imdb) {
-                out[idx].ids.merge(&item.ids);
-                continue;
-            }
-            seen.insert(imdb, out.len());
+    let mut acc = SearchAccumulator::with_capacity(items.len());
+    acc.extend(items);
+    acc.into_results()
+}
+
+/// Incremental IMDB-keyed deduplicator. First visible row wins to avoid list
+/// jumping; duplicate rows only merge ids into that row.
+#[derive(Default)]
+struct SearchAccumulator {
+    out: Vec<Media>,
+    seen: std::collections::HashMap<String, usize>,
+}
+
+impl SearchAccumulator {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            out: Vec::with_capacity(capacity),
+            seen: std::collections::HashMap::new(),
         }
-        out.push(item);
     }
-    out
+
+    fn extend(&mut self, items: impl IntoIterator<Item = Media>) {
+        for item in items {
+            self.push(item);
+        }
+    }
+
+    fn push(&mut self, item: Media) {
+        if let Some(imdb) = item.ids.imdb.clone() {
+            if let Some(&idx) = self.seen.get(&imdb) {
+                self.out[idx].ids.merge(&item.ids);
+                return;
+            }
+            self.seen.insert(imdb, self.out.len());
+        }
+        self.out.push(item);
+    }
+
+    fn results(&self) -> &[Media] {
+        &self.out
+    }
+
+    fn into_results(self) -> Vec<Media> {
+        self.out
+    }
 }
 
 fn unix_now() -> i64 {
@@ -831,6 +1426,7 @@ pub struct EngineBuilder {
     tracker: Option<Arc<dyn Tracker>>,
     enricher: Option<Arc<dyn Enricher>>,
     history: Option<Arc<dyn HistoryStore>>,
+    library: Option<Arc<dyn LibraryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     subtitles: Option<Arc<dyn SubtitleProvider>>,
     subtitle_languages: Vec<String>,
@@ -869,6 +1465,10 @@ impl EngineBuilder {
     }
     pub fn history(mut self, h: Arc<dyn HistoryStore>) -> Self {
         self.history = Some(h);
+        self
+    }
+    pub fn library(mut self, l: Arc<dyn LibraryStore>) -> Self {
+        self.library = Some(l);
         self
     }
     pub fn presence(mut self, p: Arc<dyn PresenceReporter>) -> Self {
@@ -934,6 +1534,7 @@ impl EngineBuilder {
             tracker: self.tracker,
             enricher: self.enricher,
             history: self.history,
+            library: self.library,
             presence: self.presence,
             subtitles: self.subtitles,
             subtitle_languages: self.subtitle_languages,
@@ -1097,6 +1698,142 @@ mod tests {
         ];
         let out = dedup_by_imdb(items);
         assert_eq!(out.len(), 2);
+    }
+
+    struct BatchMeta {
+        name: &'static str,
+        delay_ms: u64,
+        items: Vec<Media>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl MetadataProvider for BatchMeta {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn search(&self, _query: &str, _kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            if self.fail {
+                Err(CoreError::Network(format!("{} failed", self.name)))
+            } else {
+                Ok(self.items.clone())
+            }
+        }
+        async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+            Err(CoreError::NotImplemented("batch.details"))
+        }
+        async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+            Ok(vec![])
+        }
+        async fn episodes(&self, _ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_search_emits_each_completed_provider() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "slow",
+                delay_ms: 40,
+                items: vec![media_with_ids("Slow", IdSet::default().with_imdb("tt2"))],
+                fail: false,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "fast",
+                delay_ms: 1,
+                items: vec![media_with_ids("Fast", IdSet::default().with_imdb("tt1"))],
+                fail: false,
+            }))
+            .build();
+
+        let mut snapshots = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                snapshots.push((progress.results, progress.finished));
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].0[0].title, "Fast");
+        assert!(!snapshots[0].1);
+        assert_eq!(snapshots[1].0.len(), 2);
+        assert!(snapshots[1].1);
+        assert_eq!(final_results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn incremental_search_dedups_without_reordering_visible_rows() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "slow-primary",
+                delay_ms: 40,
+                items: vec![media_with_ids(
+                    "Primary",
+                    IdSet::default().with_imdb("tt1").with_tmdb(1),
+                )],
+                fail: false,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "fast-duplicate",
+                delay_ms: 1,
+                items: vec![media_with_ids(
+                    "First Seen",
+                    IdSet::default().with_imdb("tt1"),
+                )],
+                fail: false,
+            }))
+            .build();
+
+        let mut titles = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                titles.push(
+                    progress
+                        .results
+                        .iter()
+                        .map(|m| m.title.clone())
+                        .collect::<Vec<_>>(),
+                );
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(titles, vec![vec!["First Seen"], vec!["First Seen"]]);
+        assert_eq!(final_results.len(), 1);
+        assert_eq!(final_results[0].title, "First Seen");
+        assert_eq!(final_results[0].ids.tmdb, Some(1));
+    }
+
+    #[tokio::test]
+    async fn incremental_search_reports_provider_failures_without_failing() {
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(BatchMeta {
+                name: "bad",
+                delay_ms: 1,
+                items: vec![],
+                fail: true,
+            }))
+            .add_metadata(Arc::new(BatchMeta {
+                name: "good",
+                delay_ms: 5,
+                items: vec![media_with_ids("Good", IdSet::default().with_imdb("tt1"))],
+                fail: false,
+            }))
+            .build();
+
+        let mut failed_counts = Vec::new();
+        let final_results = engine
+            .search_incremental("x", None, |progress| {
+                failed_counts.push((progress.failed_providers, progress.finished));
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(failed_counts, vec![(1, false), (1, true)]);
+        assert_eq!(final_results.len(), 1);
     }
 
     // ---- Binge / auto-advance ------------------------------------------------
@@ -1268,6 +2005,95 @@ mod tests {
         }
     }
 
+    struct PlaylistRecordingPlayer {
+        played: Arc<Mutex<Vec<u32>>>,
+        appended_titles: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl Player for PlaylistRecordingPlayer {
+        fn name(&self) -> &str {
+            "playlist-recording"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn play(
+            &self,
+            playback: &Playback,
+            _opts: &PlayOptions,
+        ) -> CoreResult<Box<dyn PlaySession>> {
+            let ep = playback
+                .file_name
+                .strip_prefix("ep=")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            self.played.lock().unwrap().push(ep);
+            Ok(Box::new(PlaylistRecordingSession {
+                control: Arc::new(PlaylistRecordingControl {
+                    appended_titles: self.appended_titles.clone(),
+                }),
+            }))
+        }
+    }
+
+    struct PlaylistRecordingSession {
+        control: Arc<PlaylistRecordingControl>,
+    }
+
+    #[async_trait]
+    impl PlaySession for PlaylistRecordingSession {
+        async fn wait(&mut self) -> CoreResult<()> {
+            Ok(())
+        }
+        fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
+            Some(self.control.clone())
+        }
+        fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+            Some(self.control.clone())
+        }
+    }
+
+    struct PlaylistRecordingControl {
+        appended_titles: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl PlaybackControl for PlaylistRecordingControl {
+        async fn position(&self) -> CoreResult<Option<u32>> {
+            Ok(Some(95))
+        }
+        async fn duration(&self) -> CoreResult<Option<u32>> {
+            Ok(Some(100))
+        }
+        async fn is_paused(&self) -> CoreResult<Option<bool>> {
+            Ok(Some(false))
+        }
+        async fn seek_absolute(&self, _secs: u32) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn set_chapters(&self, _chapters: &[Chapter]) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn quit(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PlaylistControl for PlaylistRecordingControl {
+        async fn append(&self, item: &PlaylistItem) -> CoreResult<()> {
+            self.appended_titles
+                .lock()
+                .unwrap()
+                .push(item.title.clone());
+            Ok(())
+        }
+        async fn active_index(&self) -> CoreResult<Option<usize>> {
+            Ok(Some(0))
+        }
+    }
+
     /// An enricher that reports a fixed filler set (and no skip windows).
     struct FillerEnricher {
         filler: Vec<u32>,
@@ -1311,6 +2137,7 @@ mod tests {
             season: Some(1),
             episode: Some(1),
             episode_title: None,
+            episode_still: None,
             episode_runtime_minutes: None,
             include_uncached: false,
         }
@@ -1426,6 +2253,74 @@ mod tests {
         assert_eq!(*played.lock().unwrap(), vec![1, 4]);
     }
 
+    #[tokio::test]
+    async fn playlist_player_appends_next_episode_without_new_launch() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let appended_titles = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::builder()
+            .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+            .add_source(Arc::new(StampSource))
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(PlaylistRecordingPlayer {
+                played: played.clone(),
+                appended_titles: appended_titles.clone(),
+            }))
+            .autoplay_next(true)
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        assert_eq!(*played.lock().unwrap(), vec![1]);
+        let titles = appended_titles.lock().unwrap();
+        assert_eq!(titles.len(), 1);
+        assert!(titles[0].as_deref().unwrap_or_default().contains("S01E02"));
+    }
+
+    struct RecordingPresence {
+        images: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl PresenceReporter for RecordingPresence {
+        async fn update(&self, activity: &Activity) -> CoreResult<()> {
+            self.images.lock().unwrap().push(activity.image_url.clone());
+            Ok(())
+        }
+        async fn clear(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn presence_prefers_episode_still_over_poster() {
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let images = Arc::new(Mutex::new(Vec::new()));
+        let mut req = play_request(episodic_media());
+        req.media.poster = Some("https://img.example/poster.jpg".into());
+        req.episode_still = Some("https://img.example/still.jpg".into());
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played,
+                fraction: 0.95,
+            }))
+            .presence(Arc::new(RecordingPresence {
+                images: images.clone(),
+            }))
+            .build();
+
+        engine.play(&req, &resolvable_candidate()).await.unwrap();
+
+        assert!(images
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|url| url.as_deref() == Some("https://img.example/still.jpg")));
+    }
+
     // ---- behavior.resume gating ---------------------------------------------
     //
     // A history store that always has a saved position, plus a player that
@@ -1437,6 +2332,52 @@ mod tests {
     struct SavedHistory {
         position: u32,
         saved: Arc<Mutex<Vec<u32>>>,
+    }
+
+    #[derive(Default)]
+    struct MemoryLibrary {
+        items: Arc<Mutex<Vec<LibraryItem>>>,
+    }
+
+    impl LibraryStore for MemoryLibrary {
+        fn upsert(&self, item: &LibraryItem) -> CoreResult<()> {
+            let mut items = self.items.lock().unwrap();
+            if let Some(existing) = items.iter_mut().find(|i| i.media_key == item.media_key) {
+                *existing = item.clone();
+            } else {
+                items.push(item.clone());
+            }
+            Ok(())
+        }
+
+        fn list(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>> {
+            Ok(self
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|item| status.is_none_or(|s| item.status == s))
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct FailingStatusTracker;
+
+    #[async_trait]
+    impl Tracker for FailingStatusTracker {
+        fn name(&self) -> &str {
+            "failing-status"
+        }
+        async fn update_progress(&self, _ids: &IdSet, _episode: u32) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn set_status(&self, _ids: &IdSet, _status: ListStatus) -> CoreResult<()> {
+            Err(CoreError::Network("tracker down".into()))
+        }
+        async fn rate(&self, _ids: &IdSet, _score: f32) -> CoreResult<()> {
+            Ok(())
+        }
     }
 
     impl HistoryStore for SavedHistory {
@@ -1508,9 +2449,77 @@ mod tests {
             season: None,
             episode: None,
             episode_title: None,
+            episode_still: None,
             episode_runtime_minutes: None,
             include_uncached: false,
         }
+    }
+
+    #[tokio::test]
+    async fn manual_library_status_persists_when_tracker_sync_fails() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .library(library.clone())
+            .tracker(Arc::new(FailingStatusTracker))
+            .build();
+
+        let item = engine
+            .set_library_status(&movie_request().media, ListStatus::Planning)
+            .await
+            .unwrap();
+
+        assert_eq!(item.status, ListStatus::Planning);
+        let items = library.list(Some(ListStatus::Planning)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Interstellar");
+    }
+
+    #[tokio::test]
+    async fn playback_updates_movie_library_to_completed() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: Arc::new(Mutex::new(Vec::new())),
+                fraction: 0.95,
+            }))
+            .library(library.clone())
+            .build();
+
+        engine
+            .play(&movie_request(), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        let items = library.list(None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, ListStatus::Completed);
+        assert_eq!(items[0].position_secs, 95);
+        assert_eq!(items[0].duration_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn playback_updates_episodic_library_progress_as_watching() {
+        let library = Arc::new(MemoryLibrary::default());
+        let engine = Engine::builder()
+            .resolver(Arc::new(EchoResolver))
+            .player(Arc::new(RecordingPlayer {
+                played: Arc::new(Mutex::new(Vec::new())),
+                fraction: 0.95,
+            }))
+            .library(library.clone())
+            .build();
+
+        engine
+            .play(&play_request(episodic_media()), &resolvable_candidate())
+            .await
+            .unwrap();
+
+        let items = library.list(None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, ListStatus::Watching);
+        assert_eq!(items[0].last_season, Some(1));
+        assert_eq!(items[0].last_episode, Some(1));
     }
 
     #[tokio::test]

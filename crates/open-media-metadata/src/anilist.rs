@@ -1,7 +1,7 @@
 //! AniList GraphQL metadata adapter (anime).
 //!
 //! Search/details are public (no token). The token-gated mutations (progress
-//! tracking) live in `om-track`, not here.
+//! tracking) live in `open-media-track`, not here.
 
 use std::collections::HashMap;
 

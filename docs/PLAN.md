@@ -1,20 +1,20 @@
 # Build plan
 
-Phased, vertical-slice plan. Each phase replaces a set of `NotImplemented` stubs
-with working adapters and ends with concrete acceptance criteria. Phase numbers
-match the `// Phase N` markers in the crate stubs.
+Phased, vertical-slice plan. Phases 0–10 are complete; the entries below record
+the acceptance criteria that moved the project from scaffold to shipping app.
+Post-0.1 follow-ups are summarized near the end and tracked in `continue-plan.md`.
 
 Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 
 ---
 
 ## Phase 0 — Scaffold & docs ✅
-- [x] Cargo workspace, 11 `open-media-*` crates, dependency rule enforced.
+- [x] Cargo workspace, now 14 `open-media-*` crates, dependency rule enforced.
 - [x] `open-media-core`: domain model, all ports, scoring (+ unit tests).
 - [x] `open-media-config`: schema, load/save, secrets policy (+ tests).
-- [x] Every adapter stub implements its port (contract compile-checked).
+- [x] Initial adapter surfaces compile-checked; production implementations landed in later phases.
 - [x] `open-media-app` Engine/builder with real `search`/`find_sources` fan-out + ranking.
-- [x] `open-media-cli` composition root + `om {init,config,search,play}`.
+- [x] `open-media-cli` composition root + `open-media {init,config,search,play,login}`.
 - [x] `cargo fmt` clean, `cargo clippy -D warnings` clean, tests green.
 - [x] README, AGENTS, ARCHITECTURE, RESEARCH, PLAN, ROADMAP, CONTRIBUTING.
 
@@ -91,9 +91,8 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 - [x] Full `Engine::play`: resolve → enrich (skip) → resume → launch → monitor over
       IPC (auto-skip OP/ED, progress/history, presence, chapters) via `select!` →
       teardown → complete→tracker. Optional ports degrade gracefully.
-- **M3 — substantially met:** the session loop is implemented and wired; full
-  unattended auto-advance/binge is a thin follow-up on top (tracked in
-  `continue-plan.md`).
+- **M3 — met:** the session loop is implemented and wired; unattended
+  auto-advance/binge with filler-skip landed in the post-0.1 hardening pass.
 
 ## Phase 9 — TUI (`open-media-cli`) ✅
 - [x] ratatui app: `Screen` state machine + `mpsc` render loop (littlejohn pattern);
@@ -102,7 +101,8 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       focusable filter/sort side panel on Sources, persisted to `[ui.sources]`.
 - [x] Logs routed off the alternate screen in TUI mode.
 - **M4 — met:** verified end-to-end with Wisp — live search → seasons/episodes →
-  ranked, filterable sources → clean quit. (Themes/wizard polish: follow-up.)
+  ranked, filterable sources → clean quit. Theme support and poster/still rendering
+  landed later; first-run wizard and home-screen polish remain follow-ups.
 
 ## Phase 10 — Packaging & release ✅
 - [x] Nix flake: `packages.x86_64-linux.{open-media,default}` (buildRustPackage; cmake +
@@ -111,15 +111,17 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 - [x] CI (`.github/workflows/ci.yml`): `rust` job (fmt + clippy + test) on every
       push; `build` job (master/tags) → `nix build .#open-media` + push to grok-insider cachix.
 - [x] Wired into the NixOS host (`~/.config/nixos` flake input + HM module);
-      `rebuild` installs `open-media 0.1.0` from the cache (no compile).
+      `rebuild` installs `open-media` from the cache (no compile).
 - [x] Automated releases (`release-plz.toml` + `.github/workflows/release.yml`):
-      push to master → release PR (version bump + `CHANGELOG`) → merging it tags
-      `vX.Y.Z`, creates the GitHub Release + a prebuilt `open-media` binary, and cachix
-      gets `open-media-X.Y.Z`. Conventional Commits drive the bump (see CONTRIBUTING).
+      `dev` → `master` integration → patch release PR (version bump +
+      `CHANGELOG`) → merging it tags `vX.Y.Z`, publishes crates to crates.io,
+      creates the GitHub Release + prebuilt `open-media` archives, and cachix gets
+      `open-media-X.Y.Z`. Conventional Commits drive patch releases; repo admins
+      use the Manual Version Bump workflow for minor/major milestones.
 - [x] Bootstrap: `v0.1.0` tagged + GitHub Release published (anchors release-plz).
       Pipeline verified live — the release PR opens on `feat`/`fix` and no-ops
       otherwise, and the `v*` tag's CI pushed `open-media-0.1.0` to cachix.
-- **M5 — met:** `nix run github:grok-insider/open-media#om -- --help` works, and the
+- **M5 — met:** `nix run github:grok-insider/open-media#open-media -- --help` works, and the
   HM-installed `open-media` runs on the NixOS host. Release-pipeline hardening follow-ups
   live in `continue-plan.md`.
 
@@ -127,8 +129,9 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 
 ## Post-0.1 hardening (ongoing)
 
-After 0.1.0, an audit + UX pass landed a batch of fixes and features (see the git
-history; `CHANGELOG` is release-plz–generated from the commits):
+After 0.1.0, several audit, portability, release, and UX passes landed. Current
+workspace version: `0.6.1`. `CHANGELOG.md` remains the release source of truth;
+this section summarizes the roadmap-relevant state.
 
 - **Keyless metadata:** `CinemetaProvider` — movies/series search with no TMDB key;
   `Engine::search` dedups by IMDB id.
@@ -152,11 +155,20 @@ history; `CHANGELOG` is release-plz–generated from the commits):
   P2P lock-across-metadata-wait fix; release-tag parser nits; configurable nyaa
   category; real runtime to AniSkip. Plus repo plumbing: a `dev`-only-into-`master`
   CI guard (required check on `master`).
+- **0.2–0.6 shipped work:** Windows mpv/Discord IPC and release artifact;
+  OpenSubtitles/SubDL/Jimaku subtitle fetch via `open-media-subs`; AniList
+  loopback login; binge/auto-advance with filler skip; TMDB/AniList search
+  pagination; anime absolute episode numbering for nyaa; applied `ui.theme`;
+  wider `config show`/`set`; anime episode titles from Jikan/streaming metadata;
+  positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB bridge;
+  keyless Torrentio tracker parsing; shared `open-media-net` HTTP timeouts/retry;
+  source-level playback failover; MSRV CI; crates.io publishing for every crate;
+  and `open-media --version` naming cleanup.
 
-**Remaining follow-ups** (anime *absolute* episode numbering, binge auto-advance,
-pagination, `open-media config set` coverage, tracker OAuth, Discord app id, the
-`behavior.resume`/`ui.theme` dead keys, and a few smaller nits) are tracked in
-**`continue-plan.md`** — check there before starting new work.
+**Remaining follow-ups** (MAL OAuth/refresh, RD cache-check limitations, nyaa
+pagination/load-more, list/nested config setters, telemetry collector activation,
+additional debrid backends, and UX polish) are tracked in **`continue-plan.md`** —
+check there before starting new work.
 
 ---
 

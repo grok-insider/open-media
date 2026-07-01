@@ -13,8 +13,8 @@ cargo test --workspace
 ```
 
 A recent stable Rust toolchain is required (`rust-toolchain.toml` pins channel +
-components). On the NixOS dev host, the flake's devshell is canonical (lands in
-v0.4).
+components). On the NixOS dev host, the flake's devshell is canonical and
+provides the Rust toolchain plus native build glue.
 
 ## The golden rules
 
@@ -48,10 +48,10 @@ cargo build
 
 - **Tests:** unit-test pure logic (no network). Test adapters against recorded
   fixtures, not the live service. Test app logic with fake ports (see `open-media-app`).
-- **Docs:** update `docs/PLAN.md` checkboxes when you complete phase work. Don't
-  hand-edit `CHANGELOG.md` — release-plz regenerates it from your commit messages
-  (see [Releases](#releases)), so a clear Conventional Commit *is* the changelog
-  entry.
+- **Docs:** update `docs/PLAN.md` / `continue-plan.md` when you complete roadmap
+  work. Don't hand-edit `CHANGELOG.md` outside a release PR — release-plz creates
+  it from commits and the release workflow enriches that PR's notes, so a clear
+  Conventional Commit *is* the changelog input.
 - **Comments:** explain *why* (a quirk, a rate limit, a scoring trade-off), not
   *what*.
 
@@ -61,42 +61,51 @@ This repo uses [Conventional Commits](https://www.conventionalcommits.org). The
 commit history drives automated versioning and the changelog (see
 [Releases](#releases)), so prefix every commit subject with a type:
 
-- `feat: …` — a user-visible feature → **minor** bump (`0.x.0`).
-- `fix: …` — a bug fix → **patch** bump (`0.0.x`).
-- `feat!: …` (or a `BREAKING CHANGE:` footer) — a breaking change. While the
-  project is `0.x` this bumps the **minor**, per Cargo's SemVer rules.
+- `feat: …` — a user-visible feature → automatic **patch** release.
+- `fix: …` — a bug fix → automatic **patch** release.
+- `feat!: …` (or a `BREAKING CHANGE:` footer) — do not use for the normal
+  automatic release stream; coordinate a repo-admin manual major/minor bump when
+  the release milestone intentionally changes `x` or `y`.
 - `docs:`, `refactor:`, `perf:`, `test:`, `chore:`, `ci:` — don't trigger a
   release on their own; grouped into the changelog where relevant.
 
 Keep subjects short and imperative (`fix: unrestrict the requested RD file`); add
 a scope when it helps (`feat(open-media-sources): …`). Small, focused commits.
 
-A PR should leave `master` green (fmt + clippy + test) and the dependency rule
-intact. Note any new config keys and update `open-media-config` + README.
+A PR should leave its target branch green (fmt + clippy + test) and the
+dependency rule intact. Note any new config keys and update `open-media-config` +
+README.
 
 ## Releases
 
 Releasing is automated with [release-plz](https://release-plz.dev)
-(`release-plz.toml` + `.github/workflows/release.yml`). You don't bump versions or
-write changelog entries by hand:
+(`release-plz.toml` + `.github/workflows/release.yml`). You usually don't bump
+versions or write changelog entries by hand:
 
-1. Merge Conventional-Commit PRs to `master` as usual.
-2. release-plz keeps a **release PR** open (`chore: release v…`) that bumps the
+1. Land feature/fix PRs into `dev`.
+2. Open the single sanctioned `dev` → `master` integration PR. The `guard master`
+   workflow rejects other PR branches into `master`, except `release-plz-*`.
+3. When `feat:`/`fix:` commits reach `master`, release-plz keeps a patch-line
+   **release PR** open (`chore: release v…`) that bumps the
    single `[workspace.package].version` (every crate inherits it via
    `version.workspace = true`), refreshes `Cargo.lock`, and regenerates
-   `CHANGELOG.md` from the commits since the last tag. Polish that PR's notes if
-   you like.
-3. **Merge the release PR to ship.** It tags `vX.Y.Z`, creates the GitHub Release,
-   and attaches a prebuilt `open-media` binary. The same push makes CI build and push
+   `CHANGELOG.md` from the commits since the last tag. The workflow then enriches
+   that changelog section with AI-written user-facing notes.
+4. **Merge the release PR to ship.** It tags `vX.Y.Z`, publishes every crate to
+   crates.io in dependency order, creates the GitHub Release, and attaches
+   prebuilt `open-media` archives for Linux/macOS/Windows. The same push makes CI build and push
    `open-media-X.Y.Z` to the `grok-insider` cachix cache (`flake.nix` reads the version from
    `Cargo.toml`), and `open-media --version` reports it.
-
-Nothing is published to crates.io.
+5. For deliberate minor/major milestones, a repo admin runs the **Manual Version
+   Bump** workflow. It opens a `release-plz-manual-v…` PR into `master` that
+   updates `Cargo.toml`/`Cargo.lock`; merging that PR ships the requested version
+   through the same release job.
 
 **One-time setup.** Enable *Settings → Actions → General → "Allow GitHub Actions
 to create and approve pull requests"* (so release-plz can open the release PR);
-the `CACHIX_AUTH_TOKEN` secret is already configured. To anchor the first bump,
-tag the current baseline once:
+configure `RELEASE_PLZ_TOKEN`, `CARGO_REGISTRY_TOKEN`, `OPENROUTER_API_KEY`, and
+`CACHIX_AUTH_TOKEN` secrets. To anchor a fresh release history, tag the current
+baseline once:
 
 ```bash
 git tag -a v0.1.0 -m "open-media 0.1.0" && git push origin v0.1.0

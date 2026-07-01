@@ -1,11 +1,11 @@
-//! # om-config
+//! # open-media-config
 //!
 //! The on-disk configuration schema and its load/save logic.
 //!
 //! ## Secrets policy
 //! API tokens (debrid, TMDB, tracker OAuth) live in this file under the user's
 //! XDG config dir (`~/.config/open-media/config.toml`), **never** in the source
-//! tree, environment-baked binaries, or the Nix store. `om-config` owns the file
+//! tree, environment-baked binaries, or the Nix store. `open-media-config` owns the file
 //! so the rest of the app never reads tokens from anywhere else. Environment
 //! variables (`OPEN_MEDIA_*`) may override at runtime for ephemeral/CI use.
 //!
@@ -121,6 +121,11 @@ pub struct Player {
     /// Player binary: `"mpv"` (default, enables IPC features) or `"vlc"`.
     #[serde(default = "default_player")]
     pub command: String,
+    /// Enable best-effort mpv seekbar thumbnail script compatibility. Requires
+    /// user-installed mpv scripts such as thumbfast plus uosc or another
+    /// thumbfast-compatible OSC; open-media does not bundle scripts.
+    #[serde(default)]
+    pub thumbnail_previews: bool,
     /// Extra args appended to the player invocation.
     #[serde(default = "default_player_args")]
     pub args: Vec<String>,
@@ -130,6 +135,7 @@ impl Default for Player {
     fn default() -> Self {
         Self {
             command: default_player(),
+            thumbnail_previews: false,
             args: default_player_args(),
         }
     }
@@ -238,7 +244,7 @@ impl Default for Ui {
 }
 
 /// Persisted Sources-screen filter/sort selections. Stored as strings/bools so
-/// `om-config` stays free of the TUI's enums; the TUI maps them on load/save.
+/// `open-media-config` stays free of the TUI's enums; the TUI maps them on load/save.
 /// `"all"` means no filter. All five are remembered across sessions and applied
 /// literally; if a remembered filter hides everything on a later search, the
 /// panel shows `0 of N` and `Clear` resets it.
@@ -277,7 +283,7 @@ impl Default for SourcesUi {
 /// estimate how many active installs exist (DAU/MAU). The only data ever sent is
 /// the app version, host OS/arch, and the random [`install_id`](Telemetry::install_id);
 /// **never** anything about what is watched (no titles, queries, tokens, or
-/// history). Disable any time with `om config set telemetry=false`.
+/// history). Disable any time with `open-media config set telemetry=false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Telemetry {
     /// Send the anonymous usage ping once per launch. Default `true` (opt-out).
@@ -509,9 +515,28 @@ tmdb_api_key = "abc"
         assert!(cfg.is_usable());
         assert!(!cfg.has_debrid());
         assert_eq!(cfg.player.command, "mpv");
+        assert!(!cfg.player.thumbnail_previews);
         assert!(cfg.providers.nyaa_direct);
         assert!(cfg.providers.cinemeta);
         assert!(cfg.behavior.skip_intro_outro);
+    }
+
+    #[test]
+    fn player_thumbnail_previews_default_and_roundtrip() {
+        // Off by default on an empty document, matching the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.player.thumbnail_previews);
+        assert_eq!(
+            cfg.player.thumbnail_previews,
+            Player::default().thumbnail_previews
+        );
+
+        // A customized value survives a serialize/deserialize round-trip.
+        let mut c = Config::default();
+        c.player.thumbnail_previews = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.player.thumbnail_previews);
     }
 
     #[test]

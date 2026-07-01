@@ -1,9 +1,10 @@
 //! Ports — the trait boundaries of the hexagon.
 //!
 //! Every external capability open-media needs is expressed here as a small,
-//! focused trait. The application layer ([`om-app`]) depends only on these
-//! traits; concrete adapters (`om-metadata`, `om-sources`, `om-debrid`, ...)
-//! implement them and are injected at the composition root (`om-cli`). This is
+//! focused trait. The application layer ([`open-media-app`]) depends only on these
+//! traits; concrete adapters (`open-media-metadata`, `open-media-sources`,
+//! `open-media-debrid`, ...) implement them and are injected at the composition
+//! root (`open-media-cli`). This is
 //! the Dependency-Inversion boundary: core/app never name a concrete HTTP client
 //! or database.
 //!
@@ -14,7 +15,7 @@
 //! - **Object-safe**: all traits are usable as `Arc<dyn Trait>` so the engine can
 //!   hold heterogeneous, runtime-selected adapters.
 //!
-//! [`om-app`]: ../../open_media_app/index.html
+//! [`open-media-app`]: ../../open_media_app/index.html
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use crate::error::CoreResult;
 use crate::model::{Episode, IdSet, Media, MediaKind, Season};
 use crate::stream::{Playback, SourceCandidate};
 use crate::subtitle::{SubtitleQuery, SubtitleTrack};
-use crate::tracking::{Activity, ListStatus, SkipTimes, WatchProgress};
+use crate::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
 use crate::usage::UsageInfo;
 
 /// Discovers and describes media (TMDB, AniList).
@@ -169,6 +170,13 @@ pub struct PlayOptions {
     pub extra_args: Vec<String>,
 }
 
+/// Metadata for an item appended to a live player playlist.
+#[derive(Debug, Clone)]
+pub struct PlaylistItem {
+    pub url: String,
+    pub title: Option<String>,
+}
+
 /// A chapter marker (used to expose AniSkip OP/ED segments in the player UI).
 #[derive(Debug, Clone)]
 pub struct Chapter {
@@ -204,6 +212,13 @@ pub trait PlaySession: Send {
     /// A control handle, if the player supports IPC (mpv). `None` for players
     /// that can only be launched (vlc), which disables resume/auto-skip for them.
     fn control(&self) -> Option<Arc<dyn PlaybackControl>>;
+
+    /// Optional live-playlist support. Players that expose this can keep one
+    /// process alive and append the next episode so the player's own Next button
+    /// has a target; launch-only players keep returning `None`.
+    fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+        None
+    }
 }
 
 /// Live control of a playing session over the player's IPC channel (mpv).
@@ -218,6 +233,16 @@ pub trait PlaybackControl: Send + Sync {
     async fn seek_absolute(&self, secs: u32) -> CoreResult<()>;
     async fn set_chapters(&self, chapters: &[Chapter]) -> CoreResult<()>;
     async fn quit(&self) -> CoreResult<()>;
+}
+
+/// Optional live playlist operations for players that support them (mpv IPC).
+#[async_trait]
+pub trait PlaylistControl: Send + Sync {
+    /// Append an item without interrupting current playback.
+    async fn append(&self, item: &PlaylistItem) -> CoreResult<()>;
+
+    /// Zero-based active playlist index, when the player exposes it.
+    async fn active_index(&self) -> CoreResult<Option<usize>>;
 }
 
 /// Syncs watch state to a remote list service (AniList, MyAnimeList).
@@ -265,6 +290,15 @@ pub trait HistoryStore: Send + Sync {
         episode: u32,
     ) -> CoreResult<Option<WatchProgress>>;
     fn recent(&self, limit: usize) -> CoreResult<Vec<WatchProgress>>;
+}
+
+/// Persists the user's local library/watchlist.
+///
+/// Kept separate from [`HistoryStore`] because this is a media-level list with
+/// display metadata and user status, not just per-episode resume positions.
+pub trait LibraryStore: Send + Sync {
+    fn upsert(&self, item: &LibraryItem) -> CoreResult<()>;
+    fn list(&self, status: Option<ListStatus>) -> CoreResult<Vec<LibraryItem>>;
 }
 
 /// Finds external subtitles for a media item (OpenSubtitles, …).

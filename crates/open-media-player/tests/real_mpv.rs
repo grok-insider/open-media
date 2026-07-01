@@ -5,7 +5,7 @@
 //! the user's mpv.conf — and drives the real IPC: query duration, seek, then let
 //! it run to completion and confirm the session ends.
 //!
-//! Run with: `cargo test -p om-player --test real_mpv -- --ignored`
+//! Run with: `cargo test -p open-media-player --test real_mpv -- --ignored`
 
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ async fn real_mpv_launch_ipc_and_exit() {
     let player = MpvPlayer::new(
         "mpv",
         vec!["--vo=null".into(), "--ao=null".into(), "--no-config".into()],
+        false,
     );
     if !player.is_available() {
         eprintln!("mpv not on PATH — skipping");

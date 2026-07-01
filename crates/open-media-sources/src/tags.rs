@@ -1,6 +1,6 @@
 //! Release-name parsing: titles/filenames → [`Quality`] + [`ReleaseTags`] +
 //! cache/seeders/size. Adapted from miru's well-tested Torrentio parser, but
-//! producing `om-core` types so scoring and the UI stay format-agnostic.
+//! producing `open-media-core` types so scoring and the UI stay format-agnostic.
 //!
 //! Torrentio encodes metadata across a two-line `name`/`title` pair with emoji
 //! (`👤` seeders, `💾` size, flag emoji for languages, `[RD+]`/`⚡` for cache).

@@ -1,5 +1,5 @@
-# release-plz — automated versioning + releases for the `om` workspace.
-# Docs: https://release-plz.dev/docs/config   (validated against release-plz 0.3.x)
+# release-plz — automated versioning + releases for the open-media workspace.
+# Docs: https://release-plz.dev/docs/config   (workflow uses release-plz/action v0.5)
 #
 # Every crate shares ONE version via `version.workspace = true` (root Cargo.toml
 # `[workspace.package] version`). To keep that single field consistent, all crates
@@ -34,10 +34,11 @@ release_always = true
 release_commits = "^(feat|fix)"
 # Internal libs + one bin, not a published API: skip cargo-semver-checks.
 semver_check = false
-# This is an end-user app (not a published library), so treat `feat:` as a
-# minor bump even on 0.x — more communicative than the Cargo-SemVer 0.x default
-# (where features are patch and only breaking changes bump the minor).
-features_always_increment_minor = true
+# Automatic releases stay on the patch line: repo admins use the manual version
+# bump workflow for deliberate major/minor milestones. On 0.x this makes `feat:`
+# commits bump patch versions; avoid `feat!`/`BREAKING CHANGE` in the automatic
+# stream because release-plz still treats breaking commits as a minor bump.
+features_always_increment_minor = false
 # Defaults for the library crates below: no own tag/release/changelog. open-media-cli
 # overrides these to true.
 git_tag_enable = false
@@ -53,6 +54,9 @@ pr_labels = ["release"]
 # --- The libraries: share the version group, stay silent individually. ----------
 [[package]]
 name = "open-media-core"
+version_group = "om"
+[[package]]
+name = "open-media-net"
 version_group = "om"
 [[package]]
 name = "open-media-config"
@@ -108,6 +112,7 @@ changelog_path = "CHANGELOG.md"
 # anywhere ships in the binary. Fold all members' commits into the root changelog.
 changelog_include = [
     "open-media-core",
+    "open-media-net",
     "open-media-config",
     "open-media-metadata",
     "open-media-sources",

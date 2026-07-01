@@ -2,7 +2,7 @@
 //!
 //! Pure string builders shared by the playback path (mpv `--force-media-title`)
 //! and Discord rich presence, so both render an episode identically and degrade
-//! the same way when data is missing. Living in `om-core` keeps the format in one
+//! the same way when data is missing. Living in `open-media-core` keeps the format in one
 //! place without either consumer depending on the other (DIP).
 //!
 //! Formats:

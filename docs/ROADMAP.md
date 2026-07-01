@@ -6,22 +6,23 @@ nice-to-haves in `future-features.md`.
 
 ## Status (2026-06)
 
-The full engineering plan (PLAN Phases 0–10) is **implemented and shipping as
-`0.1.0`** — discover → source → resolve → play, the session features, the TUI, and
-Nix/CI packaging are all done. Notable post-MVP work already landed: **Cinemeta**
-keyless movie/series metadata (no TMDB key needed), episode titles in the player
-window/Discord, a focusable **filter/sort side panel** on the Sources screen, real
-**season navigation** with per-season episode lists, and anime **season-aware nyaa
-matching**. The remaining v0.2 item not yet built is unattended **auto-advance /
-binge**; see `continue-plan.md` for the tracked follow-ups.
+The full engineering plan (PLAN Phases 0–10) is **implemented and shipping**; the
+current workspace version is `0.6.1`. The app covers discover → source → resolve
+→ play, session features, the TUI, Nix/CI packaging, crates.io publishing, and
+prebuilt Linux/macOS/Windows archives. Post-MVP work already landed includes
+keyless Cinemeta, AniList/MAL→IMDB bridging for anime, external subtitle fetching,
+episode titles, theme support, poster/still rendering, source fallback,
+auto-advance/binge, search pagination for TMDB/AniList, and Windows IPC support.
+The remaining committed follow-ups are tracked in `continue-plan.md`.
 
 ## Versions
 
 > These are **milestone names**, not the literal crate version. Actual releases are
-> cut automatically by [release-plz](https://release-plz.dev) from Conventional
-> Commits (see `CONTRIBUTING.md` → Releases): the workspace is single-versioned
-> (started at `0.1.0`), each `feat:`/`fix:` bumps it, and merging the release PR
-> tags `vX.Y.Z` → GitHub Release (+ prebuilt `open-media`) → cachix.
+> cut by [release-plz](https://release-plz.dev) from Conventional Commits (see
+> `CONTRIBUTING.md` → Releases): the workspace is single-versioned (started at
+> `0.1.0`), `feat:`/`fix:` commits open patch-line release PRs, and repo-admin
+> manual version-bump PRs own deliberate minor/major milestones. Merging either
+> release PR tags `vX.Y.Z` → GitHub Release (+ prebuilt `open-media`) → cachix.
 
 ### v0.1 — "it plays" (MVP)
 The vertical slice: discover → source → resolve (Real-Debrid + P2P) → play in mpv.
@@ -43,20 +44,20 @@ The session features that make it pleasant.
 ### v0.3 — "it's a joy in the terminal"
 - ratatui TUI: search → results → seasons → episodes → sources → playing, with a
   focusable filter/sort side panel on Sources (persisted to `[ui.sources]`).
-- Still to come: themes, init wizard, masked secrets, poster thumbnails via
-  terminal image protocols (kitty/sixel) where available.
+- Themes and poster/still rendering via terminal image protocols are implemented.
+- Still to come: an init wizard and richer home/continue-watching surfaces.
 - PLAN Phase 9 (**M4**).
 
 ### v0.4 — "it ships"
 - Nix flake + Home Manager module + cachix (matches sibling repos).
-- CI (fmt/clippy/test) + automated releases: release-plz opens a version-bump PR on
-  each `feat:`/`fix:`; merging it tags `vX.Y.Z`, publishes a GitHub Release with a
-  prebuilt `open-media` binary, and pushes `open-media-X.Y.Z` to cachix.
+- CI (fmt/clippy/test) + automated releases: release-plz opens a patch release PR
+  on each `feat:`/`fix:`; repo admins open manual minor/major bump PRs when needed.
+  Merging either path tags `vX.Y.Z`, publishes a GitHub Release with a prebuilt
+  `open-media` binary, and pushes `open-media-X.Y.Z` to cachix.
 - PLAN Phase 10 (**M5**).
 
 ### v1.0 — "stable & broad"
 - A second debrid backend (Torbox or AllDebrid) proving the abstraction.
-- Subtitles (OpenSubtitles) + language-aware track selection.
 - Robustness: retries/backoff everywhere, graceful source failover, good error UX.
 - Documented, tested, MSRV-pinned.
 
@@ -84,10 +85,12 @@ The session features that make it pleasant.
 | History | SQLite resume + recents | v0.2 |
 | UI | clap CLI | v0.1 |
 | UI | ratatui TUI + themes | v0.3 |
-| UI | poster thumbnails | v0.3 |
-| Subtitles | OpenSubtitles + track selection | v1.0 |
+| UI | poster/still thumbnails | v0.5 |
+| Subtitles | OpenSubtitles/SubDL/Jimaku via open-subtitle | v0.3 |
 | Packaging | Nix flake + HM module | v0.4 |
 | Packaging | Automated releases (release-plz → GitHub Releases + cachix) | v0.4 |
+| Packaging | crates.io publishing (`cargo install open-media-cli`) | v0.6 |
+| Platform | Windows mpv/Discord IPC + release artifact | v0.2 |
 | Watch-together | syncplay | future |
 | Library mode | Zurg/Jellyfin-style RD library | future |
 

@@ -5,7 +5,7 @@
 //! (bridged from AniList via the media's `idMal`), which carries a real title
 //! per episode number.
 //!
-//! This client mirrors the page-loop shape of om-track's aniskip enricher: a
+//! This client mirrors the page-loop shape of open-media-track's aniskip enricher: a
 //! shared [`reqwest::Client`], an injectable base URL (tests point it at a mock
 //! server), a small page cap, and a pause between pages to respect Jikan's
 //! ~3 req/s limit. Every lookup is **best-effort** — any failure yields an empty
@@ -124,7 +124,7 @@ struct JikanEpisodes {
     pagination: Option<JikanPagination>,
 }
 
-/// One Jikan episode. Unlike om-track's `JikanEpisode` (which keeps only
+/// One Jikan episode. Unlike open-media-track's `JikanEpisode` (which keeps only
 /// `mal_id`/`filler`), this keeps `title` — the whole point of this client.
 #[derive(Debug, Deserialize)]
 struct JikanEpisode {

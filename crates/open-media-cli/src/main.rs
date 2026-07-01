@@ -1,8 +1,8 @@
-//! `om` — open-media command-line entrypoint.
+//! open-media command-line entrypoint.
 //!
 //! This binary is intentionally thin: parse args, load config, build the
 //! [`Engine`] via [`compose::build_engine`], and dispatch. All real work lives in
-//! `om-app` (orchestration) and the adapter crates (I/O).
+//! `open-media-app` (orchestration) and the adapter crates (I/O).
 //!
 //! [`Engine`]: open_media_app::Engine
 
@@ -13,7 +13,8 @@ mod telemetry;
 mod tui;
 
 use clap::{Parser, Subcommand};
-use open_media_core::model::MediaKind;
+use open_media_core::model::{Media, MediaKind};
+use open_media_core::tracking::ListStatus;
 
 /// open-media: watch movies, series, and anime from the terminal — via
 /// Real-Debrid (instant, cached) or direct P2P, into mpv/vlc.
@@ -21,7 +22,7 @@ use open_media_core::model::MediaKind;
 #[command(name = "open-media", version, about, long_about = None)]
 struct Cli {
     /// Free-text query that opens the TUI pre-filled and immediately searches
-    /// (e.g. `om "frieren"`). Ignored when a subcommand is given.
+    /// (e.g. `open-media "frieren"`). Ignored when a subcommand is given.
     query: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -58,18 +59,52 @@ enum Command {
         /// Tracker to authorize: `anilist` (MAL coming soon).
         provider: String,
     },
+    /// Manage the local library/watchlist.
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LibraryAction {
+    /// List locally saved library items.
+    List {
+        /// Filter by status: watching | completed | planning | paused | dropped | repeating.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Add the best search result as plan-to-watch.
+    Plan {
+        /// Free-text query.
+        query: String,
+    },
+    /// Mark the best search result as currently watching.
+    Watching {
+        /// Free-text query.
+        query: String,
+    },
+    /// Mark the best search result as watched/completed.
+    Watched {
+        /// Free-text query.
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
-    /// Print the resolved configuration (secrets masked).
+    /// Print a resolved configuration summary (secrets masked).
     Show,
     /// Print the config file path.
     Path,
-    /// Set a key: `om config set tmdb_api_key=...`.
+    /// Set a scalar key: `open-media config set tmdb_api_key=...`.
     Set {
-        /// `key=value`. Keys: tmdb_api_key, real_debrid_token, anilist_token,
-        /// mal_token, debrid_provider, player_command, telemetry.
+        /// `key=value`. Run `open-media config show` for current values; list/nested
+        /// keys such as torrentio_providers, player.args, [subtitles], and [ui.sources]
+        /// are edited directly in config.toml for now. mpv thumbnail previews can
+        /// be toggled with player.thumbnail_previews=true; they require
+        /// user-installed mpv scripts such as thumbfast plus uosc or another
+        /// compatible OSC.
         kv: String,
     },
 }
@@ -92,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             episode,
         }) => cmd_play(&query, season, episode).await,
         Some(Command::Login { provider }) => login::cmd_login(&provider).await,
+        Some(Command::Library { action }) => cmd_library(action).await,
     }
 }
 
@@ -114,7 +150,7 @@ async fn run_interactive(initial_query: Option<String>) -> anyhow::Result<()> {
     let mut cfg = match open_media_config::load() {
         Ok(c) => c,
         Err(_) => {
-            println!("No configuration found. Run `om init` first.");
+            println!("No configuration found. Run `open-media init` first.");
             return Ok(());
         }
     };
@@ -127,7 +163,7 @@ fn cmd_init() -> anyhow::Result<()> {
     let path = open_media_config::config_path();
     if open_media_config::load().is_ok() {
         println!("Config already exists at {}", path.display());
-        println!("Edit it directly, or use `om config set key=value`.");
+        println!("Edit it directly, or use `open-media config set key=value`.");
         return Ok(());
     }
     let mut cfg = open_media_config::Config::default();
@@ -139,8 +175,8 @@ fn cmd_init() -> anyhow::Result<()> {
     println!("Created {}", path.display());
     println!();
     println!("Next steps (all optional — search works keyless via Cinemeta + AniList):");
-    println!("  om config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
-    println!("  om config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
+    println!("  open-media config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
+    println!("  open-media config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
     println!();
     println!(
         "Get keys: https://real-debrid.com/apitoken  +  https://www.themoviedb.org/settings/api"
@@ -148,7 +184,7 @@ fn cmd_init() -> anyhow::Result<()> {
     println!();
     println!("Anonymous usage analytics (OS, arch, version, a random id) are ON by");
     println!("default to count active installs — never anything you watch. Opt out with:");
-    println!("  om config set telemetry=false");
+    println!("  open-media config set telemetry=false");
     Ok(())
 }
 
@@ -198,6 +234,10 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
 
             println!("[player]");
             println!("  player_command        = {}", cfg.player.command);
+            println!(
+                "  player.thumbnail_previews = {}  # requires user-installed mpv scripts such as thumbfast + uosc/compatible OSC",
+                cfg.player.thumbnail_previews
+            );
             println!("  player.args           = {}", cfg.player.args.join(" "));
 
             println!("[streaming]");
@@ -263,6 +303,9 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 "resume" => cfg.behavior.resume = parse_bool(key, value)?,
                 "discord_presence" => cfg.behavior.discord_presence = parse_bool(key, value)?,
                 "telemetry" => cfg.telemetry.enabled = parse_bool(key, value)?,
+                "player.thumbnail_previews" | "thumbnail_previews" => {
+                    cfg.player.thumbnail_previews = parse_bool(key, value)?
+                }
                 "cleanup_after_playback" => {
                     cfg.streaming.cleanup_after_playback = parse_bool(key, value)?
                 }
@@ -337,15 +380,15 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
 
     // 4. Best-effort episode title + runtime for the player's media-title and
     //    AniSkip interval validation.
-    let (episode_title, episode_runtime_minutes) = match (req_season, req_episode) {
+    let (episode_title, episode_still, episode_runtime_minutes) = match (req_season, req_episode) {
         (Some(s), Some(e)) => engine
             .episodes(&media.ids, s)
             .await
             .ok()
             .and_then(|eps| eps.into_iter().find(|ep| ep.number == e))
-            .map(|ep| (ep.title, ep.runtime_minutes))
-            .unwrap_or((None, None)),
-        _ => (None, None),
+            .map(|ep| (ep.title, ep.still, ep.runtime_minutes))
+            .unwrap_or((None, None, None)),
+        _ => (None, None, None),
     };
 
     // 5. Find + rank sources.
@@ -354,6 +397,7 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         season: req_season,
         episode: req_episode,
         episode_title,
+        episode_still,
         episode_runtime_minutes,
         include_uncached: cfg.providers.show_uncached,
     };
@@ -393,8 +437,81 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
     Ok(())
 }
 
+async fn cmd_library(action: LibraryAction) -> anyhow::Result<()> {
+    let mut cfg = load_or_hint()?;
+    telemetry::startup(&mut cfg);
+    let engine = compose::build_engine(&cfg);
+    match action {
+        LibraryAction::List { status } => {
+            let status = parse_status(status.as_deref())?;
+            let items = engine.list_library(status)?;
+            if items.is_empty() {
+                println!("Library is empty.");
+                return Ok(());
+            }
+            for item in items {
+                let progress = if item.duration_secs > 0 {
+                    format!(" {:.0}%", item.progress_fraction() * 100.0)
+                } else {
+                    String::new()
+                };
+                let coordinate = match (item.last_season, item.last_episode) {
+                    (Some(s), Some(e)) => format!(" S{s:02}E{e:02}"),
+                    _ => String::new(),
+                };
+                println!(
+                    "[{:<9}] [{:<6}] {} ({}){}{}",
+                    status_label(item.status),
+                    item.kind.label(),
+                    item.title,
+                    item.year
+                        .map(|y| y.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    coordinate,
+                    progress,
+                );
+            }
+        }
+        LibraryAction::Plan { query } => {
+            mark_library_query(&engine, &query, ListStatus::Planning).await?;
+        }
+        LibraryAction::Watching { query } => {
+            mark_library_query(&engine, &query, ListStatus::Watching).await?;
+        }
+        LibraryAction::Watched { query } => {
+            mark_library_query(&engine, &query, ListStatus::Completed).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn mark_library_query(
+    engine: &open_media_app::Engine,
+    query: &str,
+    status: ListStatus,
+) -> anyhow::Result<()> {
+    let media = best_media(engine, query).await?;
+    let item = engine.set_library_status(&media, status).await?;
+    println!(
+        "Marked {} as {}.",
+        item.title,
+        status_label(item.status).to_ascii_lowercase()
+    );
+    Ok(())
+}
+
+async fn best_media(engine: &open_media_app::Engine, query: &str) -> anyhow::Result<Media> {
+    let results = engine.search(query, None).await?;
+    let top = results
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no results for `{query}`"))?;
+    Ok(engine.details(&top.ids).await.unwrap_or(top))
+}
+
 fn load_or_hint() -> anyhow::Result<open_media_config::Config> {
-    open_media_config::load().map_err(|_| anyhow::anyhow!("no config found — run `om init` first"))
+    open_media_config::load()
+        .map_err(|_| anyhow::anyhow!("no config found — run `open-media init` first"))
 }
 
 fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {
@@ -403,6 +520,33 @@ fn parse_kind(kind: Option<&str>) -> Option<MediaKind> {
         "series" | "tv" => Some(MediaKind::Series),
         "anime" => Some(MediaKind::Anime),
         _ => None,
+    }
+}
+
+fn parse_status(status: Option<&str>) -> anyhow::Result<Option<ListStatus>> {
+    status.map(parse_required_status).transpose()
+}
+
+fn parse_required_status(status: &str) -> anyhow::Result<ListStatus> {
+    match status.to_ascii_lowercase().as_str() {
+        "watching" => Ok(ListStatus::Watching),
+        "completed" | "watched" => Ok(ListStatus::Completed),
+        "planning" | "plan" | "plan-to-watch" => Ok(ListStatus::Planning),
+        "paused" => Ok(ListStatus::Paused),
+        "dropped" => Ok(ListStatus::Dropped),
+        "repeating" | "rewatching" => Ok(ListStatus::Repeating),
+        other => anyhow::bail!("unknown library status `{other}`"),
+    }
+}
+
+fn status_label(status: ListStatus) -> &'static str {
+    match status {
+        ListStatus::Watching => "Watching",
+        ListStatus::Completed => "Completed",
+        ListStatus::Planning => "Planning",
+        ListStatus::Paused => "Paused",
+        ListStatus::Dropped => "Dropped",
+        ListStatus::Repeating => "Repeating",
     }
 }
 

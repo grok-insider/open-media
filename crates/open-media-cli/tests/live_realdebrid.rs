@@ -6,7 +6,7 @@
 //! anything to the account.
 //!
 //! Run with:
-//!   OM_RD_TOKEN=xxxxx cargo test -p om-cli --test live_realdebrid -- --ignored --nocapture
+//!   OM_RD_TOKEN=xxxxx cargo test -p open-media-cli --test live_realdebrid -- --ignored --nocapture
 
 use open_media_core::model::{IdSet, Media, MediaKind};
 use open_media_core::ports::{DebridProvider, SourceProvider, SourceQuery};

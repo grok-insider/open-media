@@ -1,9 +1,8 @@
 # continue-plan.md
 
-Outstanding engineering follow-ups, captured so we can pick them up later. These
-are concrete next steps (with file references) from the 2026-06 audit and the
-recent metadata/TUI/source work. The broader, aspirational backlog lives in
-`future-features.md`; this file is the actionable "still to do" list.
+Actionable engineering follow-ups after the 0.6.1 audit. The broader backlog
+lives in `future-features.md`; this file is for concrete work that is close enough
+to pick up.
 
 Status legend: **P1** correctness bug still present · **P2** incomplete feature ·
 **P3** smaller correctness nit / polish.
@@ -12,133 +11,100 @@ Status legend: **P1** correctness bug still present · **P2** incomplete feature
 
 ## Already shipped (context — do NOT redo)
 
-Cinemeta keyless metadata + IMDB dedup; episode titles in mpv/Discord
-(`om-core::title`); RD multi-file/season-pack fix; `HybridResolver` debrid→P2P
-fallback; Torrentio anime no-op without IMDB; `complete_threshold` wired;
-debrid/Torrentio token-gating consistency (`Config::has_real_debrid`); TUI season
-navigation + real episode lists; Sources filter/sort side panel (persisted to
-`[ui.sources]`); Cinemeta episode ordering; **anime season matching Phase 1**
-(`om-sources/src/season.rs` — explicit markers, multi-season ranges, roman
-numerals, bare-ordinal shorthand).
-
-**2026-06 roadmap batch (landed via `dev` → `master`):** AniList `MOVIE` format →
-`Movie` kind (#6); AniList airing-anime episode count from `nextAiringEpisode`
-(#18, re-land of #16); `Engine::details` merges cross-provider ids (#7);
-`OPEN_MEDIA_*` env overrides applied on load (#8); cached-source unconditional
-score tiebreak (#9); MAL `is_rewatching` for repeating status (#10); vlc resume
-via `--start-time` (#11); P2P state lock not held across the metadata wait (#12);
-release-tag parser nits — bit-depth/multi-audio/provider-guard/AD+PM+TB+/GiB
-(#13); configurable nyaa category (#14); real episode runtime → AniSkip (#15);
-plus a `dev`-only-into-`master` CI guard (#19).
+Cinemeta keyless metadata + IMDB dedup; episode titles in mpv/Discord; RD
+multi-file/season-pack fix; `HybridResolver` debrid→P2P fallback; Torrentio anime
+no-op without IMDB; `complete_threshold`, `behavior.resume`, and `ui.theme` wired;
+`OPEN_MEDIA_*` credential overrides; cached-source score tiebreak; MAL
+`is_rewatching`; vlc resume; P2P metadata-wait lock fix; configurable nyaa
+category; release-tag parser fixes; real runtime to AniSkip; TUI season navigation
+and source filter/sort persistence; anime season matching, absolute-number fetch,
+and singular `Season 1-5` range parsing; binge/auto-advance with filler skip;
+TMDB/AniList pagination; AniList loopback login; real Discord application id;
+anime per-episode titles from Jikan/streaming metadata; keyless Torrentio tracker
+parsing; positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB
+bridge; subtitles via `open-media-subs`; Windows mpv/Discord IPC and release
+artifact; shared HTTP timeouts/retry in `open-media-net`; source-level playback
+failover; MSRV CI; crates.io publishing.
 
 ---
 
 ## P1 — correctness bugs still present
 
-> **#1 Anime absolute episode numbering (season fix, Phase 2) — done.** AniList
-> `DETAIL_QUERY` now fetches `relations { edges { relationType node { id format
-> episodes } } }`; `AniListProvider::episode_offset` sums prior `TV` `PREQUEL`
-> episode counts, walking the chain (hop cap 5). `MetadataProvider::episode_offset`
-> is a defaulted port method (`Ok(None)`; only AniList overrides). `SourceQuery`
-> carries `absolute_episode`; `om-app::find_sources` sets it to `offset + episode`
-> from the first provider returning `Some`. `om-sources::season::release_episode`
-> parses the episode coordinate, and `nyaa` issues a second RSS fetch on the
-> absolute number, accepts a marker-less release whose episode == the absolute
-> number as the requested season, and dedups by infohash. Tested: AniList
-> relations→offset (fixture), nyaa S2E01-as-`- 21` matched, S1 does not pick up
-> `- 21`.
-- Still open (lower priority): singular `Season 1-5` batches are read as season 1
-  only (plural `Seasons 1-5` and `S01-S05` work); cross-arc/OVA chains unmodeled.
+### 1. Real-Debrid `check_cached` is a no-op
 
-> **#2 AniList anime-movie modeling — done** (PR #6): `format: MOVIE` → `Movie`.
-> **#3 AniList airing episodes — done** (PR #18): falls back to
-> `nextAiringEpisode.episode - 1`. Still open: per-episode titles for anime
-> (the "anime episodes have no titles → `Series - S01E01`" gap) — moved to P3 below.
-> **#4 `Engine::details` id-merge — done** (PR #7).
+`crates/open-media-debrid/src/realdebrid.rs` currently returns an empty map because
+the old `instantAvailability` behavior is not reliable for this pipeline. That is
+safe for Torrentio-flagged candidates (the addon provides cache/direct-url state),
+but non-Torrentio candidates stay `CacheState::Unknown`. Revisit when RD exposes a
+working bulk endpoint or when we add another debrid backend with a better cache
+API.
 
-### 5. Dead/misleading config keys — **all done**
-- ~~**`OPEN_MEDIA_*` env overrides**~~ — done (PR #8).
-- ~~**`behavior.resume`**~~ — done (PR #28): `resume(bool)` on the Engine/builder,
-  wired from config; when false the start-seek is skipped (progress still saved).
-- ~~**`ui.theme`**~~ — done (PR #25): a dark/light Theme threaded through the TUI
-  (`auto`→dark for now; true auto-detection is a follow-up).
+### 2. MAL OAuth acquisition and refresh
+
+`open-media login anilist` exists, but `open-media login mal` still returns “not
+yet supported.” MAL tokens are short-lived and need the OAuth2 PKCE flow plus
+refresh-token persistence. The MAL tracker itself can already consume a bearer
+token once configured.
 
 ---
 
 ## P2 — incomplete features
 
-> **#6 Binge / auto-advance — done** (PR #26): after an episode completes,
-> auto-advance to the next when `behavior.autoplay_next` is set; filler-aware via
-> `Enricher::filler_episodes`.
-> **#7 Pagination — done** (PR #27): TMDB reads `total_pages` and AniList fetches
-> more results, inside each provider (no port change). nyaa stays single-page.
-> **#8 `om config set` coverage — done** (PR #24): setters for the full key set
-> with typed parsing; `config show` prints all loaded keys (secrets masked).
+### 3. nyaa pagination / load more
 
-### 9. Tracker OAuth acquisition + MAL refresh
-- AniList/MAL consume a pre-obtained token; no loopback OAuth flow, and MAL tokens
-  (~1h) have no refresh. Add an `om login {anilist,mal}` flow.
+TMDB and AniList fetch bounded additional pages. Direct nyaa remains one RSS
+request per query (plus the absolute-episode second request when applicable). Add
+pagination or an explicit “load more” path without slowing the common search.
 
-### 10. Discord application id
-- `crates/om-cli/src/compose.rs:106` `DISCORD_CLIENT_ID = "0000…"` placeholder →
-  presence can't work. Register a real app id and ship it.
+### 4. Full `config set` coverage for list/nested keys
+
+`open-media config set` covers scalar keys, but these still require direct TOML
+editing: `providers.torrentio_providers`, `player.args`, `[subtitles].enabled`,
+`[subtitles].languages`, and `[ui.sources]` defaults. Add typed setters or a clear
+subcommand syntax for list/nested values. Also add `[subtitles]` to
+`open-media config show`, which currently prints a summary but not every nested
+section.
+
+### 5. Telemetry collector activation
+
+Telemetry plumbing and privacy tests exist, but the shipped endpoint is the
+`PLACEHOLDER` sentinel, so default-on telemetry is inert. Either wire a real
+collector endpoint or document the feature as disabled until the collector exists.
+
+### 6. A second debrid backend
+
+Add Torbox, AllDebrid, or Premiumize to prove the `DebridProvider` abstraction in
+production. This should be a new adapter module/crate plus composition-root and
+config wiring, not core/app changes unless the port contract is genuinely missing
+something.
 
 ---
 
 ## P3 — smaller correctness nits & polish
 
-Done in the 2026-06 batch (struck): ~~Scoring cached tiebreak~~ (#9);
-~~MAL `Repeating`→`is_rewatching`~~ (#10); ~~AniSkip `episodeLength` real runtime~~
-(#15); ~~vlc resume `--start-time`~~ (#11); ~~P2P mutex held across metadata wait~~
-(#12); ~~nyaa category configurable~~ (#14); ~~release-tag parser nits~~ (#13).
-
-Still open:
-- **RD `check_cached` is a no-op** (`om-debrid/src/realdebrid.rs` ~150) — cache
-  state for non-Torrentio-flagged candidates is always `Unknown`. Revisit when RD
-  exposes a working bulk endpoint.
-- **Anime per-episode titles** — AniList episodes have no `title` (`anilist.rs`),
-  so the player/Discord shows `Series - S01E01`. Consider a Jikan/AniList
-  per-episode title fetch (carried over from #3).
+- **Local subtitle sidecars:** `open-media-subs` fetches remote subtitles and
+  materializes temp tracks, but there is no local `.srt`/`.vtt` sidecar discovery.
+- **Player discovery on Windows/macOS:** IPC parity and artifacts are done; player
+  lookup is still PATH-based. Consider platform-aware default paths for mpv/vlc.
+- **Recent-history home screen:** `HistoryStore::recent()` exists, but the TUI has
+  no continue-watching home surface yet.
+- **Rich stream progress:** expose P2P peers/speed/buffer health and debrid/cache
+  status in the TUI.
+- **Shell completions:** add `open-media completions {bash,zsh,fish}`.
 
 ---
 
-## UX / smaller observations (from wisp drives)
+## Release workflow note
 
-- **Provider column shows "Torrentio" for all keyless results** — the sub-tracker
-  (RARBG/1337x/…) is only split out when a debrid tag like `[RD+] 1337x` is present.
-  With a Real-Debrid token the Provider filter is far more useful; consider parsing
-  the tracker from the title as a fallback.
-- **TUI `initial_query` is unused** — `om "<query>"` doesn't pre-fill the TUI search
-  (`tui::run` takes `initial_query` but `main.rs` always passes `None`, and there's
-  no positional arg for the no-subcommand path). Wire a positional query.
+Releases use release-plz plus the GitHub workflow:
 
----
-
-## Note: release workflow
-
-Releases use **release-plz** (`release-plz.toml` + `.github/workflows/release.yml`);
-`v0.3.0` is the current tag. Land work with `feat:`/`fix:` Conventional Commits so
-the version bump and changelog stay meaningful.
-
-### ⚠️ release-plz caveat (om-subs git dependency)
-
-`om-subs` git-depends on the open-subtitle engine. release-plz's **release-PR**
-(change-detection) step copies each crate into an isolated worktree and runs
-`cargo package` there, where the git source can't resolve → it fails with
-`Failed to find package "om-subs"`. The upstream fix (a source-dir fallback,
-[release-plz/release-plz#2789](https://github.com/release-plz/release-plz/pull/2789))
-is open/unmerged. Until it lands:
-
-- The **`release-plz PR` job is marked `continue-on-error: true`** (non-blocking);
-  it will show as failed but won't fail the workflow or block anything.
-- **Cut releases with a manual version bump:** edit `[workspace.package].version`
-  in the root `Cargo.toml` (all crates inherit it), update `Cargo.lock`, and
-  hand-write the new `CHANGELOG.md` section, in a `chore(release): X.Y.Z` commit
-  merged through `dev → master`. The **`release-plz release` job is unaffected**
-  and cuts the `vX.Y.Z` tag + GitHub Release + binary matrix on the master push.
-
-**Durable fix options** (when ready): wait for #2789 to merge upstream (then drop
-`continue-on-error`); or rename + publish the open-subtitle `os-*` libs under
-free crates.io names so `om-subs` uses normal version deps (the current names
-`os-core`/`os-engine`/`os-compose`/`os-config` are already taken); or vendor the
-open-subtitle crates in-tree. See `CONTRIBUTING.md` → Releases.
+- Feature/fix work lands in `dev`; only `dev` and `release-plz-*` PRs may target
+  `master`.
+- `feat:`/`fix:` commits on `master` make release-plz maintain a patch release PR;
+  repo admins use the Manual Version Bump workflow for deliberate minor/major
+  milestones.
+- Merging the release PR tags `vX.Y.Z`, publishes every `open-media-*` crate to
+  crates.io in dependency order, creates the GitHub Release, uploads prebuilt
+  archives, and lets CI push the Nix closure to cachix.
+- `open-media-subs` now depends on registry `open-subtitle-*` crates, so the old
+  git-dependency/release-plz `continue-on-error` caveat is gone.

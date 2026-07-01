@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use open_media_core::ports::{Chapter, PlaybackControl};
+use open_media_core::ports::{Chapter, PlaybackControl, PlaylistControl, PlaylistItem};
 use open_media_player::MpvControl;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -52,9 +52,10 @@ async fn handle_conn(stream: tokio::net::UnixStream) {
                 "time-pos" => json!({ "error": "success", "data": 123.7 }),
                 "duration" => json!({ "error": "success", "data": 1440.0 }),
                 "pause" => json!({ "error": "success", "data": false }),
+                "playlist-pos" => json!({ "error": "success", "data": 1 }),
                 _ => json!({ "error": "property unavailable" }),
             },
-            "seek" | "set_property" | "quit" => json!({ "error": "success" }),
+            "seek" | "set_property" | "quit" | "loadfile" => json!({ "error": "success" }),
             _ => json!({ "error": "success" }),
         };
         write_half
@@ -91,6 +92,15 @@ async fn mpv_ipc_roundtrip() {
         .await
         .unwrap();
     control.quit().await.unwrap();
+
+    control
+        .append(&PlaylistItem {
+            url: "https://example.invalid/next.mkv".into(),
+            title: Some("Next title".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(control.active_index().await.unwrap(), Some(1));
 }
 
 #[tokio::test]
