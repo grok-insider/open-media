@@ -367,6 +367,79 @@ fn parse_episode_number(title: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Convert AniList's inline-HTML description into plain text.
+///
+/// AniList returns markup even when queried with `description(asHtml: false)` —
+/// a long-standing API quirk: `<i>`, `<b>`, `<br>` and a handful of character
+/// entities appear inline. The domain `overview` contract is **plain text**
+/// (see `open_media_core::model::Media::overview`), so the quirk is stripped at
+/// the adapter boundary: `<br>` variants become newlines, every other tag is
+/// dropped, the common entities are decoded, and 3+ consecutive newlines
+/// collapse to one blank line.
+fn strip_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match parse_tag(after) {
+            Some((name, consumed)) => {
+                if name.eq_ignore_ascii_case("br") {
+                    out.push('\n');
+                }
+                rest = &after[consumed..];
+            }
+            None => {
+                // A '<' that doesn't start a tag (`3 < 5`) is content.
+                out.push('<');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+
+    // Decode the entities AniList actually emits. `&amp;` must go LAST so a
+    // literal "&amp;lt;" decodes to "&lt;", not "<".
+    let mut out = out
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+
+    // `<br><br>` runs plus surrounding whitespace produce noisy gaps; keep at
+    // most one blank line and trim the edges.
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out.trim().to_string()
+}
+
+/// Try to read an HTML tag immediately after a `<`. Returns the tag name and
+/// the bytes consumed (through the closing `>`), or `None` when the text is
+/// not tag-shaped — an optional `/`, then a letter run, then `>`/space/`/` —
+/// so prose like `3 < 5 but 7 > 2` survives untouched. Real inline tags are
+/// short; anything longer than 60 bytes is treated as content too.
+fn parse_tag(s: &str) -> Option<(&str, usize)> {
+    let inner = s.strip_prefix('/').unwrap_or(s);
+    let name_len = inner
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .count();
+    if name_len == 0 {
+        return None;
+    }
+    let end = s.find('>')?;
+    if end > 60 {
+        return None;
+    }
+    match inner[name_len..].chars().next() {
+        Some('>') | Some(' ') | Some('/') | Some('\t') => Some((&inner[..name_len], end + 1)),
+        _ => None,
+    }
+}
+
 // --- GraphQL response shapes ---
 
 #[derive(Debug, Deserialize)]
@@ -622,7 +695,10 @@ impl AniListMedia {
             original_title: original,
             year: self.season_year,
             score: self.average_score.map(|s| s as f32 / 10.0),
-            overview: self.description.filter(|s| !s.is_empty()),
+            overview: self
+                .description
+                .map(|s| strip_html(&s))
+                .filter(|s| !s.is_empty()),
             poster: self.cover_image.and_then(|c| c.large),
             genres: self.genres,
             status: self.status,
@@ -637,6 +713,59 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn strip_html_converts_anilist_markup_to_plain_text() {
+        // The real shape AniList returns (asHtml: false still carries markup).
+        let raw = "The second season of <i>Kage no Jitsuryokusha ni Naritakute!</i>\
+                   <br><br>Everything has been going according to plan.\
+                   <br><br>(Source: HIDIVE, edited)<br><br><i>Note: A world premiere \
+                   screening of Episode 1 was shown on July 1, 2023.</i>";
+        let text = strip_html(raw);
+        assert!(!text.contains('<'), "no tags may survive: {text}");
+        assert!(text.starts_with("The second season of Kage no Jitsuryokusha ni Naritakute!"));
+        assert!(text.contains("\n\nEverything has been going according to plan."));
+        assert!(text.contains("\n\n(Source: HIDIVE, edited)"));
+        assert!(text.ends_with("July 1, 2023."));
+    }
+
+    #[test]
+    fn strip_html_handles_br_variants_and_bold() {
+        assert_eq!(strip_html("a<br>b"), "a\nb");
+        assert_eq!(strip_html("a<br/>b"), "a\nb");
+        assert_eq!(strip_html("a<br />b"), "a\nb");
+        assert_eq!(strip_html("a<BR>b"), "a\nb");
+        assert_eq!(strip_html("<b>bold</b> and <em>em</em>"), "bold and em");
+    }
+
+    #[test]
+    fn strip_html_decodes_entities_without_double_decoding() {
+        assert_eq!(
+            strip_html("Q&amp;A &quot;quoted&quot; it&#039;s"),
+            "Q&A \"quoted\" it's"
+        );
+        // A literal "&amp;lt;" is the *text* "&lt;", not a tag.
+        assert_eq!(strip_html("&amp;lt;"), "&lt;");
+    }
+
+    #[test]
+    fn strip_html_collapses_break_runs_and_trims() {
+        assert_eq!(strip_html("<br><br>a<br><br><br>b<br>"), "a\n\nb");
+    }
+
+    #[test]
+    fn strip_html_keeps_lone_angle_bracket_text() {
+        assert_eq!(strip_html("score < 9000 is fine"), "score < 9000 is fine");
+        assert_eq!(strip_html("3 < 5 but 7 > 2"), "3 < 5 but 7 > 2");
+    }
+
+    #[test]
+    fn strip_html_plain_text_passes_through() {
+        assert_eq!(
+            strip_html("Just a plain synopsis."),
+            "Just a plain synopsis."
+        );
+    }
 
     /// One AniList `Page` response with `n` media (sequential ids offset by
     /// `start`) and a `hasNextPage` flag.
