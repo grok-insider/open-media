@@ -146,6 +146,7 @@ open-media search "frieren" --kind anime
 open-media play "interstellar"                   # one-shot: search → best source → play
 open-media play "frieren" --season 1 --episode 1
 open-media login anilist                         # optional anime progress tracking token
+open-media login mal                             # MyAnimeList OAuth (needs mal_client_id, see below)
 open-media config show                           # print config summary (secrets masked)
 open-media config path                           # print the config file path
 ```
@@ -169,7 +170,8 @@ the Nix store. `open-media init` creates it.
 |---------------|---------|---------|
 | `[credentials]` `tmdb_api_key` | — | optional TMDB v3 key (Cinemeta is the keyless default) |
 | `[credentials]` `real_debrid_token` | — | instant cached playback (else P2P) |
-| `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking |
+| `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking (`open-media login anilist` / `login mal`) |
+| `[credentials]` `mal_client_id` | — | your MAL API client id (register at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig), App Type `other`, redirect URL `http://localhost:42069/callback`); MAL tokens then auto-refresh |
 | `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend |
 | `[providers]` `cinemeta` / `nyaa_direct` | `true` | keyless movie/series source; direct nyaa.si |
 | `[providers]` `quality` | `best` | `best` / `2160p` / `1080p` / `720p` / `480p` |

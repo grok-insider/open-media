@@ -63,6 +63,22 @@ pub struct Credentials {
     /// MyAnimeList OAuth access token (optional).
     #[serde(default)]
     pub mal_token: String,
+    /// MyAnimeList API client id, required for `open-media login mal`. Public
+    /// (not a secret) — register one at <https://myanimelist.net/apiconfig>.
+    #[serde(default)]
+    pub mal_client_id: String,
+    /// MyAnimeList API client secret. Only set when the registered app type is
+    /// "web" (public app types like "other" have no secret).
+    #[serde(default)]
+    pub mal_client_secret: String,
+    /// MyAnimeList OAuth refresh token, persisted by `open-media login mal` and
+    /// rotated automatically when the access token nears expiry.
+    #[serde(default)]
+    pub mal_refresh_token: String,
+    /// Unix timestamp (seconds) when `mal_token` expires; `0` = unknown (e.g. a
+    /// manually provisioned token), which disables auto-refresh.
+    #[serde(default)]
+    pub mal_token_expires_at: i64,
 }
 
 impl Default for Credentials {
@@ -73,6 +89,10 @@ impl Default for Credentials {
             real_debrid_token: String::new(),
             anilist_token: String::new(),
             mal_token: String::new(),
+            mal_client_id: String::new(),
+            mal_client_secret: String::new(),
+            mal_refresh_token: String::new(),
+            mal_token_expires_at: 0,
         }
     }
 }
