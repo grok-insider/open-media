@@ -12,6 +12,7 @@ use open_media_core::subtitle::{SubtitleQuery, SubtitleTrack};
 use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 use crate::library::unix_now;
+use crate::playlist::PlaylistEntry;
 use crate::{Engine, PlayRequest};
 
 impl Engine {
@@ -244,8 +245,7 @@ impl Engine {
         };
         self.mark_library_started(req, season, episode);
 
-        let last_pos = Arc::new(AtomicU32::new(resume.unwrap_or(0)));
-        let last_dur = Arc::new(AtomicU32::new(0));
+        let progress = ProgressMeter::starting_at(resume.unwrap_or(0));
 
         // 6. Monitor over the IPC channel while the player runs. The monitor
         //    future runs forever; `select!` cancels it the moment the player
@@ -272,11 +272,12 @@ impl Engine {
                     .monitor_playlist_session(
                         &mut session,
                         playlist,
-                        req.clone(),
-                        ctx,
-                        skip,
-                        last_pos.clone(),
-                        last_dur.clone(),
+                        PlaylistEntry {
+                            req: req.clone(),
+                            ctx,
+                            skip,
+                        },
+                        progress.clone(),
                     )
                     .await?;
                 cleanup_subtitle_files(&subtitle_files);
@@ -298,8 +299,7 @@ impl Engine {
             self.presence.clone(),
             skip,
             ctx,
-            last_pos.clone(),
-            last_dur.clone(),
+            progress.clone(),
         );
         let wait_result = tokio::select! {
             r = session.wait() => r,
@@ -316,8 +316,7 @@ impl Engine {
         wait_result?;
 
         // 8. Mark complete + sync the tracker if we got far enough (best-effort).
-        let pos = last_pos.load(Ordering::Relaxed);
-        let dur = last_dur.load(Ordering::Relaxed);
+        let (pos, dur) = progress.snapshot();
         let completed = dur > 0 && (pos as f32 / dur as f32) >= self.complete_threshold;
         if completed {
             if let Some(tracker) = &self.tracker {
@@ -522,18 +521,41 @@ struct PlayOnceOutcome {
     playlist_autoplay: bool,
 }
 
+/// Last-seen playback position/duration, written by a monitor task and read by
+/// the caller after the player exits (for completion + resume bookkeeping).
+#[derive(Clone)]
+pub(crate) struct ProgressMeter {
+    pub(crate) pos: Arc<AtomicU32>,
+    pub(crate) dur: Arc<AtomicU32>,
+}
+
+impl ProgressMeter {
+    pub(crate) fn starting_at(pos: u32) -> Self {
+        Self {
+            pos: Arc::new(AtomicU32::new(pos)),
+            dur: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// The last observed `(position, duration)` in seconds.
+    pub(crate) fn snapshot(&self) -> (u32, u32) {
+        (
+            self.pos.load(Ordering::Relaxed),
+            self.dur.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// Poll the player's IPC channel ~1×/s: auto-skip OP/ED, persist progress, and
 /// push presence. Returns only if there is no control channel (it then waits
 /// forever, deferring to the player-exit branch of the caller's `select!`).
-#[allow(clippy::too_many_arguments)]
 async fn monitor_playback(
     control: Option<Arc<dyn PlaybackControl>>,
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
     skip: SkipTimes,
     ctx: MonitorCtx,
-    last_pos: Arc<AtomicU32>,
-    last_dur: Arc<AtomicU32>,
+    progress: ProgressMeter,
 ) {
     let Some(ctrl) = control else {
         // Launch-only player (vlc): nothing to monitor; wait for exit.
@@ -552,10 +574,10 @@ async fn monitor_playback(
         let pos = ctrl.position().await.ok().flatten().unwrap_or(0);
         let dur = ctrl.duration().await.ok().flatten().unwrap_or(0);
         if pos > 0 {
-            last_pos.store(pos, Ordering::Relaxed);
+            progress.pos.store(pos, Ordering::Relaxed);
         }
         if dur > 0 {
-            last_dur.store(dur, Ordering::Relaxed);
+            progress.dur.store(dur, Ordering::Relaxed);
         }
 
         // Auto-skip: fire once on entry into the window (2s trigger, curd's rule).
