@@ -6,9 +6,11 @@
 //!
 //! - [`RealDebrid`] — the canonical flow (`addMagnet` → poll `info` →
 //!   `selectFiles` → poll → `unrestrict`).
+//! - [`Torbox`] — envelope-wrapped REST (`createtorrent` → poll `mylist` →
+//!   `requestdl`), no file-selection step, and a *working* bulk cache check.
 //!
-//! Future backends (AllDebrid, Torbox, Premiumize) are *new impls of the same
-//! trait* — the provider-agnostic [`AddedTorrent`]/[`DebridFile`] shapes mean the
+//! Future backends (AllDebrid, Premiumize) are *new impls of the same trait* —
+//! the provider-agnostic [`AddedTorrent`]/[`DebridFile`] shapes mean the
 //! resolver and UI never change (OCP).
 //!
 //! [`DebridProvider`]: open_media_core::ports::DebridProvider
@@ -16,5 +18,7 @@
 //! [`DebridFile`]: open_media_core::ports::DebridFile
 
 pub mod realdebrid;
+pub mod torbox;
 
 pub use realdebrid::RealDebrid;
+pub use torbox::Torbox;

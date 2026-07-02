@@ -50,19 +50,38 @@ pub struct Credentials {
     /// provides keyless movie/series discovery when this is empty.
     #[serde(default)]
     pub tmdb_api_key: String,
-    /// Active debrid backend: `"real-debrid"` (default), later `"alldebrid"`,
-    /// `"torbox"`, `"premiumize"`.
+    /// Active debrid backend: `"real-debrid"` (default) or `"torbox"`; later
+    /// `"alldebrid"`, `"premiumize"`.
     #[serde(default = "default_debrid")]
     pub debrid_provider: String,
     /// Real-Debrid API token (optional — empty falls back to P2P streaming).
     #[serde(default)]
     pub real_debrid_token: String,
+    /// TorBox API key (optional — used when `debrid_provider = "torbox"`).
+    #[serde(default)]
+    pub torbox_token: String,
     /// AniList OAuth access token (optional — enables anime tracking).
     #[serde(default)]
     pub anilist_token: String,
     /// MyAnimeList OAuth access token (optional).
     #[serde(default)]
     pub mal_token: String,
+    /// MyAnimeList API client id, required for `open-media login mal`. Public
+    /// (not a secret) — register one at <https://myanimelist.net/apiconfig>.
+    #[serde(default)]
+    pub mal_client_id: String,
+    /// MyAnimeList API client secret. Only set when the registered app type is
+    /// "web" (public app types like "other" have no secret).
+    #[serde(default)]
+    pub mal_client_secret: String,
+    /// MyAnimeList OAuth refresh token, persisted by `open-media login mal` and
+    /// rotated automatically when the access token nears expiry.
+    #[serde(default)]
+    pub mal_refresh_token: String,
+    /// Unix timestamp (seconds) when `mal_token` expires; `0` = unknown (e.g. a
+    /// manually provisioned token), which disables auto-refresh.
+    #[serde(default)]
+    pub mal_token_expires_at: i64,
 }
 
 impl Default for Credentials {
@@ -71,8 +90,13 @@ impl Default for Credentials {
             tmdb_api_key: String::new(),
             debrid_provider: default_debrid(),
             real_debrid_token: String::new(),
+            torbox_token: String::new(),
             anilist_token: String::new(),
             mal_token: String::new(),
+            mal_client_id: String::new(),
+            mal_client_secret: String::new(),
+            mal_refresh_token: String::new(),
+            mal_token_expires_at: 0,
         }
     }
 }
@@ -317,9 +341,13 @@ impl Config {
         self.providers.cinemeta || !self.credentials.tmdb_api_key.is_empty()
     }
 
-    /// Whether a debrid token is configured (else P2P streaming is used).
+    /// Whether the *active* debrid backend has a token configured (else P2P
+    /// streaming is used).
     pub fn has_debrid(&self) -> bool {
-        !self.credentials.real_debrid_token.is_empty()
+        match self.credentials.debrid_provider.as_str() {
+            "torbox" => !self.credentials.torbox_token.is_empty(),
+            _ => !self.credentials.real_debrid_token.is_empty(),
+        }
     }
 
     /// Whether Real-Debrid specifically is the active, configured backend. Gates
@@ -327,6 +355,13 @@ impl Config {
     /// the two never disagree.
     pub fn has_real_debrid(&self) -> bool {
         self.has_debrid() && self.credentials.debrid_provider == "real-debrid"
+    }
+
+    /// Whether TorBox specifically is the active, configured backend. Gates both
+    /// the `DebridProvider` wiring and the `torbox=` Torrentio param so the two
+    /// never disagree.
+    pub fn has_torbox(&self) -> bool {
+        self.has_debrid() && self.credentials.debrid_provider == "torbox"
     }
 
     /// Ensure a telemetry install id exists, generating a random UUID v4 the first
@@ -380,12 +415,13 @@ pub fn load() -> CoreResult<Config> {
 /// accidentally-exported empty var never blanks a configured token. Table-driven
 /// so adding a key is one row. Never logs a value.
 fn apply_env_overrides(cfg: &mut Config) {
-    let overrides: [(&str, &mut String); 4] = [
+    let overrides: [(&str, &mut String); 5] = [
         ("OPEN_MEDIA_TMDB_API_KEY", &mut cfg.credentials.tmdb_api_key),
         (
             "OPEN_MEDIA_REAL_DEBRID_TOKEN",
             &mut cfg.credentials.real_debrid_token,
         ),
+        ("OPEN_MEDIA_TORBOX_TOKEN", &mut cfg.credentials.torbox_token),
         (
             "OPEN_MEDIA_ANILIST_TOKEN",
             &mut cfg.credentials.anilist_token,
@@ -673,5 +709,23 @@ tmdb_api_key = "abc"
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert!(back.has_debrid());
+    }
+
+    #[test]
+    fn debrid_gating_follows_active_provider() {
+        let mut cfg = Config::default();
+        // A torbox token alone does nothing while real-debrid is active…
+        cfg.credentials.torbox_token = "tb".into();
+        assert!(!cfg.has_debrid());
+        assert!(!cfg.has_torbox());
+        // …until torbox becomes the active provider.
+        cfg.credentials.debrid_provider = "torbox".into();
+        assert!(cfg.has_debrid());
+        assert!(cfg.has_torbox());
+        assert!(!cfg.has_real_debrid());
+        // And an RD token doesn't count while torbox is active.
+        cfg.credentials.torbox_token.clear();
+        cfg.credentials.real_debrid_token = "rd".into();
+        assert!(!cfg.has_debrid());
     }
 }

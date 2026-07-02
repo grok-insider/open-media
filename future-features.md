@@ -15,7 +15,7 @@ Ideas deferred past the committed roadmap. Pull these into `docs/PLAN.md` or
 
 ## Debrid
 
-- Torbox, AllDebrid, or Premiumize backend (v1.0 should ship at least one).
+- AllDebrid or Premiumize backend (TorBox and Real-Debrid are already shipped).
 - Debrid library mode: list/manage what is already in the user's debrid account;
   replay without a fresh source search.
 - Background cache warming for the next episode while watching the current one.
@@ -32,13 +32,11 @@ Ideas deferred past the committed roadmap. Pull these into `docs/PLAN.md` or
 ## Tracking & Presence
 
 - Trakt scrobbling for movies/series (the non-anime analogue of AniList/MAL).
-- MAL OAuth2 PKCE acquisition + refresh-token persistence.
 - Per-title rating prompt on completion.
 
 ## UI / UX
 
 - Init wizard for first-run setup.
-- Recent-history / continue-watching home screen.
 - fzf-style fuzzy in-TUI filter; alias map (`jjk` → `Jujutsu Kaisen`).
 - Rich progress for P2P (peers, speed, buffer health) and debrid (cache/cache-warm
   state).
