@@ -457,6 +457,17 @@ impl PlaybackControl for RecordingControl {
 struct PlaylistRecordingPlayer {
     played: Arc<Mutex<Vec<u32>>>,
     appended_titles: Arc<Mutex<Vec<Option<String>>>>,
+    hold_flags: Arc<Mutex<Vec<bool>>>,
+}
+
+impl PlaylistRecordingPlayer {
+    fn new(played: Arc<Mutex<Vec<u32>>>, appended_titles: Arc<Mutex<Vec<Option<String>>>>) -> Self {
+        Self {
+            played,
+            appended_titles,
+            hold_flags: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 #[async_trait]
@@ -470,7 +481,7 @@ impl Player for PlaylistRecordingPlayer {
     async fn play(
         &self,
         playback: &Playback,
-        _opts: &PlayOptions,
+        opts: &PlayOptions,
     ) -> CoreResult<Box<dyn PlaySession>> {
         let ep = playback
             .file_name
@@ -478,6 +489,7 @@ impl Player for PlaylistRecordingPlayer {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         self.played.lock().unwrap().push(ep);
+        self.hold_flags.lock().unwrap().push(opts.hold_at_end);
         Ok(Box::new(PlaylistRecordingSession {
             control: Arc::new(PlaylistRecordingControl {
                 appended_titles: self.appended_titles.clone(),
@@ -710,10 +722,10 @@ async fn playlist_player_appends_next_episode_without_new_launch() {
         .add_metadata(Arc::new(SeasonMeta { count: 3 }))
         .add_source(Arc::new(StampSource))
         .resolver(Arc::new(EchoResolver))
-        .player(Arc::new(PlaylistRecordingPlayer {
-            played: played.clone(),
-            appended_titles: appended_titles.clone(),
-        }))
+        .player(Arc::new(PlaylistRecordingPlayer::new(
+            played.clone(),
+            appended_titles.clone(),
+        )))
         .autoplay_next(true)
         .build();
 
@@ -726,6 +738,222 @@ async fn playlist_player_appends_next_episode_without_new_launch() {
     let titles = appended_titles.lock().unwrap();
     assert_eq!(titles.len(), 1);
     assert!(titles[0].as_deref().unwrap_or_default().contains("S01E02"));
+}
+
+#[tokio::test]
+async fn manual_next_session_appends_next_and_holds_at_end() {
+    // With auto-advance OFF but playlist_next on (the default), the playlist
+    // session still runs: the next episode is pre-appended (so the player's
+    // Next button has a target) and the player is told to hold at EOF instead
+    // of advancing by itself.
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .build(); // autoplay_next defaults to false
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(*played.lock().unwrap(), vec![1], "one launch only");
+    assert_eq!(
+        *hold_flags.lock().unwrap(),
+        vec![true],
+        "manual-Next mode must hold at end-of-file"
+    );
+    let titles = appended_titles.lock().unwrap();
+    assert_eq!(titles.len(), 1, "Next target must be pre-appended");
+    assert!(titles[0].as_deref().unwrap_or_default().contains("S01E02"));
+}
+
+#[tokio::test]
+async fn autoplay_session_does_not_hold_at_end() {
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .autoplay_next(true)
+        .build();
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *hold_flags.lock().unwrap(),
+        vec![false],
+        "auto-advance must let the player run into the next entry"
+    );
+}
+
+#[tokio::test]
+async fn playlist_next_disabled_restores_plain_sessions() {
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .playlist_next(false)
+        .build();
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(*played.lock().unwrap(), vec![1]);
+    assert!(
+        appended_titles.lock().unwrap().is_empty(),
+        "no playlist use"
+    );
+    assert_eq!(*hold_flags.lock().unwrap(), vec![false]);
+}
+
+// ---- Manual-Next EOF handling ----------------------------------------------
+
+/// A session that stays "running" until `quit()` is called on its control.
+struct EofHoldingPlayer {
+    quit_called: Arc<tokio::sync::Notify>,
+    quits: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl Player for EofHoldingPlayer {
+    fn name(&self) -> &str {
+        "eof-holding"
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    async fn play(
+        &self,
+        _playback: &Playback,
+        _opts: &PlayOptions,
+    ) -> CoreResult<Box<dyn PlaySession>> {
+        Ok(Box::new(EofHoldingSession {
+            control: Arc::new(EofHoldingControl {
+                quit_called: self.quit_called.clone(),
+                quits: self.quits.clone(),
+            }),
+            quit_called: self.quit_called.clone(),
+        }))
+    }
+}
+
+struct EofHoldingSession {
+    control: Arc<EofHoldingControl>,
+    quit_called: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl PlaySession for EofHoldingSession {
+    async fn wait(&mut self) -> CoreResult<()> {
+        // "Runs" until the app closes the player.
+        self.quit_called.notified().await;
+        Ok(())
+    }
+    fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
+        Some(self.control.clone())
+    }
+    fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+        Some(self.control.clone())
+    }
+}
+
+struct EofHoldingControl {
+    quit_called: Arc<tokio::sync::Notify>,
+    quits: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl PlaybackControl for EofHoldingControl {
+    async fn position(&self) -> CoreResult<Option<u32>> {
+        Ok(Some(1400))
+    }
+    async fn duration(&self) -> CoreResult<Option<u32>> {
+        Ok(Some(1400))
+    }
+    async fn is_paused(&self) -> CoreResult<Option<bool>> {
+        Ok(Some(true))
+    }
+    async fn seek_absolute(&self, _secs: u32) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn set_chapters(&self, _chapters: &[Chapter]) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn eof_reached(&self) -> CoreResult<Option<bool>> {
+        Ok(Some(true))
+    }
+    async fn quit(&self) -> CoreResult<()> {
+        *self.quits.lock().unwrap() += 1;
+        self.quit_called.notify_waiters();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PlaylistControl for EofHoldingControl {
+    async fn append(&self, _item: &PlaylistItem) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn active_index(&self) -> CoreResult<Option<usize>> {
+        Ok(Some(0))
+    }
+}
+
+#[tokio::test]
+async fn manual_next_session_ends_after_eof_grace() {
+    // Playback holds at EOF (keep-open) with auto-advance off: after the grace
+    // window the app must close the player and finish, marking completion.
+    let quits = Arc::new(Mutex::new(0));
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(Arc::new(EofHoldingPlayer {
+            quit_called: Arc::new(tokio::sync::Notify::new()),
+            quits: quits.clone(),
+        }))
+        .eof_grace_ticks(1)
+        .build();
+
+    // Bounded so a regression can't hang the suite forever.
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        engine.play(&play_request(episodic_media()), &resolvable_candidate()),
+    )
+    .await
+    .expect("session must end after the EOF grace window")
+    .unwrap();
+
+    assert_eq!(*quits.lock().unwrap(), 1, "the player must be closed once");
 }
 
 struct RecordingPresence {

@@ -44,6 +44,14 @@ impl Engine {
             r = session.wait() => r,
             _ = monitor => Ok(()),
         };
+        // Drop the temp subtitle sidecars written for appended entries (the
+        // first entry's belong to `play_once`, which cleans its own).
+        {
+            let guard = state.lock().unwrap();
+            for entry in guard.entries.iter().skip(1) {
+                crate::playback::cleanup_subtitle_files(&entry.sub_files);
+            }
+        }
         wait_result?;
 
         let (req, (pos, dur)) = {
@@ -82,14 +90,22 @@ impl Engine {
             next.episode.unwrap_or(1),
             next.episode_title.as_deref(),
         ));
+        // External subtitles for the appended episode (best-effort, like the
+        // first one's in `play_once`). mpv's per-file loadfile options take a
+        // single `sub-file`, so the best-ranked track is attached; the temp
+        // files are cleaned up when the session ends.
+        let sub_files = self.fetch_subtitle_files(&next).await;
+        let sub_file = sub_files.first().map(|p| p.to_string_lossy().into_owned());
         if playlist
             .append(&PlaylistItem {
                 url: playback.url,
                 title: title.clone(),
+                sub_file,
             })
             .await
             .is_err()
         {
+            crate::playback::cleanup_subtitle_files(&sub_files);
             return;
         }
         let season = next.season.unwrap_or(1);
@@ -132,17 +148,20 @@ impl Engine {
             req: next,
             ctx,
             skip,
+            sub_files,
         });
         guard.appended_until += 1;
     }
 }
 
-/// One queued episode: the request plus the monitor context and skip windows
-/// captured when it was resolved.
+/// One queued episode: the request plus the monitor context, skip windows, and
+/// temp subtitle files captured when it was resolved.
 pub(crate) struct PlaylistEntry {
     pub(crate) req: PlayRequest,
     pub(crate) ctx: MonitorCtx,
     pub(crate) skip: SkipTimes,
+    /// Temp subtitle sidecars written for this entry; deleted at session end.
+    pub(crate) sub_files: Vec<std::path::PathBuf>,
 }
 
 struct PlaylistMonitorState {
@@ -175,6 +194,8 @@ async fn monitor_playlist_playback(
     }
     // Entries whose embedded chapters were already probed for skip windows.
     let mut probed_entries = std::collections::HashSet::new();
+    // Consecutive ticks spent holding at end-of-file (manual-Next mode).
+    let mut eof_ticks: u32 = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -254,6 +275,27 @@ async fn monitor_playlist_playback(
         }
         if dur > 0 {
             progress.dur.store(dur, Ordering::Relaxed);
+        }
+
+        // Manual-Next mode: with auto-advance off the player holds at EOF
+        // (`hold_at_end`). Give the user a grace window to click Next; then
+        // end the session — matching the autoplay-off expectation that nothing
+        // advances by itself. A Next click clears `eof-reached`, so the streak
+        // resets and the session continues with the next entry.
+        if !engine.autoplay_next {
+            let at_eof = ctrl.eof_reached().await.ok().flatten().unwrap_or(false);
+            if at_eof {
+                eof_ticks += 1;
+                if eof_ticks >= engine.eof_grace_ticks {
+                    tracing::debug!("episode ended with auto-advance off; closing the player");
+                    let _ = ctrl.quit().await;
+                    // Park: the caller's `select!` resolves via the player's
+                    // exit, keeping the session teardown on the single path.
+                    std::future::pending::<()>().await;
+                }
+            } else {
+                eof_ticks = 0;
+            }
         }
 
         let (ctx, mut skip, active) = {

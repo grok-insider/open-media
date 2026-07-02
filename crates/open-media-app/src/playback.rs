@@ -224,6 +224,11 @@ impl Engine {
         // 5. Launch the player with title + resume + subtitles. The media-title
         //    carries the series name, the S01E01 coordinate, and the episode title
         //    when known (see `open_media_core::title`); movies get just the name (+ year).
+        // A playlist session (persistent player + pre-appended next episode, so
+        // the player's own Next works) is intended for episodic content when
+        // enabled; whether it actually runs depends on the player exposing
+        // playlist control (mpv does, vlc doesn't).
+        let playlist_session = self.playlist_next && req.media.kind.is_episodic();
         let opts = PlayOptions {
             title: Some(open_media_core::title::media_title(
                 &req.media,
@@ -233,6 +238,11 @@ impl Engine {
             )),
             start_at_secs: resume,
             extra_args: sub_args,
+            // Manual-Next mode: with auto-advance off, the player must hold at
+            // the end of an episode instead of advancing into the pre-appended
+            // next one; the playlist monitor then ends the session unless the
+            // user clicks Next during the grace window.
+            hold_at_end: playlist_session && !self.autoplay_next,
         };
         let session = player.play(&playback, &opts).await;
         // Even if launch fails, drop the temp subtitle files we wrote.
@@ -267,7 +277,7 @@ impl Engine {
                 .or_else(|| req.media.poster.clone()),
             chapter_skip_fallback: self.enricher.is_some(),
         };
-        if self.autoplay_next && req.media.kind.is_episodic() {
+        if playlist_session {
             if let Some(playlist) = session.playlist_control() {
                 let completed = self
                     .monitor_playlist_session(
@@ -277,6 +287,7 @@ impl Engine {
                             req: req.clone(),
                             ctx,
                             skip,
+                            sub_files: Vec::new(),
                         },
                         progress.clone(),
                     )
@@ -445,7 +456,7 @@ impl Engine {
     /// player exits.
     ///
     /// [`SubtitleProvider`]: open_media_core::ports::SubtitleProvider
-    async fn fetch_subtitle_files(&self, req: &PlayRequest) -> Vec<std::path::PathBuf> {
+    pub(crate) async fn fetch_subtitle_files(&self, req: &PlayRequest) -> Vec<std::path::PathBuf> {
         let Some(provider) = &self.subtitles else {
             return Vec::new();
         };
@@ -501,7 +512,7 @@ fn write_subtitle_track(idx: usize, track: &SubtitleTrack) -> std::io::Result<st
 
 /// Delete temp subtitle files after playback. Best-effort: a missing/locked file
 /// is ignored — these live under the OS temp dir and are reaped anyway.
-fn cleanup_subtitle_files(paths: &[std::path::PathBuf]) {
+pub(crate) fn cleanup_subtitle_files(paths: &[std::path::PathBuf]) {
     for path in paths {
         let _ = std::fs::remove_file(path);
     }
