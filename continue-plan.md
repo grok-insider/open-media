@@ -1,6 +1,6 @@
 # continue-plan.md
 
-Actionable engineering follow-ups after the 0.6.1 audit. The broader backlog
+Actionable engineering follow-ups (current as of 0.6.3). The broader backlog
 lives in `future-features.md`; this file is for concrete work that is close enough
 to pick up.
 
@@ -24,7 +24,12 @@ anime per-episode titles from Jikan/streaming metadata; keyless Torrentio tracke
 parsing; positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB
 bridge; subtitles via `open-media-subs`; Windows mpv/Discord IPC and release
 artifact; shared HTTP timeouts/retry in `open-media-net`; source-level playback
-failover; MSRV CI; crates.io publishing.
+failover; MSRV CI; crates.io publishing; local library/watchlist (`LibraryStore`
+port, SQLite adapter, `open-media library` subcommand, playback auto-status);
+TUI Home screen with Continue Watching + Library screen with status filters;
+mpv playlist next-episode playback (`PlaylistControl` port); opt-in mpv
+thumbnail previews (`player.thumbnail_previews`); incremental/streaming search
+results into the TUI; TUI mouse support.
 
 ---
 
@@ -85,8 +90,6 @@ claim held. AllDebrid/Premiumize remain in `future-features.md`.
   materializes temp tracks, but there is no local `.srt`/`.vtt` sidecar discovery.
 - **Player discovery on Windows/macOS:** IPC parity and artifacts are done; player
   lookup is still PATH-based. Consider platform-aware default paths for mpv/vlc.
-- **Recent-history home screen:** `HistoryStore::recent()` exists, but the TUI has
-  no continue-watching home surface yet.
 - **Rich stream progress:** expose P2P peers/speed/buffer health and debrid/cache
   status in the TUI.
 - **Shell completions:** add `open-media completions {bash,zsh,fish}`.
