@@ -4,20 +4,20 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.5](https://github.com/grok-insider/open-media/compare/v0.6.4...v0.6.5) - 2026-07-02
+## 0.6.5
 
-### Added
-
-- *(player)* decouple the mpv Next button from auto-advance
-- *(sources)* native kitsu addressing and bridged-season IMDB queries for anime
-- anime episode stills and synopsis via the id bridge
-- *(track)* derive OP/ED auto-skip from embedded chapters when AniSkip is empty
-
-### Fixed
-
-- *(cli)* render multi-line overviews as separate lines
-- *(metadata)* tolerate Fribb anime-list schema change, restoring anime debrid sources
-- *(metadata)* strip inline HTML from AniList descriptions
+- Added anime episode stills and synopsis via the id bridge, filling missing artwork and descriptions in the Episodes panel
+- Added native kitsu addressing for anime sources, enabling direct resolution without IMDB season arithmetic
+- Added bridged-season IMDB queries for anime, querying at the entry's real season instead of flat season 1
+- Added OP/ED auto-skip from embedded chapters when AniSkip data is empty, using chapter names like "Opening" or "Credits"
+- Added playlist_next behavior, decoupling the mpv Next button from auto-advance so manual episode skipping works even with autoplay off
+- Added hold-at-end mode for manual-Next playback, pausing on the last frame and closing after a grace window unless Next is clicked
+- Added per-file external subtitle support for appended playlist entries
+- Changed episode panel to show series overview as fallback instead of "No synopsis available."
+- Fixed multi-line overviews rendering as separate lines in the TUI Details and Episode panels
+- Fixed inline HTML tags and entities in AniList descriptions being displayed literally in the TUI
+- Fixed Fribb anime-list schema change that broke anime debrid sources by accepting both legacy and current data shapes
+- Fixed failed bridge loads being memoized forever, now retrying after a 120s cooldown
 
 ## 0.6.4
 
