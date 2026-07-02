@@ -4,6 +4,20 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5](https://github.com/grok-insider/open-media/compare/v0.6.3...v0.6.5) - 2026-07-02
+
+### Added
+
+- *(debrid)* add TorBox backend
+- *(cli)* add MAL OAuth PKCE login with auto-refresh
+
+### Changed
+
+- Merge dev into feat/mal-oauth-login (resolve README conflicts)
+- Merge branch 'dev' into feat/torbox-debrid
+- remove all too_many_arguments suppressions
+- *(app)* split engine into concern modules
+
 ## 0.6.4
 
 - Added MAL OAuth PKCE login with automatic token refresh for persistent authentication.
