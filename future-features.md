@@ -32,7 +32,6 @@ Ideas deferred past the committed roadmap. Pull these into `docs/PLAN.md` or
 ## Tracking & Presence
 
 - Trakt scrobbling for movies/series (the non-anime analogue of AniList/MAL).
-- MAL OAuth2 PKCE acquisition + refresh-token persistence.
 - Per-title rating prompt on completion.
 
 ## UI / UX

@@ -44,12 +44,13 @@ but non-Torrentio candidates stay `CacheState::Unknown`. Revisit when RD exposes
 working bulk endpoint. Note: the TorBox backend implements a real `check_cached`
 (`/torrents/checkcached`), so this limitation is RD-specific now.
 
-### 2. MAL OAuth acquisition and refresh
+### 2. MAL OAuth acquisition and refresh — ✅ done
 
-`open-media login anilist` exists, but `open-media login mal` still returns “not
-yet supported.” MAL tokens are short-lived and need the OAuth2 PKCE flow plus
-refresh-token persistence. The MAL tracker itself can already consume a bearer
-token once configured.
+`open-media login mal` runs the OAuth2 PKCE (`plain`) loopback flow against the
+user's own MAL API client (`mal_client_id`, optional `mal_client_secret`), and
+the access token auto-refreshes (7-day margin before the ~31-day expiry) with
+refresh-token rotation persisted. Manually provisioned `mal_token`s (no known
+expiry) are left untouched.
 
 ---
 
