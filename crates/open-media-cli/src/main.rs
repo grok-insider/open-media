@@ -215,6 +215,10 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 mask(&cfg.credentials.real_debrid_token)
             );
             println!(
+                "  torbox_token          = {}",
+                mask(&cfg.credentials.torbox_token)
+            );
+            println!(
                 "  anilist_token         = {}",
                 mask(&cfg.credentials.anilist_token)
             );
@@ -300,6 +304,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 // Strings — taken verbatim.
                 "tmdb_api_key" => cfg.credentials.tmdb_api_key = value.to_string(),
                 "real_debrid_token" => cfg.credentials.real_debrid_token = value.to_string(),
+                "torbox_token" => cfg.credentials.torbox_token = value.to_string(),
                 "anilist_token" => cfg.credentials.anilist_token = value.to_string(),
                 // A manually set MAL token has no known expiry: disable
                 // auto-refresh rather than refreshing against a stale clock.
