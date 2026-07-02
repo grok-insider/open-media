@@ -9,11 +9,15 @@
 //! `/callback?access_token=…` (a query, which *is* sent to the server). The
 //! listener then captures the token from the query string and shuts down.
 //!
-//! The loopback server + [`cmd_login`] dispatch are written provider-agnostically
-//! so a MAL backend (authorization-code grant) can reuse the same scaffolding by
-//! adding another match arm and a `run_loopback`-style capture.
+//! MyAnimeList uses the OAuth 2.0 **authorization-code grant with PKCE**
+//! (`plain` challenge only — a MAL quirk). The code arrives directly in the
+//! callback's query string (no fragment bridge needed) and is exchanged for an
+//! access + refresh token pair via `mal_oauth`. Because MAL requires the
+//! redirect URI to exactly match the one registered on the user's own API
+//! client, `login mal` needs `mal_client_id` configured first and tells the
+//! user how to register one otherwise.
 //!
-//! No secret is ever logged: the token is read into config and saved; only a
+//! No secret is ever logged: tokens are read into config and saved; only a
 //! success message is printed.
 
 use std::time::Duration;
@@ -36,15 +40,12 @@ const LOOPBACK_PORT: u16 = 42069;
 const REDIRECT_URI: &str = "http://localhost:42069/callback";
 
 /// Dispatch `open-media login <provider>`. Validates the provider so the surface is
-/// future-proof: unknown providers (including `mal`) get an actionable message
-/// rather than a panic.
+/// future-proof: unknown providers get an actionable message rather than a panic.
 pub async fn cmd_login(provider: &str) -> Result<()> {
     match provider.to_ascii_lowercase().as_str() {
         "anilist" => login_anilist().await,
-        "mal" | "myanimelist" => {
-            anyhow::bail!("mal not yet supported, coming soon")
-        }
-        other => anyhow::bail!("unknown tracker `{other}` — supported: anilist (mal coming soon)"),
+        "mal" | "myanimelist" => login_mal().await,
+        other => anyhow::bail!("unknown tracker `{other}` — supported: anilist, mal"),
     }
 }
 
@@ -78,6 +79,185 @@ async fn login_anilist() -> Result<()> {
     println!();
     println!("AniList token saved.");
     Ok(())
+}
+
+/// MAL OAuth2 endpoints (PKCE authorization-code grant).
+const MAL_AUTHORIZE_URL: &str = "https://myanimelist.net/v1/oauth2/authorize";
+
+/// Refresh the MAL access token this far before it actually expires. Tokens
+/// last ~31 days; a 7-day margin means any regular usage keeps them fresh.
+const MAL_REFRESH_MARGIN_SECS: i64 = 7 * 24 * 3600;
+
+/// Run the MAL PKCE authorization-code flow end to end: bind → prompt →
+/// capture code → exchange → persist access + refresh tokens.
+async fn login_mal() -> Result<()> {
+    let mut cfg = open_media_config::load().unwrap_or_default();
+    let client_id = cfg.credentials.mal_client_id.clone();
+    if client_id.is_empty() {
+        anyhow::bail!(
+            "MyAnimeList login needs an API client id.\n\
+             \n\
+             1. Create one at https://myanimelist.net/apiconfig (App Type: `other`)\n\
+             2. Set its \"App Redirect URL\" to exactly: {REDIRECT_URI}\n\
+             3. Save the id: open-media config set mal_client_id=<your client id>\n\
+             \n\
+             then run `open-media login mal` again. (If you registered a `web` app,\n\
+             also set mal_client_secret.)"
+        );
+    }
+
+    // MAL only supports the `plain` PKCE method: the challenge IS the verifier.
+    let verifier = pkce_verifier();
+    let state = uuid::Uuid::new_v4().simple().to_string();
+
+    // Bind BEFORE printing/opening the URL so there is no race where the browser
+    // redirects back before we're listening.
+    let listener = bind_loopback().await?;
+
+    let auth_url = mal_authorize_url(&client_id, REDIRECT_URI, &verifier, &state);
+
+    println!("Opening MyAnimeList authorization in your browser…");
+    println!();
+    println!("If it doesn't open automatically, open this URL:");
+    println!("  {auth_url}");
+    println!();
+    println!("Waiting for the callback on {REDIRECT_URI} …");
+
+    try_open_browser(&auth_url);
+
+    let code = capture_mal_code(listener, &state).await?;
+
+    let tokens = crate::mal_oauth::exchange_code(
+        crate::mal_oauth::DEFAULT_TOKEN_URL,
+        &client_id,
+        &cfg.credentials.mal_client_secret,
+        &code,
+        &verifier,
+        REDIRECT_URI,
+    )
+    .await?;
+
+    apply_mal_tokens(&mut cfg, tokens);
+    open_media_config::save(&cfg).context("failed to save MyAnimeList tokens to config")?;
+
+    println!();
+    println!("MyAnimeList tokens saved (auto-refresh enabled).");
+    Ok(())
+}
+
+/// Refresh the persisted MAL access token when it is close to expiry.
+/// Best-effort and silent on the happy path: called before engine composition so
+/// a stale token never reaches the tracker. Failures only warn — playback must
+/// never be blocked by tracking.
+pub async fn refresh_mal_if_needed(cfg: &mut open_media_config::Config) {
+    if !should_refresh(
+        &cfg.credentials.mal_token,
+        &cfg.credentials.mal_refresh_token,
+        cfg.credentials.mal_token_expires_at,
+        unix_now(),
+    ) {
+        return;
+    }
+    match crate::mal_oauth::refresh(
+        crate::mal_oauth::DEFAULT_TOKEN_URL,
+        &cfg.credentials.mal_client_id,
+        &cfg.credentials.mal_client_secret,
+        &cfg.credentials.mal_refresh_token.clone(),
+    )
+    .await
+    {
+        Ok(tokens) => {
+            apply_mal_tokens(cfg, tokens);
+            if let Err(e) = open_media_config::save(cfg) {
+                tracing::warn!(error = %e, "refreshed MAL token could not be persisted");
+            }
+        }
+        Err(e) => {
+            // The old token may still work (we refresh 7 days early); if it is
+            // truly dead the tracker degrades gracefully. Tell the user how to fix.
+            eprintln!("warning: MyAnimeList token refresh failed ({e}); run `open-media login mal` if tracking stops");
+        }
+    }
+}
+
+/// Whether the MAL access token should be refreshed now. Requires a token to
+/// refresh, a refresh token to do it with, and a *known* expiry (0 = manually
+/// provisioned → never auto-refresh) inside the margin.
+fn should_refresh(access_token: &str, refresh_token: &str, expires_at: i64, now: i64) -> bool {
+    !access_token.is_empty()
+        && !refresh_token.is_empty()
+        && expires_at > 0
+        && expires_at - now <= MAL_REFRESH_MARGIN_SECS
+}
+
+/// Store a fresh token pair + computed expiry on the config (not yet saved).
+fn apply_mal_tokens(cfg: &mut open_media_config::Config, tokens: crate::mal_oauth::MalTokens) {
+    cfg.credentials.mal_token = tokens.access_token;
+    if !tokens.refresh_token.is_empty() {
+        cfg.credentials.mal_refresh_token = tokens.refresh_token;
+    }
+    cfg.credentials.mal_token_expires_at = if tokens.expires_in > 0 {
+        unix_now() + tokens.expires_in
+    } else {
+        0
+    };
+}
+
+/// A PKCE code verifier: 64 chars from `[a-f0-9]`, well inside the RFC 7636
+/// 43–128 unreserved-character window. MAL's `plain` method sends it verbatim
+/// as the challenge.
+fn pkce_verifier() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Build the MAL authorize URL (PKCE `plain`: challenge == verifier).
+fn mal_authorize_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &str) -> String {
+    format!(
+        "{MAL_AUTHORIZE_URL}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge={challenge}&code_challenge_method=plain&state={state}"
+    )
+}
+
+/// Accept connections until the MAL redirect delivers `code` (verifying `state`
+/// against CSRF), or fail fast when MAL reports a denial via `error=`.
+async fn capture_mal_code(listener: TcpListener, expected_state: &str) -> Result<String> {
+    loop {
+        let (mut stream, _addr) = listener
+            .accept()
+            .await
+            .context("loopback listener failed while awaiting the OAuth callback")?;
+
+        let Some(target) = read_request_target(&mut stream).await? else {
+            continue;
+        };
+
+        let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+        if let Some(err) = query_param(query, "error") {
+            respond(&mut stream, "200 OK", DENIED_PAGE).await?;
+            anyhow::bail!("MyAnimeList authorization was not granted ({err})");
+        }
+        if let Some(code) = query_param(query, "code") {
+            if query_param(query, "state").as_deref() != Some(expected_state) {
+                respond(&mut stream, "200 OK", DENIED_PAGE).await?;
+                anyhow::bail!("OAuth state mismatch on the MyAnimeList callback — try again");
+            }
+            respond(&mut stream, "200 OK", SUCCESS_PAGE).await?;
+            return Ok(code);
+        }
+
+        // A stray request (favicon, preconnect): answer and keep waiting.
+        respond(&mut stream, "404 Not Found", WAITING_PAGE).await?;
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Bind the one-shot loopback listener, mapping `EADDRINUSE` to an actionable
@@ -157,10 +337,15 @@ fn parse_request_target(request: &str) -> Option<String> {
 /// (`token_type=Bearer`, `expires_in`) are ignored — AniList tokens are
 /// long-lived and we persist only the access token.
 fn extract_access_token(query: &str) -> Option<String> {
+    query_param(query, "access_token")
+}
+
+/// Pull one named parameter out of a query string; `None` when absent or empty.
+fn query_param(query: &str, name: &str) -> Option<String> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .find(|(k, _)| *k == "access_token")
+        .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_string())
         .filter(|v| !v.is_empty())
 }
@@ -228,12 +413,27 @@ const BRIDGE_PAGE: &str = r#"<!doctype html>
 </script>
 </body></html>"#;
 
-/// Served once the token is captured.
+/// Served once the token/code is captured.
 const SUCCESS_PAGE: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>open-media · signed in</title></head>
 <body style="font-family:system-ui,sans-serif;text-align:center;margin-top:4rem">
 <h1>You're signed in.</h1>
-<p>open-media captured your AniList token. You can close this tab.</p>
+<p>open-media captured your login. You can close this tab.</p>
+</body></html>"#;
+
+/// Served when authorization was denied or the callback was invalid.
+const DENIED_PAGE: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>open-media · sign-in failed</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;margin-top:4rem">
+<h1>Sign-in didn't complete.</h1>
+<p>See the terminal for details. You can close this tab.</p>
+</body></html>"#;
+
+/// Served to stray requests (favicon, probes) while awaiting the real callback.
+const WAITING_PAGE: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>open-media · waiting</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;margin-top:4rem">
+<p>Waiting for the sign-in callback…</p>
 </body></html>"#;
 
 #[cfg(test)]
@@ -291,6 +491,88 @@ mod tests {
         let target = parse_request_target(req).unwrap();
         let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
         assert_eq!(extract_access_token(query), Some("deadbeef".to_string()));
+    }
+
+    #[test]
+    fn query_param_extracts_code_state_and_error() {
+        let q = "code=abc&state=xyz";
+        assert_eq!(query_param(q, "code"), Some("abc".to_string()));
+        assert_eq!(query_param(q, "state"), Some("xyz".to_string()));
+        assert_eq!(query_param(q, "error"), None);
+        assert_eq!(
+            query_param("error=access_denied", "error"),
+            Some("access_denied".to_string())
+        );
+    }
+
+    #[test]
+    fn pkce_verifier_is_rfc7636_safe() {
+        let v = pkce_verifier();
+        // 43–128 chars of unreserved characters (ours are hex digits).
+        assert_eq!(v.len(), 64);
+        assert!(v.chars().all(|c| c.is_ascii_hexdigit()));
+        // Two calls must not collide (it's a secret per login attempt).
+        assert_ne!(v, pkce_verifier());
+    }
+
+    #[test]
+    fn builds_mal_authorize_url_with_plain_pkce() {
+        let url = mal_authorize_url("cid", "http://localhost:42069/callback", "ver", "st");
+        assert!(url.starts_with("https://myanimelist.net/v1/oauth2/authorize?"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("client_id=cid"));
+        assert!(url.contains("code_challenge=ver"));
+        assert!(url.contains("code_challenge_method=plain"));
+        assert!(url.contains("state=st"));
+        assert!(url.contains("redirect_uri=http://localhost:42069/callback"));
+    }
+
+    #[test]
+    fn refresh_decision_honors_margin_and_prerequisites() {
+        let now = 1_000_000;
+        let week = 7 * 24 * 3600;
+        // Inside the margin → refresh.
+        assert!(should_refresh("acc", "ref", now + week - 1, now));
+        // Already expired → refresh.
+        assert!(should_refresh("acc", "ref", now - 10, now));
+        // Comfortably fresh → leave alone.
+        assert!(!should_refresh("acc", "ref", now + week + 10, now));
+        // Unknown expiry (manually provisioned token) → never auto-refresh.
+        assert!(!should_refresh("acc", "ref", 0, now));
+        // Nothing to refresh / nothing to refresh with.
+        assert!(!should_refresh("", "ref", now, now));
+        assert!(!should_refresh("acc", "", now, now));
+    }
+
+    #[test]
+    fn applying_tokens_computes_expiry_and_keeps_old_refresh_on_empty() {
+        let mut cfg = open_media_config::Config::default();
+        cfg.credentials.mal_refresh_token = "old-refresh".into();
+
+        apply_mal_tokens(
+            &mut cfg,
+            crate::mal_oauth::MalTokens {
+                access_token: "acc".into(),
+                refresh_token: "new-refresh".into(),
+                expires_in: 3600,
+            },
+        );
+        assert_eq!(cfg.credentials.mal_token, "acc");
+        assert_eq!(cfg.credentials.mal_refresh_token, "new-refresh");
+        let expected = unix_now() + 3600;
+        assert!((cfg.credentials.mal_token_expires_at - expected).abs() <= 2);
+
+        // An empty refresh token in the response must not clobber the stored one.
+        apply_mal_tokens(
+            &mut cfg,
+            crate::mal_oauth::MalTokens {
+                access_token: "acc2".into(),
+                refresh_token: String::new(),
+                expires_in: 0,
+            },
+        );
+        assert_eq!(cfg.credentials.mal_refresh_token, "new-refresh");
+        assert_eq!(cfg.credentials.mal_token_expires_at, 0);
     }
 
     #[test]

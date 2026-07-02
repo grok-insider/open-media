@@ -65,7 +65,7 @@ dirs = "6"
 # Random per-install id for anonymous usage analytics (UUID v4).
 uuid = { version = "1", features = ["v4"] }
 # HTTP + parsing for the network adapters.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"
 futures = "0.3"
 regex = "1"

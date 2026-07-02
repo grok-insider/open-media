@@ -36,15 +36,16 @@ failover; MSRV CI; crates.io publishing.
 the old `instantAvailability` behavior is not reliable for this pipeline. That is
 safe for Torrentio-flagged candidates (the addon provides cache/direct-url state),
 but non-Torrentio candidates stay `CacheState::Unknown`. Revisit when RD exposes a
-working bulk endpoint. Note: the TorBox backend implements a real `check_cached`
-(`/torrents/checkcached`), so this limitation is RD-specific now.
+working bulk endpoint or when we add another debrid backend with a better cache
+API.
 
-### 2. MAL OAuth acquisition and refresh
+### 2. MAL OAuth acquisition and refresh — ✅ done
 
-`open-media login anilist` exists, but `open-media login mal` still returns “not
-yet supported.” MAL tokens are short-lived and need the OAuth2 PKCE flow plus
-refresh-token persistence. The MAL tracker itself can already consume a bearer
-token once configured.
+`open-media login mal` runs the OAuth2 PKCE (`plain`) loopback flow against the
+user's own MAL API client (`mal_client_id`, optional `mal_client_secret`), and
+the access token auto-refreshes (7-day margin before the ~31-day expiry) with
+refresh-token rotation persisted. Manually provisioned `mal_token`s (no known
+expiry) are left untouched.
 
 ---
 
@@ -71,11 +72,12 @@ Telemetry plumbing and privacy tests exist, but the shipped endpoint is the
 `PLACEHOLDER` sentinel, so default-on telemetry is inert. Either wire a real
 collector endpoint or document the feature as disabled until the collector exists.
 
-### 6. A second debrid backend — ✅ done (TorBox)
+### 6. A second debrid backend
 
-TorBox shipped as the second `DebridProvider` (`open-media-debrid/src/torbox.rs`):
-new adapter + composition-root/config wiring only, no core/app changes — the OCP
-claim held. AllDebrid/Premiumize remain in `future-features.md`.
+Add Torbox, AllDebrid, or Premiumize to prove the `DebridProvider` abstraction in
+production. This should be a new adapter module/crate plus composition-root and
+config wiring, not core/app changes unless the port contract is genuinely missing
+something.
 
 ---
 

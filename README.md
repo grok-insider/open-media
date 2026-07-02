@@ -76,8 +76,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Metadata**: TMDB (richer, optional key) + **Cinemeta** (keyless default) for
   movies/series, AniList for anime — with IMDB/MAL id bridging and de-dup.
 - **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
-- **Debrid**: Real-Debrid (add → select → unrestrict) or TorBox (create →
-  request link, with a real bulk cache check) — magnet → instant CDN URL.
+- **Debrid**: Real-Debrid magnet → instant CDN URL (add → select → unrestrict).
 - **P2P**: librqbit engine streaming uncached / no-debrid torrents over a local
   Range-aware HTTP server.
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
@@ -147,6 +146,7 @@ open-media search "frieren" --kind anime
 open-media play "interstellar"                   # one-shot: search → best source → play
 open-media play "frieren" --season 1 --episode 1
 open-media login anilist                         # optional anime progress tracking token
+open-media login mal                             # MyAnimeList OAuth (needs mal_client_id, see below)
 open-media config show                           # print config summary (secrets masked)
 open-media config path                           # print the config file path
 ```
@@ -170,9 +170,9 @@ the Nix store. `open-media init` creates it.
 |---------------|---------|---------|
 | `[credentials]` `tmdb_api_key` | — | optional TMDB v3 key (Cinemeta is the keyless default) |
 | `[credentials]` `real_debrid_token` | — | instant cached playback (else P2P) |
-| `[credentials]` `torbox_token` | — | TorBox API key (used when `debrid_provider = "torbox"`) |
-| `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking |
-| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend: `real-debrid` or `torbox` |
+| `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking (`open-media login anilist` / `login mal`) |
+| `[credentials]` `mal_client_id` | — | your MAL API client id (register at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig), App Type `other`, redirect URL `http://localhost:42069/callback`); MAL tokens then auto-refresh |
+| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend |
 | `[providers]` `cinemeta` / `nyaa_direct` | `true` | keyless movie/series source; direct nyaa.si |
 | `[providers]` `quality` | `best` | `best` / `2160p` / `1080p` / `720p` / `480p` |
 | `[providers]` `show_uncached` | `false` | include uncached sources (slower to start) |

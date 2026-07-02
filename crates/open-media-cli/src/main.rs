@@ -8,6 +8,7 @@
 
 mod compose;
 mod login;
+mod mal_oauth;
 mod stills;
 mod telemetry;
 mod tui;
@@ -56,7 +57,7 @@ enum Command {
     },
     /// Authorize a tracker via OAuth and save its token to config.
     Login {
-        /// Tracker to authorize: `anilist` (MAL coming soon).
+        /// Tracker to authorize: `anilist` or `mal`.
         provider: String,
     },
     /// Manage the local library/watchlist.
@@ -155,6 +156,7 @@ async fn run_interactive(initial_query: Option<String>) -> anyhow::Result<()> {
         }
     };
     telemetry::startup(&mut cfg);
+    login::refresh_mal_if_needed(&mut cfg).await;
     let engine = compose::build_engine(&cfg);
     tui::run(engine, cfg, initial_query).await
 }
@@ -213,16 +215,24 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 mask(&cfg.credentials.real_debrid_token)
             );
             println!(
-                "  torbox_token          = {}",
-                mask(&cfg.credentials.torbox_token)
-            );
-            println!(
                 "  anilist_token         = {}",
                 mask(&cfg.credentials.anilist_token)
             );
             println!(
                 "  mal_token             = {}",
                 mask(&cfg.credentials.mal_token)
+            );
+            println!(
+                "  mal_client_id         = {}",
+                if cfg.credentials.mal_client_id.is_empty() {
+                    "(unset)"
+                } else {
+                    &cfg.credentials.mal_client_id
+                }
+            );
+            println!(
+                "  mal_refresh_token     = {}",
+                mask(&cfg.credentials.mal_refresh_token)
             );
 
             println!("[providers]");
@@ -290,9 +300,15 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 // Strings — taken verbatim.
                 "tmdb_api_key" => cfg.credentials.tmdb_api_key = value.to_string(),
                 "real_debrid_token" => cfg.credentials.real_debrid_token = value.to_string(),
-                "torbox_token" => cfg.credentials.torbox_token = value.to_string(),
                 "anilist_token" => cfg.credentials.anilist_token = value.to_string(),
-                "mal_token" => cfg.credentials.mal_token = value.to_string(),
+                // A manually set MAL token has no known expiry: disable
+                // auto-refresh rather than refreshing against a stale clock.
+                "mal_token" => {
+                    cfg.credentials.mal_token = value.to_string();
+                    cfg.credentials.mal_token_expires_at = 0;
+                }
+                "mal_client_id" => cfg.credentials.mal_client_id = value.to_string(),
+                "mal_client_secret" => cfg.credentials.mal_client_secret = value.to_string(),
                 "debrid_provider" => cfg.credentials.debrid_provider = value.to_string(),
                 "player_command" => cfg.player.command = value.to_string(),
                 "quality" => cfg.providers.quality = value.to_string(),
@@ -337,6 +353,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
 async fn cmd_search(query: &str, kind: Option<&str>) -> anyhow::Result<()> {
     let mut cfg = load_or_hint()?;
     telemetry::startup(&mut cfg);
+    login::refresh_mal_if_needed(&mut cfg).await;
     let engine = compose::build_engine(&cfg);
     match engine.search(query, parse_kind(kind)).await {
         Ok(results) if results.is_empty() => {
@@ -362,6 +379,7 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
 
     let mut cfg = load_or_hint()?;
     telemetry::startup(&mut cfg);
+    login::refresh_mal_if_needed(&mut cfg).await;
     let engine = compose::build_engine(&cfg);
 
     // 1. Search and take the best match.
@@ -445,6 +463,7 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
 async fn cmd_library(action: LibraryAction) -> anyhow::Result<()> {
     let mut cfg = load_or_hint()?;
     telemetry::startup(&mut cfg);
+    login::refresh_mal_if_needed(&mut cfg).await;
     let engine = compose::build_engine(&cfg);
     match action {
         LibraryAction::List { status } => {

@@ -13,7 +13,7 @@ use open_media_config::Config;
 use open_media_core::scoring::ScoringPrefs;
 use open_media_core::stream::Quality;
 
-use open_media_debrid::{RealDebrid, Torbox};
+use open_media_debrid::RealDebrid;
 use open_media_history::SqliteHistory;
 use open_media_metadata::{AniListProvider, CinemetaProvider, FribbIdBridge, TmdbProvider};
 use open_media_player::{MpvPlayer, VlcPlayer};
@@ -66,8 +66,6 @@ pub fn build_engine(cfg: &Config) -> Engine {
         Some(Arc::new(RealDebrid::new(
             &cfg.credentials.real_debrid_token,
         )))
-    } else if cfg.has_torbox() {
-        Some(Arc::new(Torbox::new(&cfg.credentials.torbox_token)))
     } else {
         None
     };
@@ -172,18 +170,13 @@ fn torrentio_config_string(cfg: &Config) -> String {
         "sort=qualitysize".to_string(),
         "qualityfilter=scr,cam".to_string(),
     ];
-    // Only inject a debrid param for the *active* backend — matches the
-    // `DebridProvider` wiring gate so the two never disagree.
+    // Only inject the RD param when Real-Debrid is the active backend — matches
+    // the `DebridProvider` wiring gate so the two never disagree.
     if cfg.has_real_debrid() {
         if !cfg.providers.show_uncached {
             parts.push("debridoptions=nodownloadlinks".to_string());
         }
         parts.push(format!("realdebrid={}", cfg.credentials.real_debrid_token));
-    } else if cfg.has_torbox() {
-        if !cfg.providers.show_uncached {
-            parts.push("debridoptions=nodownloadlinks".to_string());
-        }
-        parts.push(format!("torbox={}", cfg.credentials.torbox_token));
     }
     parts.join("|")
 }
