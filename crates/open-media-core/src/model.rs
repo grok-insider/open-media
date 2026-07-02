@@ -134,6 +134,9 @@ pub struct Media {
     pub year: Option<i32>,
     /// Aggregate score on a 0.0–10.0 scale, if known.
     pub score: Option<f32>,
+    /// **Plain text** synopsis (newlines allowed). Providers whose APIs return
+    /// markup (AniList emits inline HTML) must strip/decode it at the adapter
+    /// boundary — renderers display this verbatim.
     pub overview: Option<String>,
     /// Poster/cover image URL (for terminals with image protocols).
     pub poster: Option<String>,
@@ -175,6 +178,7 @@ pub struct Episode {
     pub title: Option<String>,
     /// ISO date string `YYYY-MM-DD`, if known.
     pub air_date: Option<String>,
+    /// **Plain text** synopsis — same contract as [`Media::overview`].
     pub overview: Option<String>,
     pub runtime_minutes: Option<u32>,
     pub rating: Option<f32>,
