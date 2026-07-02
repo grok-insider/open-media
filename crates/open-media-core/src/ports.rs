@@ -179,6 +179,12 @@ pub struct PlayOptions {
     pub start_at_secs: Option<u32>,
     /// Extra player args appended after configured args.
     pub extra_args: Vec<String>,
+    /// Pause on the last frame at end-of-file instead of advancing/exiting
+    /// (mpv `--keep-open=always`). Used by the playlist session when the user
+    /// has auto-advance off: the player's own Next button keeps working, but
+    /// nothing advances by itself; the app ends the session via
+    /// [`PlaybackControl::eof_reached`]. Launch-only players may ignore it.
+    pub hold_at_end: bool,
 }
 
 /// Metadata for an item appended to a live player playlist.
@@ -186,6 +192,8 @@ pub struct PlayOptions {
 pub struct PlaylistItem {
     pub url: String,
     pub title: Option<String>,
+    /// An external subtitle file to attach to this item (mpv `sub-file`).
+    pub sub_file: Option<String>,
 }
 
 /// A chapter marker (used to expose AniSkip OP/ED segments in the player UI).
@@ -250,6 +258,12 @@ pub trait PlaybackControl: Send + Sync {
     /// no external skip data exists. Default: unknown/none.
     async fn chapters(&self) -> CoreResult<Vec<Chapter>> {
         Ok(Vec::new())
+    }
+
+    /// Whether playback is holding at end-of-file (only meaningful with
+    /// [`PlayOptions::hold_at_end`]). `Ok(None)` = unknown/unsupported.
+    async fn eof_reached(&self) -> CoreResult<Option<bool>> {
+        Ok(None)
     }
 
     async fn quit(&self) -> CoreResult<()>;

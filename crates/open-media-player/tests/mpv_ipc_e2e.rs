@@ -97,6 +97,7 @@ async fn mpv_ipc_roundtrip() {
         .append(&PlaylistItem {
             url: "https://example.invalid/next.mkv".into(),
             title: Some("Next title".into()),
+            sub_file: None,
         })
         .await
         .unwrap();

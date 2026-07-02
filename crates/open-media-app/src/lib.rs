@@ -99,6 +99,15 @@ pub struct Engine {
     skip_filler: bool,
     /// Auto-advance to the next episode after a completed episodic playback.
     autoplay_next: bool,
+    /// Run the live-playlist session for episodic playback (players with
+    /// [`PlaylistControl`]) so the player's own Next button has a target, even
+    /// when `autoplay_next` is off.
+    playlist_next: bool,
+    /// How many consecutive monitor ticks (~1s) playback may hold at
+    /// end-of-file before the session is ended, in manual-Next mode
+    /// (`playlist_next` without `autoplay_next`). The grace window lets a
+    /// quick Next click still advance.
+    eof_grace_ticks: u32,
     /// Seek to the saved position when starting playback. When `false`, history
     /// is still recorded but playback always starts from the beginning.
     resume: bool,
