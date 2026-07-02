@@ -29,7 +29,12 @@ port, SQLite adapter, `open-media library` subcommand, playback auto-status);
 TUI Home screen with Continue Watching + Library screen with status filters;
 mpv playlist next-episode playback (`PlaylistControl` port); opt-in mpv
 thumbnail previews (`player.thumbnail_previews`); incremental/streaming search
-results into the TUI; TUI mouse support.
+results into the TUI; TUI mouse support; Fribb bridge array-schema fix +
+tmdb/kitsu/season capture; AniList description HTML stripping; anime episode
+stills/synopsis overlay via the bridge; Torrentio kitsu addressing +
+bridged-season IMDB queries; embedded-chapter OP/ED skip fallback;
+`behavior.playlist_next` (mpv Next without autoplay, keep-open EOF handling,
+per-entry playlist subtitles).
 
 ---
 
@@ -91,6 +96,12 @@ claim held. AllDebrid/Premiumize remain in `future-features.md`.
   materializes temp tracks, but there is no local `.srt`/`.vtt` sidecar discovery.
 - **Player discovery on Windows/macOS:** IPC parity and artifacts are done; player
   lookup is still PATH-based. Consider platform-aware default paths for mpv/vlc.
+- **Resume positions for pre-appended playlist entries:** episodes appended to
+  the live mpv playlist always start at 0:00; a partially-watched next episode
+  loses its saved position (the first episode of a session resumes fine).
+- **Playlist subtitles are single-track:** appended entries attach only the
+  best-ranked external subtitle (`loadfile`'s per-file `sub-file` option);
+  the first episode of a session gets every fetched language.
 - **Rich stream progress:** expose P2P peers/speed/buffer health and debrid/cache
   status in the TUI.
 - **Shell completions:** add `open-media completions {bash,zsh,fish}`.

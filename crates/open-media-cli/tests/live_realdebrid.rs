@@ -60,6 +60,8 @@ async fn torrentio_returns_cached_streams_for_a_popular_movie() {
         season: None,
         episode: None,
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
 
@@ -115,6 +117,8 @@ async fn full_anime_path_nyaa_search_then_realdebrid_resolve() {
         season: Some(1),
         episode: Some(1),
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: true,
     };
     let mut candidates = nyaa.find(&query).await.expect("nyaa search");

@@ -7,7 +7,7 @@ use open_media_core::ports::{PlaySession, PlaybackControl, PlaylistControl, Play
 use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 use crate::library::unix_now;
-use crate::playback::{chapters_from_skip, MonitorCtx, ProgressMeter};
+use crate::playback::{chapters_from_skip, skip_from_chapters, MonitorCtx, ProgressMeter};
 use crate::{Engine, PlayRequest};
 
 impl Engine {
@@ -44,6 +44,14 @@ impl Engine {
             r = session.wait() => r,
             _ = monitor => Ok(()),
         };
+        // Drop the temp subtitle sidecars written for appended entries (the
+        // first entry's belong to `play_once`, which cleans its own).
+        {
+            let guard = state.lock().unwrap();
+            for entry in guard.entries.iter().skip(1) {
+                crate::playback::cleanup_subtitle_files(&entry.sub_files);
+            }
+        }
         wait_result?;
 
         let (req, (pos, dur)) = {
@@ -82,14 +90,22 @@ impl Engine {
             next.episode.unwrap_or(1),
             next.episode_title.as_deref(),
         ));
+        // External subtitles for the appended episode (best-effort, like the
+        // first one's in `play_once`). mpv's per-file loadfile options take a
+        // single `sub-file`, so the best-ranked track is attached; the temp
+        // files are cleaned up when the session ends.
+        let sub_files = self.fetch_subtitle_files(&next).await;
+        let sub_file = sub_files.first().map(|p| p.to_string_lossy().into_owned());
         if playlist
             .append(&PlaylistItem {
                 url: playback.url,
                 title: title.clone(),
+                sub_file,
             })
             .await
             .is_err()
         {
+            crate::playback::cleanup_subtitle_files(&sub_files);
             return;
         }
         let season = next.season.unwrap_or(1);
@@ -125,23 +141,27 @@ impl Engine {
                 .episode_still
                 .clone()
                 .or_else(|| next.media.poster.clone()),
+            chapter_skip_fallback: self.enricher.is_some(),
         };
         let mut guard = state.lock().unwrap();
         guard.entries.push(PlaylistEntry {
             req: next,
             ctx,
             skip,
+            sub_files,
         });
         guard.appended_until += 1;
     }
 }
 
-/// One queued episode: the request plus the monitor context and skip windows
-/// captured when it was resolved.
+/// One queued episode: the request plus the monitor context, skip windows, and
+/// temp subtitle files captured when it was resolved.
 pub(crate) struct PlaylistEntry {
     pub(crate) req: PlayRequest,
     pub(crate) ctx: MonitorCtx,
     pub(crate) skip: SkipTimes,
+    /// Temp subtitle sidecars written for this entry; deleted at session end.
+    pub(crate) sub_files: Vec<std::path::PathBuf>,
 }
 
 struct PlaylistMonitorState {
@@ -172,6 +192,10 @@ async fn monitor_playlist_playback(
     if !initial_chapters.is_empty() {
         let _ = ctrl.set_chapters(&initial_chapters).await;
     }
+    // Entries whose embedded chapters were already probed for skip windows.
+    let mut probed_entries = std::collections::HashSet::new();
+    // Consecutive ticks spent holding at end-of-file (manual-Next mode).
+    let mut eof_ticks: u32 = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -224,7 +248,12 @@ async fn monitor_playlist_playback(
                 let guard = state.lock().unwrap();
                 chapters_from_skip(&guard.entries[guard.active].skip)
             };
-            let _ = ctrl.set_chapters(&chapters).await;
+            // Only overwrite the player's chapter list when we actually have
+            // skip chapters — an empty set would wipe the file's own embedded
+            // chapters (which double as the skip fallback below).
+            if !chapters.is_empty() {
+                let _ = ctrl.set_chapters(&chapters).await;
+            }
             let active_req = {
                 let guard = state.lock().unwrap();
                 guard.entries[guard.active].req.clone()
@@ -248,7 +277,28 @@ async fn monitor_playlist_playback(
             progress.dur.store(dur, Ordering::Relaxed);
         }
 
-        let (ctx, skip) = {
+        // Manual-Next mode: with auto-advance off the player holds at EOF
+        // (`hold_at_end`). Give the user a grace window to click Next; then
+        // end the session — matching the autoplay-off expectation that nothing
+        // advances by itself. A Next click clears `eof-reached`, so the streak
+        // resets and the session continues with the next entry.
+        if !engine.autoplay_next {
+            let at_eof = ctrl.eof_reached().await.ok().flatten().unwrap_or(false);
+            if at_eof {
+                eof_ticks += 1;
+                if eof_ticks >= engine.eof_grace_ticks {
+                    tracing::debug!("episode ended with auto-advance off; closing the player");
+                    let _ = ctrl.quit().await;
+                    // Park: the caller's `select!` resolves via the player's
+                    // exit, keeping the session teardown on the single path.
+                    std::future::pending::<()>().await;
+                }
+            } else {
+                eof_ticks = 0;
+            }
+        }
+
+        let (ctx, mut skip, active) = {
             let guard = state.lock().unwrap();
             let entry = &guard.entries[guard.active];
             (
@@ -259,10 +309,33 @@ async fn monitor_playlist_playback(
                     title: entry.ctx.title.clone(),
                     detail: entry.ctx.detail.clone(),
                     image: entry.ctx.image.clone(),
+                    chapter_skip_fallback: entry.ctx.chapter_skip_fallback,
                 },
                 entry.skip,
+                guard.active,
             )
         };
+
+        // No external skip data for this entry: derive OP/ED windows from the
+        // playing file's embedded chapter names, once per entry.
+        if ctx.chapter_skip_fallback
+            && skip.is_empty()
+            && dur > 0
+            && !probed_entries.contains(&active)
+        {
+            probed_entries.insert(active);
+            if let Ok(embedded) = ctrl.chapters().await {
+                let derived = skip_from_chapters(&embedded, Some(dur));
+                if !derived.is_empty() {
+                    tracing::debug!("derived OP/ED skip windows from embedded chapters");
+                    let mut guard = state.lock().unwrap();
+                    if let Some(entry) = guard.entries.get_mut(active) {
+                        entry.skip = derived;
+                    }
+                    skip = derived;
+                }
+            }
+        }
 
         if let Some(op) = skip.opening {
             if op.is_meaningful() && pos >= op.start && pos < op.start + 2 {

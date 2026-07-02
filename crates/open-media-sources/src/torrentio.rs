@@ -41,40 +41,40 @@ impl TorrentioSource {
         }
     }
 
-    fn build_url(&self, query: &SourceQuery) -> CoreResult<String> {
-        let imdb = query
-            .media
-            .ids
-            .imdb
-            .as_deref()
-            .ok_or_else(|| CoreError::NoSource("torrentio requires an IMDB id".into()))?;
-
-        let path = if query.media.kind == MediaKind::Movie {
-            format!("stream/movie/{imdb}.json")
-        } else {
-            let season = query.season.unwrap_or(1);
-            let episode = query.episode.unwrap_or(1);
-            format!("stream/series/{imdb}:{season}:{episode}.json")
-        };
-        Ok(format!("{}/{}/{}", self.base_url, self.config_string, path))
-    }
-}
-
-#[async_trait]
-impl SourceProvider for TorrentioSource {
-    fn name(&self) -> &str {
-        "torrentio"
-    }
-
-    async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
-        // Torrentio is IMDB-keyed. AniList anime carry no IMDB id; rather than
-        // erroring per call (which the engine would only log), contribute nothing
-        // and let the anime-native providers (nyaa) serve those titles.
-        if query.media.ids.imdb.is_none() {
-            tracing::debug!("torrentio: no IMDB id; skipping (anime handled by nyaa)");
-            return Ok(Vec::new());
+    /// The stream paths to try, most-specific first.
+    ///
+    /// Anime with a bridged **kitsu id** are addressed natively
+    /// (`kitsu:{id}:{ep}`): kitsu mirrors AniList's per-entry numbering, so no
+    /// season arithmetic is needed and franchises whose seasons all share one
+    /// IMDB id resolve correctly. The IMDB path stays as a fallback (some
+    /// releases are only indexed under the IMDB id) — using [`SourceQuery::
+    /// imdb_season`] when present, because for a bridged later-season entry
+    /// `season` is AniList's flat `1` while the release lives at the real one.
+    fn stream_paths(&self, query: &SourceQuery) -> Vec<String> {
+        let mut paths = Vec::new();
+        let episodic = query.media.kind != MediaKind::Movie;
+        if let Some(kitsu) = query.kitsu {
+            if episodic {
+                let episode = query.episode.unwrap_or(1);
+                paths.push(format!("stream/series/kitsu:{kitsu}:{episode}.json"));
+            } else {
+                paths.push(format!("stream/movie/kitsu:{kitsu}.json"));
+            }
         }
-        let url = self.build_url(query)?;
+        if let Some(imdb) = query.media.ids.imdb.as_deref() {
+            if episodic {
+                let season = query.imdb_season.or(query.season).unwrap_or(1);
+                let episode = query.episode.unwrap_or(1);
+                paths.push(format!("stream/series/{imdb}:{season}:{episode}.json"));
+            } else {
+                paths.push(format!("stream/movie/{imdb}.json"));
+            }
+        }
+        paths
+    }
+
+    async fn fetch_streams(&self, path: &str) -> CoreResult<Vec<StreamItem>> {
+        let url = format!("{}/{}/{}", self.base_url, self.config_string, path);
         tracing::debug!(%url, "torrentio request");
 
         let resp = open_media_net::retry(|| async {
@@ -98,12 +98,45 @@ impl SourceProvider for TorrentioSource {
             what: "torrentio response".into(),
             message: e.to_string(),
         })?;
+        Ok(body.streams)
+    }
+}
 
-        let mut out = Vec::with_capacity(body.streams.len());
-        for s in body.streams {
-            out.push(s.into_candidate());
+#[async_trait]
+impl SourceProvider for TorrentioSource {
+    fn name(&self) -> &str {
+        "torrentio"
+    }
+
+    async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+        // Torrentio is id-keyed (IMDB, or kitsu for anime). Titles with neither
+        // contribute nothing — the anime-native providers (nyaa) serve those —
+        // rather than erroring per call (which the engine would only log).
+        let paths = self.stream_paths(query);
+        if paths.is_empty() {
+            tracing::debug!("torrentio: no IMDB/kitsu id; skipping (anime handled by nyaa)");
+            return Ok(Vec::new());
         }
-        Ok(out)
+
+        // Try most-specific first (kitsu for anime), falling back to the next
+        // addressing on an empty result. A hard failure on the *last* path is
+        // surfaced; earlier ones only log (the fallback may still serve).
+        let last = paths.len() - 1;
+        for (i, path) in paths.iter().enumerate() {
+            match self.fetch_streams(path).await {
+                Ok(streams) if !streams.is_empty() => {
+                    return Ok(streams.into_iter().map(|s| s.into_candidate()).collect());
+                }
+                Ok(_) => {
+                    tracing::debug!(path, "torrentio: no streams; trying next addressing");
+                }
+                Err(e) if i < last => {
+                    tracing::debug!(path, error = %e, "torrentio request failed; trying next addressing");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Vec::new())
     }
 }
 

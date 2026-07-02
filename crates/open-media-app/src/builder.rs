@@ -28,6 +28,8 @@ pub struct EngineBuilder {
     complete_threshold: f32,
     skip_filler: bool,
     autoplay_next: bool,
+    playlist_next: Option<bool>,
+    eof_grace_ticks: Option<u32>,
     resume: Option<bool>,
 }
 
@@ -110,6 +112,20 @@ impl EngineBuilder {
         self.autoplay_next = enabled;
         self
     }
+    /// Run the live-playlist session for episodic playback so the player's own
+    /// Next button has a target (default true). Independent of
+    /// [`Self::autoplay_next`], which controls automatic advance at episode end.
+    pub fn playlist_next(mut self, enabled: bool) -> Self {
+        self.playlist_next = Some(enabled);
+        self
+    }
+    /// Override the end-of-file grace window (in ~1s monitor ticks) used by
+    /// manual-Next mode before the session ends. Tests use a tiny value.
+    #[doc(hidden)]
+    pub fn eof_grace_ticks(mut self, ticks: u32) -> Self {
+        self.eof_grace_ticks = Some(ticks);
+        self
+    }
     /// Seek to the saved resume position when starting playback (default true).
     /// When `false`, playback always starts from the beginning, but progress is
     /// still recorded to the [`HistoryStore`] for later sessions.
@@ -140,6 +156,8 @@ impl EngineBuilder {
             },
             skip_filler: self.skip_filler,
             autoplay_next: self.autoplay_next,
+            playlist_next: self.playlist_next.unwrap_or(true),
+            eof_grace_ticks: self.eof_grace_ticks.unwrap_or(10),
             resume: self.resume.unwrap_or(true),
         }
     }

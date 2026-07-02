@@ -31,6 +31,7 @@ pub fn build_engine(cfg: &Config) -> Engine {
         .complete_threshold(cfg.behavior.complete_threshold)
         .skip_filler(cfg.behavior.skip_filler)
         .autoplay_next(cfg.behavior.autoplay_next)
+        .playlist_next(cfg.behavior.playlist_next)
         .resume(cfg.behavior.resume);
 
     // --- Metadata providers ---

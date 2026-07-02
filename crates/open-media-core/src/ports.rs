@@ -77,6 +77,17 @@ pub struct SourceQuery {
     /// also match a sequel release that numbers continuously (S2E01 as `… - 21`).
     /// `None` for movies, season 1, and providers without a relation graph.
     pub absolute_episode: Option<u32>,
+    /// Kitsu id for anime, from the [`IdBridge`]. Kitsu entries mirror AniList's
+    /// per-entry numbering (a sequel season is its own id, episodes from 1), so
+    /// a provider with native kitsu addressing (Torrentio) can serve anime
+    /// without any IMDB season arithmetic.
+    pub kitsu: Option<u64>,
+    /// Season within the **IMDB-numbered** series that this entry occupies,
+    /// from the [`IdBridge`]. AniList numbers every season as its own entry
+    /// starting at 1, so for a bridged later-season anime `season` is 1 while
+    /// `imdb_season` is the real one. IMDB-keyed providers must prefer this
+    /// over `season` when present. `None` for non-anime.
+    pub imdb_season: Option<u32>,
     /// Include candidates that are *not* cached on the debrid service.
     pub include_uncached: bool,
 }
@@ -168,6 +179,12 @@ pub struct PlayOptions {
     pub start_at_secs: Option<u32>,
     /// Extra player args appended after configured args.
     pub extra_args: Vec<String>,
+    /// Pause on the last frame at end-of-file instead of advancing/exiting
+    /// (mpv `--keep-open=always`). Used by the playlist session when the user
+    /// has auto-advance off: the player's own Next button keeps working, but
+    /// nothing advances by itself; the app ends the session via
+    /// [`PlaybackControl::eof_reached`]. Launch-only players may ignore it.
+    pub hold_at_end: bool,
 }
 
 /// Metadata for an item appended to a live player playlist.
@@ -175,6 +192,8 @@ pub struct PlayOptions {
 pub struct PlaylistItem {
     pub url: String,
     pub title: Option<String>,
+    /// An external subtitle file to attach to this item (mpv `sub-file`).
+    pub sub_file: Option<String>,
 }
 
 /// A chapter marker (used to expose AniSkip OP/ED segments in the player UI).
@@ -232,6 +251,21 @@ pub trait PlaybackControl: Send + Sync {
     async fn is_paused(&self) -> CoreResult<Option<bool>>;
     async fn seek_absolute(&self, secs: u32) -> CoreResult<()>;
     async fn set_chapters(&self, chapters: &[Chapter]) -> CoreResult<()>;
+
+    /// The chapter list of the **currently playing file** (embedded chapters,
+    /// or whatever was last set), when the control plane can read it. Lets the
+    /// app derive OP/ED skip windows from release-embedded chapter names when
+    /// no external skip data exists. Default: unknown/none.
+    async fn chapters(&self) -> CoreResult<Vec<Chapter>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether playback is holding at end-of-file (only meaningful with
+    /// [`PlayOptions::hold_at_end`]). `Ok(None)` = unknown/unsupported.
+    async fn eof_reached(&self) -> CoreResult<Option<bool>> {
+        Ok(None)
+    }
+
     async fn quit(&self) -> CoreResult<()>;
 }
 
@@ -342,9 +376,40 @@ pub trait SubtitleProvider: Send + Sync {
 pub trait IdBridge: Send + Sync {
     fn name(&self) -> &str;
 
-    /// Resolve an IMDB id for the given ids (keyed off the anilist/mal dialect),
-    /// or `Ok(None)` when no mapping exists or the lookup could not be performed.
-    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>>;
+    /// Resolve the cross-database ids for the given ids (keyed off the
+    /// anilist/mal dialect), or `Ok(None)` when no mapping exists or the lookup
+    /// could not be performed.
+    async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<BridgedIds>>;
+
+    /// Convenience: just the IMDB id from [`IdBridge::resolve`].
+    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+        Ok(self.resolve(ids).await?.and_then(|b| b.imdb))
+    }
+}
+
+/// The cross-database ids one anime entry bridges to.
+///
+/// AniList numbers every season as its own entry starting at episode 1, while
+/// IMDB/TVDB and TMDB number seasons within one series id. `imdb`/`tmdb_tv`
+/// are therefore **series-level** ids, and the `*_season`/`*_episode_offset`
+/// fields say where this entry lands inside them: entry episode `n` maps to
+/// season `*_season`, episode `n + *_episode_offset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BridgedIds {
+    pub imdb: Option<String>,
+    /// TMDB series id (episodic entries).
+    pub tmdb_tv: Option<u64>,
+    /// TMDB movie id (film entries).
+    pub tmdb_movie: Option<u64>,
+    /// Kitsu id — per-entry like AniList (episode numbering already aligns).
+    pub kitsu: Option<u64>,
+    /// Season within the IMDB/TVDB-numbered series. `0` = specials; a negative
+    /// value means the upstream dataset uses absolute numbering for the entry.
+    pub imdb_season: Option<i32>,
+    /// Season within the TMDB-numbered series (same semantics).
+    pub tmdb_season: Option<i32>,
+    pub imdb_episode_offset: Option<u32>,
+    pub tmdb_episode_offset: Option<u32>,
 }
 
 /// Reports a "now watching" activity to a presence service (Discord RPC).

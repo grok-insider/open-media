@@ -272,6 +272,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
             );
             println!("  skip_filler           = {}", cfg.behavior.skip_filler);
             println!("  autoplay_next         = {}", cfg.behavior.autoplay_next);
+            println!("  playlist_next         = {}", cfg.behavior.playlist_next);
             println!("  resume                = {}", cfg.behavior.resume);
             println!(
                 "  complete_threshold    = {}",
@@ -326,6 +327,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 "skip_intro_outro" => cfg.behavior.skip_intro_outro = parse_bool(key, value)?,
                 "skip_filler" => cfg.behavior.skip_filler = parse_bool(key, value)?,
                 "autoplay_next" => cfg.behavior.autoplay_next = parse_bool(key, value)?,
+                "playlist_next" => cfg.behavior.playlist_next = parse_bool(key, value)?,
                 "resume" => cfg.behavior.resume = parse_bool(key, value)?,
                 "discord_presence" => cfg.behavior.discord_presence = parse_bool(key, value)?,
                 "telemetry" => cfg.telemetry.enabled = parse_bool(key, value)?,

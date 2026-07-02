@@ -99,6 +99,15 @@ pub struct Engine {
     skip_filler: bool,
     /// Auto-advance to the next episode after a completed episodic playback.
     autoplay_next: bool,
+    /// Run the live-playlist session for episodic playback (players with
+    /// [`PlaylistControl`]) so the player's own Next button has a target, even
+    /// when `autoplay_next` is off.
+    playlist_next: bool,
+    /// How many consecutive monitor ticks (~1s) playback may hold at
+    /// end-of-file before the session is ended, in manual-Next mode
+    /// (`playlist_next` without `autoplay_next`). The grace window lets a
+    /// quick Next click still advance.
+    eof_grace_ticks: u32,
     /// Seek to the saved position when starting playback. When `false`, history
     /// is still recorded but playback always starts from the beginning.
     resume: bool,
@@ -145,50 +154,182 @@ impl Engine {
 
     /// List the episodes of a season. Returns the first provider that knows the id
     /// dialect and reports episodes; `Ok(vec![])` when none do.
+    ///
+    /// For AniList/MAL-keyed media (anime), the picked list is then best-effort
+    /// **overlaid** with stills/synopses from the TMDB/IMDB-keyed providers via
+    /// the [`IdBridge`]: AniList knows titles but carries no per-episode art or
+    /// synopsis, while TMDB (key configured) or Cinemeta (keyless) usually do —
+    /// they just can't be queried without the bridged series id and the season
+    /// the entry occupies in that series' numbering.
+    ///
+    /// [`IdBridge`]: open_media_core::ports::IdBridge
     pub async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+        let mut eps = Vec::new();
         for provider in &self.metadata {
-            if let Ok(eps) = provider.episodes(ids, season).await {
-                if !eps.is_empty() {
-                    return Ok(eps);
+            if let Ok(found) = provider.episodes(ids, season).await {
+                if !found.is_empty() {
+                    eps = found;
+                    break;
                 }
             }
         }
-        Ok(Vec::new())
+        self.overlay_bridged_episode_details(ids, &mut eps).await;
+        Ok(eps)
     }
 
-    /// Populate `media.ids.imdb` from the [`IdBridge`] when it is missing.
-    ///
-    /// This is the hinge of anime→IMDB source enrichment: the IMDB-keyed source
-    /// providers (Torrentio, and through them the debrid cache) short-circuit
-    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa. Looking
-    /// up an IMDB id for the anime's anilist/mal id here — right before the
-    /// [`SourceQuery`] is built — lets those providers serve anime with **no
-    /// change to the providers themselves** (they already key off `imdb`).
-    ///
-    /// Best-effort and side-effect-free beyond the passed `media`:
-    /// - only runs for [`MediaKind::Anime`] that lack an imdb id and have an
-    ///   anilist/mal id to bridge from, and only when a bridge is wired;
-    /// - a bridge error or a `None` result leaves `media` untouched (the title
-    ///   keeps its nyaa sources). It must never fail the caller.
-    ///
-    /// [`SourceQuery`]: open_media_core::ports::SourceQuery
-    async fn enrich_imdb(&self, media: &mut Media) {
-        if media.kind != MediaKind::Anime || media.ids.imdb.is_some() {
+    /// Fill missing per-episode details (still, synopsis, air date, runtime,
+    /// rating, title) from a bridged TMDB/IMDB identity. Best-effort: any miss
+    /// (no bridge, no mapping, providers can't serve the bridged id) leaves the
+    /// list untouched. Never fails the caller.
+    async fn overlay_bridged_episode_details(&self, ids: &IdSet, eps: &mut [Episode]) {
+        // Only for media the TMDB/IMDB-keyed providers could NOT have served
+        // directly (anime discovered via AniList/MAL), and only when something
+        // is actually missing.
+        if eps.is_empty() || ids.tmdb.is_some() || ids.imdb.is_some() {
+            return;
+        }
+        if ids.anilist.is_none() && ids.mal.is_none() {
+            return;
+        }
+        if eps
+            .iter()
+            .all(|e| e.still.is_some() && e.overview.is_some())
+        {
             return;
         }
         let Some(bridge) = &self.id_bridge else {
             return;
         };
-        match bridge.imdb_for(&media.ids).await {
-            Ok(Some(imdb)) => {
-                tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
-                media.ids.imdb = Some(imdb);
+        let bridged = match bridge.resolve(ids).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!(error = %e, "id bridge lookup failed; keeping bare episode list");
+                return;
+            }
+        };
+
+        // Two attempts, in provider-registration preference order: TMDB ids
+        // first (the TMDB provider is registered ahead of Cinemeta and is the
+        // richer source when a key is configured), then IMDB ids (keyless
+        // Cinemeta). Each uses ITS database's season/offset coordinates for
+        // this entry; a negative season means absolute numbering upstream,
+        // which can't be mapped per-season.
+        let attempts = [
+            (
+                bridged
+                    .tmdb_tv
+                    .and_then(|id| i32::try_from(id).ok())
+                    .map(|id| IdSet::default().with_tmdb(id)),
+                bridged.tmdb_season,
+                bridged.tmdb_episode_offset.unwrap_or(0),
+            ),
+            (
+                bridged
+                    .imdb
+                    .clone()
+                    .map(|id| IdSet::default().with_imdb(id)),
+                bridged.imdb_season,
+                bridged.imdb_episode_offset.unwrap_or(0),
+            ),
+        ];
+        for (bridged_ids, bridged_season, offset) in attempts {
+            let (Some(bridged_ids), Some(season)) = (bridged_ids, bridged_season) else {
+                continue;
+            };
+            let Ok(season) = u32::try_from(season) else {
+                continue;
+            };
+            let mut overlay = Vec::new();
+            for provider in &self.metadata {
+                if let Ok(found) = provider.episodes(&bridged_ids, season).await {
+                    if !found.is_empty() {
+                        overlay = found;
+                        break;
+                    }
+                }
+            }
+            if overlay.is_empty() {
+                continue;
+            }
+            let by_number: std::collections::HashMap<u32, &Episode> =
+                overlay.iter().map(|e| (e.number, e)).collect();
+            let mut applied = false;
+            for ep in eps.iter_mut() {
+                let Some(src) = by_number.get(&(ep.number + offset)) else {
+                    continue;
+                };
+                if ep.still.is_none() {
+                    ep.still = src.still.clone();
+                }
+                if ep.overview.is_none() {
+                    ep.overview = src.overview.clone();
+                }
+                if ep.air_date.is_none() {
+                    ep.air_date = src.air_date.clone();
+                }
+                if ep.runtime_minutes.is_none() {
+                    ep.runtime_minutes = src.runtime_minutes;
+                }
+                if ep.rating.is_none() {
+                    ep.rating = src.rating;
+                }
+                if ep.title.is_none() {
+                    ep.title = src.title.clone();
+                }
+                applied = true;
+            }
+            if applied {
+                tracing::debug!(season, offset, "overlaid bridged episode details");
+                return;
+            }
+        }
+    }
+
+    /// Bridge an anime's ids: populate `media.ids.imdb` when it is missing and
+    /// return the full [`BridgedIds`] for the source query.
+    ///
+    /// This is the hinge of anime source enrichment: the IMDB-keyed source
+    /// providers (Torrentio, and through them the debrid cache) short-circuit
+    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa.
+    /// Looking up the bridged identity here — right before the [`SourceQuery`]
+    /// is built — lets those providers serve anime; the returned kitsu id and
+    /// IMDB season additionally let Torrentio address the entry natively /
+    /// at the correct season.
+    ///
+    /// Best-effort and side-effect-free beyond the passed `media`:
+    /// - only runs for [`MediaKind::Anime`] with an anilist/mal id to bridge
+    ///   from, and only when a bridge is wired;
+    /// - a bridge error or a `None` result leaves `media` untouched (the title
+    ///   keeps its nyaa sources). It must never fail the caller.
+    ///
+    /// [`SourceQuery`]: open_media_core::ports::SourceQuery
+    /// [`BridgedIds`]: open_media_core::ports::BridgedIds
+    async fn bridge_anime_ids(
+        &self,
+        media: &mut Media,
+    ) -> Option<open_media_core::ports::BridgedIds> {
+        if media.kind != MediaKind::Anime {
+            return None;
+        }
+        let bridge = self.id_bridge.as_ref()?;
+        match bridge.resolve(&media.ids).await {
+            Ok(Some(bridged)) => {
+                if media.ids.imdb.is_none() {
+                    if let Some(imdb) = &bridged.imdb {
+                        tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
+                        media.ids.imdb = Some(imdb.clone());
+                    }
+                }
+                Some(bridged)
             }
             Ok(None) => {
-                tracing::debug!("no IMDB mapping for anime; keeping anime-native sources");
+                tracing::debug!("no id mapping for anime; keeping anime-native sources");
+                None
             }
             Err(e) => {
                 tracing::debug!(error = %e, "id bridge lookup failed; keeping anime-native sources");
+                None
             }
         }
     }

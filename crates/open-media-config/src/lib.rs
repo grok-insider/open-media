@@ -199,6 +199,12 @@ pub struct Behavior {
     /// and only when the finished episode crossed `complete_threshold`.
     #[serde(default)]
     pub autoplay_next: bool,
+    /// Keep one player process per episodic session and pre-append the next
+    /// episode to its playlist so the player's own Next button works (mpv).
+    /// Independent of `autoplay_next`, which controls whether the player
+    /// advances *by itself* at the end of an episode. On by default.
+    #[serde(default = "default_true")]
+    pub playlist_next: bool,
     /// Resume from the last saved position.
     #[serde(default = "default_true")]
     pub resume: bool,
@@ -216,6 +222,7 @@ impl Default for Behavior {
             skip_intro_outro: true,
             skip_filler: false,
             autoplay_next: false,
+            playlist_next: true,
             resume: true,
             complete_threshold: default_complete_threshold(),
             discord_presence: false,
@@ -641,6 +648,25 @@ tmdb_api_key = "abc"
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert!(back.behavior.autoplay_next);
+    }
+
+    #[test]
+    fn playlist_next_default_and_roundtrip() {
+        // On by default (the player's Next button should just work) — on an
+        // empty document and matching the manual Default impl.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.behavior.playlist_next);
+        assert_eq!(
+            cfg.behavior.playlist_next,
+            Behavior::default().playlist_next
+        );
+
+        // Opting out survives a round-trip.
+        let mut c = Config::default();
+        c.behavior.playlist_next = false;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(!back.behavior.playlist_next);
     }
 
     #[test]

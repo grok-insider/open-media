@@ -457,6 +457,17 @@ impl PlaybackControl for RecordingControl {
 struct PlaylistRecordingPlayer {
     played: Arc<Mutex<Vec<u32>>>,
     appended_titles: Arc<Mutex<Vec<Option<String>>>>,
+    hold_flags: Arc<Mutex<Vec<bool>>>,
+}
+
+impl PlaylistRecordingPlayer {
+    fn new(played: Arc<Mutex<Vec<u32>>>, appended_titles: Arc<Mutex<Vec<Option<String>>>>) -> Self {
+        Self {
+            played,
+            appended_titles,
+            hold_flags: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 #[async_trait]
@@ -470,7 +481,7 @@ impl Player for PlaylistRecordingPlayer {
     async fn play(
         &self,
         playback: &Playback,
-        _opts: &PlayOptions,
+        opts: &PlayOptions,
     ) -> CoreResult<Box<dyn PlaySession>> {
         let ep = playback
             .file_name
@@ -478,6 +489,7 @@ impl Player for PlaylistRecordingPlayer {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         self.played.lock().unwrap().push(ep);
+        self.hold_flags.lock().unwrap().push(opts.hold_at_end);
         Ok(Box::new(PlaylistRecordingSession {
             control: Arc::new(PlaylistRecordingControl {
                 appended_titles: self.appended_titles.clone(),
@@ -710,10 +722,10 @@ async fn playlist_player_appends_next_episode_without_new_launch() {
         .add_metadata(Arc::new(SeasonMeta { count: 3 }))
         .add_source(Arc::new(StampSource))
         .resolver(Arc::new(EchoResolver))
-        .player(Arc::new(PlaylistRecordingPlayer {
-            played: played.clone(),
-            appended_titles: appended_titles.clone(),
-        }))
+        .player(Arc::new(PlaylistRecordingPlayer::new(
+            played.clone(),
+            appended_titles.clone(),
+        )))
         .autoplay_next(true)
         .build();
 
@@ -726,6 +738,222 @@ async fn playlist_player_appends_next_episode_without_new_launch() {
     let titles = appended_titles.lock().unwrap();
     assert_eq!(titles.len(), 1);
     assert!(titles[0].as_deref().unwrap_or_default().contains("S01E02"));
+}
+
+#[tokio::test]
+async fn manual_next_session_appends_next_and_holds_at_end() {
+    // With auto-advance OFF but playlist_next on (the default), the playlist
+    // session still runs: the next episode is pre-appended (so the player's
+    // Next button has a target) and the player is told to hold at EOF instead
+    // of advancing by itself.
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .build(); // autoplay_next defaults to false
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(*played.lock().unwrap(), vec![1], "one launch only");
+    assert_eq!(
+        *hold_flags.lock().unwrap(),
+        vec![true],
+        "manual-Next mode must hold at end-of-file"
+    );
+    let titles = appended_titles.lock().unwrap();
+    assert_eq!(titles.len(), 1, "Next target must be pre-appended");
+    assert!(titles[0].as_deref().unwrap_or_default().contains("S01E02"));
+}
+
+#[tokio::test]
+async fn autoplay_session_does_not_hold_at_end() {
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .autoplay_next(true)
+        .build();
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *hold_flags.lock().unwrap(),
+        vec![false],
+        "auto-advance must let the player run into the next entry"
+    );
+}
+
+#[tokio::test]
+async fn playlist_next_disabled_restores_plain_sessions() {
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let appended_titles = Arc::new(Mutex::new(Vec::new()));
+    let player = Arc::new(PlaylistRecordingPlayer::new(
+        played.clone(),
+        appended_titles.clone(),
+    ));
+    let hold_flags = player.hold_flags.clone();
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(player)
+        .playlist_next(false)
+        .build();
+
+    engine
+        .play(&play_request(episodic_media()), &resolvable_candidate())
+        .await
+        .unwrap();
+
+    assert_eq!(*played.lock().unwrap(), vec![1]);
+    assert!(
+        appended_titles.lock().unwrap().is_empty(),
+        "no playlist use"
+    );
+    assert_eq!(*hold_flags.lock().unwrap(), vec![false]);
+}
+
+// ---- Manual-Next EOF handling ----------------------------------------------
+
+/// A session that stays "running" until `quit()` is called on its control.
+struct EofHoldingPlayer {
+    quit_called: Arc<tokio::sync::Notify>,
+    quits: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl Player for EofHoldingPlayer {
+    fn name(&self) -> &str {
+        "eof-holding"
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    async fn play(
+        &self,
+        _playback: &Playback,
+        _opts: &PlayOptions,
+    ) -> CoreResult<Box<dyn PlaySession>> {
+        Ok(Box::new(EofHoldingSession {
+            control: Arc::new(EofHoldingControl {
+                quit_called: self.quit_called.clone(),
+                quits: self.quits.clone(),
+            }),
+            quit_called: self.quit_called.clone(),
+        }))
+    }
+}
+
+struct EofHoldingSession {
+    control: Arc<EofHoldingControl>,
+    quit_called: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl PlaySession for EofHoldingSession {
+    async fn wait(&mut self) -> CoreResult<()> {
+        // "Runs" until the app closes the player.
+        self.quit_called.notified().await;
+        Ok(())
+    }
+    fn control(&self) -> Option<Arc<dyn PlaybackControl>> {
+        Some(self.control.clone())
+    }
+    fn playlist_control(&self) -> Option<Arc<dyn PlaylistControl>> {
+        Some(self.control.clone())
+    }
+}
+
+struct EofHoldingControl {
+    quit_called: Arc<tokio::sync::Notify>,
+    quits: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl PlaybackControl for EofHoldingControl {
+    async fn position(&self) -> CoreResult<Option<u32>> {
+        Ok(Some(1400))
+    }
+    async fn duration(&self) -> CoreResult<Option<u32>> {
+        Ok(Some(1400))
+    }
+    async fn is_paused(&self) -> CoreResult<Option<bool>> {
+        Ok(Some(true))
+    }
+    async fn seek_absolute(&self, _secs: u32) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn set_chapters(&self, _chapters: &[Chapter]) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn eof_reached(&self) -> CoreResult<Option<bool>> {
+        Ok(Some(true))
+    }
+    async fn quit(&self) -> CoreResult<()> {
+        *self.quits.lock().unwrap() += 1;
+        self.quit_called.notify_waiters();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PlaylistControl for EofHoldingControl {
+    async fn append(&self, _item: &PlaylistItem) -> CoreResult<()> {
+        Ok(())
+    }
+    async fn active_index(&self) -> CoreResult<Option<usize>> {
+        Ok(Some(0))
+    }
+}
+
+#[tokio::test]
+async fn manual_next_session_ends_after_eof_grace() {
+    // Playback holds at EOF (keep-open) with auto-advance off: after the grace
+    // window the app must close the player and finish, marking completion.
+    let quits = Arc::new(Mutex::new(0));
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeasonMeta { count: 3 }))
+        .add_source(Arc::new(StampSource))
+        .resolver(Arc::new(EchoResolver))
+        .player(Arc::new(EofHoldingPlayer {
+            quit_called: Arc::new(tokio::sync::Notify::new()),
+            quits: quits.clone(),
+        }))
+        .eof_grace_ticks(1)
+        .build();
+
+    // Bounded so a regression can't hang the suite forever.
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        engine.play(&play_request(episodic_media()), &resolvable_candidate()),
+    )
+    .await
+    .expect("session must end after the EOF grace window")
+    .unwrap();
+
+    assert_eq!(*quits.lock().unwrap(), 1, "the player must be closed once");
 }
 
 struct RecordingPresence {
@@ -1299,9 +1527,21 @@ async fn play_errors_when_all_candidates_fail_to_resolve() {
 // imdb id gets `ids.imdb` populated from the bridge before the SourceQuery is
 // built, so an IMDB-keyed source provider sees the bridged id.
 
-/// A bridge that returns a fixed IMDB id for any ids carrying an anilist id.
+/// A bridge that returns fixed bridged ids for any ids carrying an anime id.
 struct FakeBridge {
-    imdb: Option<String>,
+    bridged: Option<open_media_core::ports::BridgedIds>,
+}
+
+impl FakeBridge {
+    /// The common case: bridge to just an IMDB id.
+    fn imdb(id: &str) -> Self {
+        Self {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some(id.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -1309,11 +1549,11 @@ impl IdBridge for FakeBridge {
     fn name(&self) -> &str {
         "fake-bridge"
     }
-    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+    async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<open_media_core::ports::BridgedIds>> {
         // Mirror the real bridge: only answer when there's an anime id to
         // bridge from.
         if ids.anilist.is_some() || ids.mal.is_some() {
-            Ok(self.imdb.clone())
+            Ok(self.bridged.clone())
         } else {
             Ok(None)
         }
@@ -1359,9 +1599,7 @@ async fn bridge_fills_imdb_for_anime_before_source_query() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let engine = Engine::builder()
         .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
-        .id_bridge(Arc::new(FakeBridge {
-            imdb: Some("tt0245429".into()),
-        }))
+        .id_bridge(Arc::new(FakeBridge::imdb("tt0245429")))
         .build();
 
     let req = play_request(anime_no_imdb());
@@ -1383,7 +1621,7 @@ async fn bridge_miss_leaves_anime_without_imdb() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let engine = Engine::builder()
         .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
-        .id_bridge(Arc::new(FakeBridge { imdb: None }))
+        .id_bridge(Arc::new(FakeBridge { bridged: None }))
         .build();
 
     engine
@@ -1392,6 +1630,150 @@ async fn bridge_miss_leaves_anime_without_imdb() {
         .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), vec![None]);
+}
+
+// ---- Embedded-chapter OP/ED skip fallback ----------------------------------
+
+mod chapter_skip {
+    use crate::playback::skip_from_chapters;
+    use open_media_core::ports::Chapter;
+
+    fn ch(title: &str, time_secs: u32) -> Chapter {
+        Chapter {
+            title: title.into(),
+            time_secs,
+        }
+    }
+
+    #[test]
+    fn detects_op_and_ed_by_common_chapter_names() {
+        // A typical anime release: Intro → OP → episode parts → ED → Preview.
+        let chapters = vec![
+            ch("Intro", 0),
+            ch("OP", 60),
+            ch("Part A", 150),
+            ch("Part B", 700),
+            ch("ED", 1320),
+            ch("Preview", 1410),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(1440));
+        // "Intro" (0..60) matches first as the opening window.
+        let op = skip.opening.unwrap();
+        assert_eq!((op.start, op.end), (0, 60));
+        let ed = skip.ending.unwrap();
+        assert_eq!((ed.start, ed.end), (1320, 1410));
+    }
+
+    #[test]
+    fn window_end_is_next_chapter_or_duration() {
+        // ED is the last chapter → window runs to the file's end.
+        let chapters = vec![ch("Opening", 30), ch("Part A", 120), ch("Ending", 1300)];
+        let skip = skip_from_chapters(&chapters, Some(1420));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1300, 1420)));
+    }
+
+    #[test]
+    fn implausible_window_lengths_are_rejected() {
+        // "Opening" spanning 20 minutes is a mislabeled chapter, not an OP —
+        // auto-skipping it would eat most of the episode.
+        let chapters = vec![ch("Opening", 0), ch("Ending", 1200)];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert!(
+            skip.opening.is_none(),
+            "20-minute 'opening' must be rejected"
+        );
+        // The trailing "Ending" (200s) is also over the plausible cap.
+        assert!(skip.ending.is_none());
+    }
+
+    #[test]
+    fn token_matching_avoids_prose_false_positives() {
+        let chapters = vec![
+            ch("Operation Z", 0),      // contains "op" as substring, not token
+            ch("The Red Wedding", 90), // "ed" substring
+            ch("Introspection Hour", 180),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(300));
+        assert!(skip.is_empty());
+    }
+
+    #[test]
+    fn matches_are_case_insensitive_and_tokenized() {
+        let chapters = vec![
+            ch("opening credits", 10),
+            ch("Part A", 100),
+            ch("ending / credits", 1200),
+            ch("next", 1290),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert_eq!(skip.opening.map(|o| (o.start, o.end)), Some((10, 100)));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1200, 1290)));
+    }
+
+    #[test]
+    fn no_chapters_or_unnamed_chapters_yield_empty() {
+        assert!(skip_from_chapters(&[], Some(1400)).is_empty());
+        let unnamed = vec![ch("", 0), ch("", 700)];
+        assert!(skip_from_chapters(&unnamed, Some(1400)).is_empty());
+    }
+
+    #[test]
+    fn unsorted_chapter_lists_are_handled() {
+        let chapters = vec![ch("ED", 1320), ch("OP", 60), ch("Part A", 150)];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert_eq!(skip.opening.map(|o| (o.start, o.end)), Some((60, 150)));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1320, 1400)));
+    }
+}
+
+/// The anime addressing fields of one source query: (imdb, kitsu, imdb_season).
+type SeenCoordinates = (Option<String>, Option<u64>, Option<u32>);
+
+/// Captures the anime addressing fields of each source query.
+struct CoordinateCaptureSource {
+    seen: Arc<Mutex<Vec<SeenCoordinates>>>,
+}
+
+#[async_trait]
+impl SourceProvider for CoordinateCaptureSource {
+    fn name(&self) -> &str {
+        "coordinate-capture"
+    }
+    async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+        self.seen.lock().unwrap().push((
+            query.media.ids.imdb.clone(),
+            query.kitsu,
+            query.imdb_season,
+        ));
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn bridge_supplies_kitsu_and_imdb_season_to_the_source_query() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let engine = Engine::builder()
+        .add_source(Arc::new(CoordinateCaptureSource { seen: seen.clone() }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some("tt14115938".into()),
+                kitsu: Some(47099),
+                imdb_season: Some(2),
+                ..Default::default()
+            }),
+        }))
+        .build();
+
+    engine
+        .find_sources(&play_request(anime_no_imdb()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(Some("tt14115938".to_string()), Some(47099), Some(2))],
+        "the query must carry the bridged imdb id, kitsu id, and IMDB season"
+    );
 }
 
 #[tokio::test]
@@ -1408,4 +1790,212 @@ async fn bridge_not_invoked_without_bridge_wired() {
         .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), vec![None]);
+}
+
+// ---- Bridged episode-detail overlay (anime stills/synopsis) ----------------
+//
+// AniList serves anime episode lists with titles but no stills/synopses; the
+// TMDB/IMDB-keyed providers have them but can't be queried without the bridged
+// series id + the season this entry occupies. These tests prove the overlay in
+// `Engine::episodes` against fake ports.
+
+fn bare_episode(number: u32, title: &str) -> Episode {
+    Episode {
+        season: 1,
+        number,
+        title: Some(title.to_string()),
+        air_date: None,
+        overview: None,
+        runtime_minutes: None,
+        rating: None,
+        still: None,
+    }
+}
+
+/// An "AniList-like" provider: bare titled episodes, only for anilist-keyed ids.
+struct AnimeEpisodesMeta;
+
+#[async_trait]
+impl MetadataProvider for AnimeEpisodesMeta {
+    fn name(&self) -> &str {
+        "fake-anilist"
+    }
+    async fn search(&self, _q: &str, _k: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+        Ok(vec![])
+    }
+    async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+        Err(CoreError::NotImplemented("fake.details"))
+    }
+    async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+        Ok(vec![])
+    }
+    async fn episodes(&self, ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+        if ids.anilist.is_none() {
+            return Err(CoreError::NotFound("needs an anilist id".into()));
+        }
+        Ok(vec![
+            bare_episode(1, "The Hated Classmate"),
+            bare_episode(2, "Shadow Garden Is Born"),
+        ])
+    }
+}
+
+/// A "TMDB-like" provider: rich episodes, only for tmdb-keyed ids, recording
+/// the season it was asked for.
+struct RichEpisodesMeta {
+    /// Which id dialect unlocks this provider: `"tmdb"` or `"imdb"`.
+    keyed_by: &'static str,
+    asked_season: Arc<Mutex<Vec<u32>>>,
+}
+
+#[async_trait]
+impl MetadataProvider for RichEpisodesMeta {
+    fn name(&self) -> &str {
+        "fake-rich"
+    }
+    async fn search(&self, _q: &str, _k: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+        Ok(vec![])
+    }
+    async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+        Err(CoreError::NotImplemented("fake.details"))
+    }
+    async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+        Ok(vec![])
+    }
+    async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+        let unlocked = match self.keyed_by {
+            "tmdb" => ids.tmdb.is_some(),
+            _ => ids.imdb.is_some(),
+        };
+        if !unlocked {
+            return Err(CoreError::NotFound("wrong id dialect".into()));
+        }
+        self.asked_season.lock().unwrap().push(season);
+        Ok((1..=4)
+            .map(|n| Episode {
+                season,
+                number: n,
+                title: Some(format!("Rich title {n}")),
+                air_date: Some("2023-10-04".into()),
+                overview: Some(format!("Synopsis {n}")),
+                runtime_minutes: Some(24),
+                rating: Some(8.0),
+                still: Some(format!("https://img.example/e{n}.jpg")),
+            })
+            .collect())
+    }
+}
+
+fn bridged_tmdb(season: i32, offset: Option<u32>) -> open_media_core::ports::BridgedIds {
+    open_media_core::ports::BridgedIds {
+        tmdb_tv: Some(119495),
+        tmdb_season: Some(season),
+        tmdb_episode_offset: offset,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn anime_episodes_gain_stills_and_synopsis_from_bridged_tmdb() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "tmdb",
+            asked_season: asked.clone(),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(bridged_tmdb(2, None)),
+        }))
+        .build();
+
+    let ids = IdSet::default().with_anilist(161964);
+    let eps = engine.episodes(&ids, 1).await.unwrap();
+
+    // The overlay queried the bridged season (2), not the AniList season (1).
+    assert_eq!(*asked.lock().unwrap(), vec![2]);
+    assert_eq!(eps.len(), 2);
+    // AniList titles are kept; missing details are filled from the overlay.
+    assert_eq!(eps[0].title.as_deref(), Some("The Hated Classmate"));
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e1.jpg"));
+    assert_eq!(eps[0].overview.as_deref(), Some("Synopsis 1"));
+    assert_eq!(eps[0].runtime_minutes, Some(24));
+    assert_eq!(eps[1].still.as_deref(), Some("https://img.example/e2.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_applies_episode_offset() {
+    // The entry starts partway into the bridged season: entry episode 1 is
+    // season episode 3 (offset 2).
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "tmdb",
+            asked_season: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(bridged_tmdb(1, Some(2))),
+        }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(190), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e3.jpg"));
+    assert_eq!(eps[0].overview.as_deref(), Some("Synopsis 3"));
+    assert_eq!(eps[1].still.as_deref(), Some("https://img.example/e4.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_falls_back_to_imdb_keyed_provider() {
+    // No TMDB mapping — the keyless (Cinemeta-like) IMDB-keyed provider serves.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "imdb",
+            asked_season: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some("tt14115938".into()),
+                imdb_season: Some(1),
+                ..Default::default()
+            }),
+        }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(130298), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e1.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_misses_leave_episode_list_untouched() {
+    // Bridge has no mapping → the bare AniList list survives unchanged.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .id_bridge(Arc::new(FakeBridge { bridged: None }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps.len(), 2);
+    assert!(eps[0].still.is_none());
+    assert!(eps[0].overview.is_none());
+
+    // And with no bridge wired at all.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .build();
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps.len(), 2);
+    assert!(eps[0].still.is_none());
 }

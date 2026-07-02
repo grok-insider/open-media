@@ -105,6 +105,12 @@ impl MpvPlayer {
             // the script option for scripts that choose to read it.
             args.push("--script-opts=thumbfast-network=yes".to_string());
         }
+        if opts.hold_at_end {
+            // Pause on the last frame instead of advancing to the next playlist
+            // entry (or exiting): manual-Next mode. `always` (not `yes`) so it
+            // also applies when a next playlist entry exists.
+            args.push("--keep-open=always".to_string());
+        }
         args.extend(self.args.iter().cloned());
         args.extend(opts.extra_args.iter().cloned());
         args.push(playback.url.clone());
@@ -250,6 +256,18 @@ impl PlaybackControl for MpvControl {
         Ok(())
     }
 
+    async fn chapters(&self) -> CoreResult<Vec<Chapter>> {
+        let data = self
+            .request(json!(["get_property", "chapter-list"]))
+            .await?;
+        Ok(parse_chapter_list(&data))
+    }
+
+    async fn eof_reached(&self) -> CoreResult<Option<bool>> {
+        let data = self.request(json!(["get_property", "eof-reached"])).await?;
+        Ok(data.as_bool())
+    }
+
     async fn quit(&self) -> CoreResult<()> {
         self.request(json!(["quit"])).await?;
         Ok(())
@@ -272,10 +290,44 @@ impl PlaylistControl for MpvControl {
 }
 
 fn append_command(item: &PlaylistItem) -> Value {
-    match &item.title {
-        Some(title) => json!(["loadfile", item.url, "append-play", { "force-media-title": title }]),
-        None => json!(["loadfile", item.url, "append-play"]),
+    // Per-file options travel in `loadfile`'s options dict, so they apply only
+    // to this playlist entry.
+    let mut options = serde_json::Map::new();
+    if let Some(title) = &item.title {
+        options.insert("force-media-title".into(), json!(title));
     }
+    if let Some(sub) = &item.sub_file {
+        options.insert("sub-file".into(), json!(sub));
+    }
+    if options.is_empty() {
+        json!(["loadfile", item.url, "append-play"])
+    } else {
+        json!(["loadfile", item.url, "append-play", options])
+    }
+}
+
+/// Parse mpv's `chapter-list` property: `[{ "title": "...", "time": 12.3 }]`.
+/// Entries without a time are dropped; a missing title becomes empty (some
+/// muxers emit unnamed chapters).
+fn parse_chapter_list(data: &Value) -> Vec<Chapter> {
+    data.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|c| {
+                    let time = c.get("time")?.as_f64()?;
+                    Some(Chapter {
+                        title: c
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        time_secs: time.max(0.0).round() as u32,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A process/instance-unique IPC endpoint name shared by both platforms.
@@ -331,6 +383,28 @@ async fn wait_for_socket(path: &Path, timeout: Duration) {
 mod tests {
     use super::*;
     use open_media_core::stream::PlaybackOrigin;
+
+    #[test]
+    fn parses_mpv_chapter_list_property() {
+        let data = json!([
+            { "title": "OP", "time": 59.9 },
+            { "title": "Part A", "time": 150.2 },
+            { "time": 700.0 },              // unnamed chapter
+            { "title": "no time given" }    // dropped: unusable without a time
+        ]);
+        let chapters = parse_chapter_list(&data);
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "OP");
+        assert_eq!(chapters[0].time_secs, 60);
+        assert_eq!(chapters[1].time_secs, 150);
+        assert_eq!(chapters[2].title, "");
+    }
+
+    #[test]
+    fn non_array_chapter_list_is_empty() {
+        assert!(parse_chapter_list(&json!(null)).is_empty());
+        assert!(parse_chapter_list(&json!("nope")).is_empty());
+    }
 
     fn playback() -> Playback {
         Playback {
@@ -391,11 +465,60 @@ mod tests {
         let item = PlaylistItem {
             url: "https://example.invalid/e2.mkv".into(),
             title: Some("Show S01E02 - Two".into()),
+            sub_file: None,
         };
 
         assert_eq!(
             append_command(&item),
             json!(["loadfile", "https://example.invalid/e2.mkv", "append-play", { "force-media-title": "Show S01E02 - Two" }])
         );
+    }
+
+    #[test]
+    fn append_command_attaches_per_file_subtitles() {
+        let item = PlaylistItem {
+            url: "https://example.invalid/e2.mkv".into(),
+            title: Some("Show S01E02 - Two".into()),
+            sub_file: Some("/tmp/om-subs/e2.en.srt".into()),
+        };
+
+        assert_eq!(
+            append_command(&item),
+            json!(["loadfile", "https://example.invalid/e2.mkv", "append-play", {
+                "force-media-title": "Show S01E02 - Two",
+                "sub-file": "/tmp/om-subs/e2.en.srt"
+            }])
+        );
+    }
+
+    #[test]
+    fn append_command_without_metadata_has_no_options_dict() {
+        let item = PlaylistItem {
+            url: "https://example.invalid/e2.mkv".into(),
+            title: None,
+            sub_file: None,
+        };
+        assert_eq!(
+            append_command(&item),
+            json!(["loadfile", "https://example.invalid/e2.mkv", "append-play"])
+        );
+    }
+
+    #[test]
+    fn hold_at_end_adds_keep_open_always() {
+        let player = MpvPlayer::new("mpv", vec![], false);
+        let opts = PlayOptions {
+            hold_at_end: true,
+            ..PlayOptions::default()
+        };
+        let args = player.launch_args(&playback(), &opts, Path::new("/tmp/om-mpv.sock"));
+        assert!(args.iter().any(|a| a == "--keep-open=always"));
+
+        let plain = player.launch_args(
+            &playback(),
+            &PlayOptions::default(),
+            Path::new("/tmp/om-mpv.sock"),
+        );
+        assert!(!plain.iter().any(|a| a.starts_with("--keep-open")));
     }
 }

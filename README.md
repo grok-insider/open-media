@@ -82,9 +82,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
   Range-aware HTTP server.
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
   vlc (launch-only).
-- **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord
-  presence. Autoplay-next keeps a single mpv alive and appends the next episode
-  to its playlist, so mpv's own Next button works too.
+- **Session**: SQLite resume, AniSkip/Jikan OP/ED + filler skip (with a
+  fallback that reads the release's own chapter names when AniSkip has no
+  data), AniList/MAL tracking, Discord presence. Episodic playback keeps a
+  single mpv alive with the next episode pre-appended, so mpv's own Next
+  button always works; `autoplay_next` additionally advances by itself.
 - **Library**: a local watchlist (watching / completed / planning / …) that
   updates itself as you watch, browsable in the TUI and via
   `open-media library`, with best-effort AniList/MAL status dual-write.
@@ -168,7 +170,7 @@ open-media config path                           # print the config file path
 `mal_token`, `mal_client_id`, `mal_client_secret`,
 `debrid_provider`, `player_command`, `quality`, `nyaa_category`, `theme`,
 `show_uncached`, `nyaa_direct`, `cinemeta`, `skip_intro_outro`, `skip_filler`,
-`autoplay_next`, `resume`, `discord_presence`, `telemetry`,
+`autoplay_next`, `playlist_next`, `resume`, `discord_presence`, `telemetry`,
 `cleanup_after_playback`, `complete_threshold`, `http_port`, and
 `player.thumbnail_previews`. List/nested
 values such as `torrentio_providers`, `player.args`, `[subtitles]`, and
@@ -195,7 +197,8 @@ the Nix store. `open-media init` creates it.
 | `[player]` `command` / `args` | `mpv` / `["--fullscreen"]` | player + extra args |
 | `[player]` `thumbnail_previews` | `false` | seekbar thumbnails for streams; requires user-installed mpv scripts (thumbfast + uosc or a compatible OSC) |
 | `[streaming]` `http_port` / `cleanup_after_playback` | `3131` / `true` | local P2P stream server |
-| `[behavior]` `skip_intro_outro` / `resume` | `true` | AniSkip OP/ED; resume from last position |
+| `[behavior]` `skip_intro_outro` / `resume` | `true` | auto-skip OP/ED (AniSkip, falling back to the file's own chapter names); resume from last position |
+| `[behavior]` `playlist_next` | `true` | keep one mpv per episodic session with the next episode pre-appended, so mpv's own **Next** button works even without autoplay |
 | `[behavior]` `skip_filler` / `complete_threshold` / `discord_presence` | `false` / `0.85` / `false` | binge filler-skip; mark-complete fraction; Discord RPC |
 | `[behavior]` `autoplay_next` | `false` | keep playing the next episode after completion |
 | `[subtitles]` `enabled` / `languages` | `false` / `["en"]` | optional external subtitle fetch, preferred languages first |
