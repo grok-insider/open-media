@@ -52,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use open_media_core::error::CoreResult;
 use open_media_core::model::IdSet;
-use open_media_core::ports::IdBridge;
+use open_media_core::ports::{BridgedIds, IdBridge};
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -187,6 +187,21 @@ impl BridgedEntry {
             || self.tmdb_movie.is_some()
             || self.kitsu.is_some()
     }
+
+    /// Map into the port-level DTO. Episode offsets are non-negative by
+    /// construction upstream; a (theoretical) negative one is dropped.
+    fn to_bridged_ids(entry: &BridgedEntry) -> BridgedIds {
+        BridgedIds {
+            imdb: entry.imdb.clone(),
+            tmdb_tv: entry.tmdb_tv,
+            tmdb_movie: entry.tmdb_movie,
+            kitsu: entry.kitsu,
+            imdb_season: entry.tvdb_season,
+            tmdb_season: entry.tmdb_season,
+            imdb_episode_offset: entry.tvdb_episode_offset.and_then(|o| o.try_into().ok()),
+            tmdb_episode_offset: entry.tmdb_episode_offset.and_then(|o| o.try_into().ok()),
+        }
+    }
 }
 
 /// A parsed, in-memory id map: anilist→entry and mal→entry.
@@ -277,6 +292,7 @@ impl AnimeIdMap {
     }
 
     /// The IMDB id for the given ids (see [`Self::entry_for`]).
+    #[cfg(test)]
     pub(crate) fn imdb_for(&self, ids: &IdSet) -> Option<String> {
         self.entry_for(ids).and_then(|e| e.imdb.clone())
     }
@@ -476,12 +492,15 @@ impl IdBridge for FribbIdBridge {
         "fribb-anime-lists"
     }
 
-    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+    async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<BridgedIds>> {
         // Nothing to bridge from if the caller has neither anilist nor mal id.
         if ids.anilist.is_none() && ids.mal.is_none() {
             return Ok(None);
         }
-        Ok(self.load().await.and_then(|map| map.imdb_for(ids)))
+        Ok(self
+            .load()
+            .await
+            .and_then(|map| map.entry_for(ids).map(BridgedEntry::to_bridged_ids)))
     }
 }
 

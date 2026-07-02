@@ -1299,9 +1299,21 @@ async fn play_errors_when_all_candidates_fail_to_resolve() {
 // imdb id gets `ids.imdb` populated from the bridge before the SourceQuery is
 // built, so an IMDB-keyed source provider sees the bridged id.
 
-/// A bridge that returns a fixed IMDB id for any ids carrying an anilist id.
+/// A bridge that returns fixed bridged ids for any ids carrying an anime id.
 struct FakeBridge {
-    imdb: Option<String>,
+    bridged: Option<open_media_core::ports::BridgedIds>,
+}
+
+impl FakeBridge {
+    /// The common case: bridge to just an IMDB id.
+    fn imdb(id: &str) -> Self {
+        Self {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some(id.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -1309,11 +1321,11 @@ impl IdBridge for FakeBridge {
     fn name(&self) -> &str {
         "fake-bridge"
     }
-    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+    async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<open_media_core::ports::BridgedIds>> {
         // Mirror the real bridge: only answer when there's an anime id to
         // bridge from.
         if ids.anilist.is_some() || ids.mal.is_some() {
-            Ok(self.imdb.clone())
+            Ok(self.bridged.clone())
         } else {
             Ok(None)
         }
@@ -1359,9 +1371,7 @@ async fn bridge_fills_imdb_for_anime_before_source_query() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let engine = Engine::builder()
         .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
-        .id_bridge(Arc::new(FakeBridge {
-            imdb: Some("tt0245429".into()),
-        }))
+        .id_bridge(Arc::new(FakeBridge::imdb("tt0245429")))
         .build();
 
     let req = play_request(anime_no_imdb());
@@ -1383,7 +1393,7 @@ async fn bridge_miss_leaves_anime_without_imdb() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let engine = Engine::builder()
         .add_source(Arc::new(ImdbCaptureSource { seen: seen.clone() }))
-        .id_bridge(Arc::new(FakeBridge { imdb: None }))
+        .id_bridge(Arc::new(FakeBridge { bridged: None }))
         .build();
 
     engine
@@ -1408,4 +1418,212 @@ async fn bridge_not_invoked_without_bridge_wired() {
         .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), vec![None]);
+}
+
+// ---- Bridged episode-detail overlay (anime stills/synopsis) ----------------
+//
+// AniList serves anime episode lists with titles but no stills/synopses; the
+// TMDB/IMDB-keyed providers have them but can't be queried without the bridged
+// series id + the season this entry occupies. These tests prove the overlay in
+// `Engine::episodes` against fake ports.
+
+fn bare_episode(number: u32, title: &str) -> Episode {
+    Episode {
+        season: 1,
+        number,
+        title: Some(title.to_string()),
+        air_date: None,
+        overview: None,
+        runtime_minutes: None,
+        rating: None,
+        still: None,
+    }
+}
+
+/// An "AniList-like" provider: bare titled episodes, only for anilist-keyed ids.
+struct AnimeEpisodesMeta;
+
+#[async_trait]
+impl MetadataProvider for AnimeEpisodesMeta {
+    fn name(&self) -> &str {
+        "fake-anilist"
+    }
+    async fn search(&self, _q: &str, _k: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+        Ok(vec![])
+    }
+    async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+        Err(CoreError::NotImplemented("fake.details"))
+    }
+    async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+        Ok(vec![])
+    }
+    async fn episodes(&self, ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+        if ids.anilist.is_none() {
+            return Err(CoreError::NotFound("needs an anilist id".into()));
+        }
+        Ok(vec![
+            bare_episode(1, "The Hated Classmate"),
+            bare_episode(2, "Shadow Garden Is Born"),
+        ])
+    }
+}
+
+/// A "TMDB-like" provider: rich episodes, only for tmdb-keyed ids, recording
+/// the season it was asked for.
+struct RichEpisodesMeta {
+    /// Which id dialect unlocks this provider: `"tmdb"` or `"imdb"`.
+    keyed_by: &'static str,
+    asked_season: Arc<Mutex<Vec<u32>>>,
+}
+
+#[async_trait]
+impl MetadataProvider for RichEpisodesMeta {
+    fn name(&self) -> &str {
+        "fake-rich"
+    }
+    async fn search(&self, _q: &str, _k: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+        Ok(vec![])
+    }
+    async fn details(&self, _ids: &IdSet) -> CoreResult<Media> {
+        Err(CoreError::NotImplemented("fake.details"))
+    }
+    async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+        Ok(vec![])
+    }
+    async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+        let unlocked = match self.keyed_by {
+            "tmdb" => ids.tmdb.is_some(),
+            _ => ids.imdb.is_some(),
+        };
+        if !unlocked {
+            return Err(CoreError::NotFound("wrong id dialect".into()));
+        }
+        self.asked_season.lock().unwrap().push(season);
+        Ok((1..=4)
+            .map(|n| Episode {
+                season,
+                number: n,
+                title: Some(format!("Rich title {n}")),
+                air_date: Some("2023-10-04".into()),
+                overview: Some(format!("Synopsis {n}")),
+                runtime_minutes: Some(24),
+                rating: Some(8.0),
+                still: Some(format!("https://img.example/e{n}.jpg")),
+            })
+            .collect())
+    }
+}
+
+fn bridged_tmdb(season: i32, offset: Option<u32>) -> open_media_core::ports::BridgedIds {
+    open_media_core::ports::BridgedIds {
+        tmdb_tv: Some(119495),
+        tmdb_season: Some(season),
+        tmdb_episode_offset: offset,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn anime_episodes_gain_stills_and_synopsis_from_bridged_tmdb() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "tmdb",
+            asked_season: asked.clone(),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(bridged_tmdb(2, None)),
+        }))
+        .build();
+
+    let ids = IdSet::default().with_anilist(161964);
+    let eps = engine.episodes(&ids, 1).await.unwrap();
+
+    // The overlay queried the bridged season (2), not the AniList season (1).
+    assert_eq!(*asked.lock().unwrap(), vec![2]);
+    assert_eq!(eps.len(), 2);
+    // AniList titles are kept; missing details are filled from the overlay.
+    assert_eq!(eps[0].title.as_deref(), Some("The Hated Classmate"));
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e1.jpg"));
+    assert_eq!(eps[0].overview.as_deref(), Some("Synopsis 1"));
+    assert_eq!(eps[0].runtime_minutes, Some(24));
+    assert_eq!(eps[1].still.as_deref(), Some("https://img.example/e2.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_applies_episode_offset() {
+    // The entry starts partway into the bridged season: entry episode 1 is
+    // season episode 3 (offset 2).
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "tmdb",
+            asked_season: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(bridged_tmdb(1, Some(2))),
+        }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(190), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e3.jpg"));
+    assert_eq!(eps[0].overview.as_deref(), Some("Synopsis 3"));
+    assert_eq!(eps[1].still.as_deref(), Some("https://img.example/e4.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_falls_back_to_imdb_keyed_provider() {
+    // No TMDB mapping — the keyless (Cinemeta-like) IMDB-keyed provider serves.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .add_metadata(Arc::new(RichEpisodesMeta {
+            keyed_by: "imdb",
+            asked_season: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some("tt14115938".into()),
+                imdb_season: Some(1),
+                ..Default::default()
+            }),
+        }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(130298), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps[0].still.as_deref(), Some("https://img.example/e1.jpg"));
+}
+
+#[tokio::test]
+async fn overlay_misses_leave_episode_list_untouched() {
+    // Bridge has no mapping → the bare AniList list survives unchanged.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .id_bridge(Arc::new(FakeBridge { bridged: None }))
+        .build();
+
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps.len(), 2);
+    assert!(eps[0].still.is_none());
+    assert!(eps[0].overview.is_none());
+
+    // And with no bridge wired at all.
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(AnimeEpisodesMeta))
+        .build();
+    let eps = engine
+        .episodes(&IdSet::default().with_anilist(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(eps.len(), 2);
+    assert!(eps[0].still.is_none());
 }

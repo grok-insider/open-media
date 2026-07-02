@@ -420,14 +420,29 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(label(&facts.join("   "))));
             }
 
-            if let Some(o) = &ep.overview {
-                if !o.is_empty() {
+            // Per-episode synopsis; fall back to the series overview (AniList
+            // never carries episode synopses, but always has a description) —
+            // more useful than a bare "No synopsis available.".
+            let episode_overview = ep.overview.as_ref().filter(|o| !o.is_empty());
+            let series_overview = app
+                .media
+                .as_ref()
+                .and_then(|m| m.overview.as_ref())
+                .filter(|o| !o.is_empty());
+            match (episode_overview, series_overview) {
+                (Some(o), _) => {
                     lines.push(Line::from(""));
                     lines.push(Line::from(o.clone()));
                 }
-            } else {
-                lines.push(Line::from(""));
-                lines.push(Line::from(label("No synopsis available.")));
+                (None, Some(o)) => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(label("About the series:")));
+                    lines.push(Line::from(o.clone()));
+                }
+                (None, None) => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(label("No synopsis available.")));
+                }
             }
         }
         None => lines.push(Line::from(label("No episode selected."))),
