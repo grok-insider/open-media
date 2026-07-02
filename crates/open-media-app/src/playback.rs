@@ -9,7 +9,7 @@ use open_media_core::ports::{
 };
 use open_media_core::stream::{Playback, SourceCandidate};
 use open_media_core::subtitle::{SubtitleQuery, SubtitleTrack};
-use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
+use open_media_core::tracking::{Activity, Interval, SkipTimes, WatchProgress};
 
 use crate::library::unix_now;
 use crate::playlist::PlaylistEntry;
@@ -265,6 +265,7 @@ impl Engine {
                 .episode_still
                 .clone()
                 .or_else(|| req.media.poster.clone()),
+            chapter_skip_fallback: self.enricher.is_some(),
         };
         if self.autoplay_next && req.media.kind.is_episodic() {
             if let Some(playlist) = session.playlist_control() {
@@ -514,6 +515,10 @@ pub(crate) struct MonitorCtx {
     pub(crate) title: String,
     pub(crate) detail: String,
     pub(crate) image: Option<String>,
+    /// When external skip data (AniSkip) is empty, derive OP/ED windows from
+    /// the file's own embedded chapter names. Mirrors the auto-skip intent:
+    /// set when the enricher is wired (`behavior.skip_intro_outro`).
+    pub(crate) chapter_skip_fallback: bool,
 }
 
 struct PlayOnceOutcome {
@@ -553,7 +558,7 @@ async fn monitor_playback(
     control: Option<Arc<dyn PlaybackControl>>,
     history: Option<Arc<dyn HistoryStore>>,
     presence: Option<Arc<dyn PresenceReporter>>,
-    skip: SkipTimes,
+    mut skip: SkipTimes,
     ctx: MonitorCtx,
     progress: ProgressMeter,
 ) {
@@ -567,6 +572,9 @@ async fn monitor_playback(
     if !chapters.is_empty() {
         let _ = ctrl.set_chapters(&chapters).await;
     }
+    // Probe the file's embedded chapters once (after metadata is loaded) when
+    // no external skip data exists.
+    let mut chapter_probe_pending = ctx.chapter_skip_fallback && skip.is_empty();
 
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -578,6 +586,17 @@ async fn monitor_playback(
         }
         if dur > 0 {
             progress.dur.store(dur, Ordering::Relaxed);
+        }
+
+        if chapter_probe_pending && dur > 0 {
+            chapter_probe_pending = false;
+            if let Ok(embedded) = ctrl.chapters().await {
+                let derived = skip_from_chapters(&embedded, Some(dur));
+                if !derived.is_empty() {
+                    tracing::debug!("derived OP/ED skip windows from embedded chapters");
+                    skip = derived;
+                }
+            }
         }
 
         // Auto-skip: fire once on entry into the window (2s trigger, curd's rule).
@@ -617,6 +636,56 @@ async fn monitor_playback(
                 .await;
         }
     }
+}
+
+/// OP/ED windows must look like actual credits sequences to be trusted for
+/// auto-skipping: standard openings/endings run ~90s; anything outside this
+/// range is more likely a mislabeled or coarse chapter, and a bad auto-skip is
+/// far worse than no auto-skip.
+const CHAPTER_SKIP_MIN_SECS: u32 = 10;
+const CHAPTER_SKIP_MAX_SECS: u32 = 180;
+
+/// Derive OP/ED skip windows from a file's **embedded chapter names** — the
+/// fallback for episodes AniSkip's community database doesn't cover. Anime
+/// releases commonly ship chapters titled `OP`/`Opening`/`Intro` and
+/// `ED`/`Ending`/`Outro`/`Credits`; each window runs from that chapter's start
+/// to the next chapter (or the end of the file), and is only trusted when its
+/// length is plausible for a credits sequence. Matching is token-based so
+/// prose titles ("Operation Z") never false-positive.
+pub(crate) fn skip_from_chapters(chapters: &[Chapter], duration_secs: Option<u32>) -> SkipTimes {
+    let mut sorted: Vec<&Chapter> = chapters.iter().collect();
+    sorted.sort_by_key(|c| c.time_secs);
+
+    let mut skip = SkipTimes::default();
+    for (i, chapter) in sorted.iter().enumerate() {
+        let end = sorted
+            .get(i + 1)
+            .map(|next| next.time_secs)
+            .or(duration_secs)
+            .unwrap_or(chapter.time_secs);
+        let interval = Interval {
+            start: chapter.time_secs,
+            end,
+        };
+        let len = interval.end.saturating_sub(interval.start);
+        if !(CHAPTER_SKIP_MIN_SECS..=CHAPTER_SKIP_MAX_SECS).contains(&len) {
+            continue;
+        }
+        let lower = chapter.title.to_lowercase();
+        let mut tokens = lower.split(|c: char| !c.is_ascii_alphanumeric());
+        if skip.opening.is_none()
+            && tokens
+                .clone()
+                .any(|t| matches!(t, "op" | "opening" | "intro"))
+        {
+            skip.opening = Some(interval);
+        } else if skip.ending.is_none()
+            && tokens.any(|t| matches!(t, "ed" | "ending" | "outro" | "credits"))
+        {
+            skip.ending = Some(interval);
+        }
+    }
+    skip
 }
 
 pub(crate) fn chapters_from_skip(skip: &SkipTimes) -> Vec<Chapter> {

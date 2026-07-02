@@ -243,6 +243,15 @@ pub trait PlaybackControl: Send + Sync {
     async fn is_paused(&self) -> CoreResult<Option<bool>>;
     async fn seek_absolute(&self, secs: u32) -> CoreResult<()>;
     async fn set_chapters(&self, chapters: &[Chapter]) -> CoreResult<()>;
+
+    /// The chapter list of the **currently playing file** (embedded chapters,
+    /// or whatever was last set), when the control plane can read it. Lets the
+    /// app derive OP/ED skip windows from release-embedded chapter names when
+    /// no external skip data exists. Default: unknown/none.
+    async fn chapters(&self) -> CoreResult<Vec<Chapter>> {
+        Ok(Vec::new())
+    }
+
     async fn quit(&self) -> CoreResult<()>;
 }
 

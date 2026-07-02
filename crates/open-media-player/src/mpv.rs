@@ -250,6 +250,13 @@ impl PlaybackControl for MpvControl {
         Ok(())
     }
 
+    async fn chapters(&self) -> CoreResult<Vec<Chapter>> {
+        let data = self
+            .request(json!(["get_property", "chapter-list"]))
+            .await?;
+        Ok(parse_chapter_list(&data))
+    }
+
     async fn quit(&self) -> CoreResult<()> {
         self.request(json!(["quit"])).await?;
         Ok(())
@@ -276,6 +283,30 @@ fn append_command(item: &PlaylistItem) -> Value {
         Some(title) => json!(["loadfile", item.url, "append-play", { "force-media-title": title }]),
         None => json!(["loadfile", item.url, "append-play"]),
     }
+}
+
+/// Parse mpv's `chapter-list` property: `[{ "title": "...", "time": 12.3 }]`.
+/// Entries without a time are dropped; a missing title becomes empty (some
+/// muxers emit unnamed chapters).
+fn parse_chapter_list(data: &Value) -> Vec<Chapter> {
+    data.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|c| {
+                    let time = c.get("time")?.as_f64()?;
+                    Some(Chapter {
+                        title: c
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        time_secs: time.max(0.0).round() as u32,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A process/instance-unique IPC endpoint name shared by both platforms.
@@ -331,6 +362,28 @@ async fn wait_for_socket(path: &Path, timeout: Duration) {
 mod tests {
     use super::*;
     use open_media_core::stream::PlaybackOrigin;
+
+    #[test]
+    fn parses_mpv_chapter_list_property() {
+        let data = json!([
+            { "title": "OP", "time": 59.9 },
+            { "title": "Part A", "time": 150.2 },
+            { "time": 700.0 },              // unnamed chapter
+            { "title": "no time given" }    // dropped: unusable without a time
+        ]);
+        let chapters = parse_chapter_list(&data);
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "OP");
+        assert_eq!(chapters[0].time_secs, 60);
+        assert_eq!(chapters[1].time_secs, 150);
+        assert_eq!(chapters[2].title, "");
+    }
+
+    #[test]
+    fn non_array_chapter_list_is_empty() {
+        assert!(parse_chapter_list(&json!(null)).is_empty());
+        assert!(parse_chapter_list(&json!("nope")).is_empty());
+    }
 
     fn playback() -> Playback {
         Playback {
