@@ -8,7 +8,7 @@
 [Real-Debrid](https://real-debrid.com/) (cached, no seeding, no VPN) or directly
 over P2P, streamed into **mpv** or **vlc**. One fast TUI for everything.
 
-> **Status: released — v0.6.1.** The full pipeline — discover → source → resolve
+> **Status: released — v0.6.3.** The full pipeline — discover → source → resolve
 > (Real-Debrid or P2P) → play in mpv/vlc — is implemented, tested, packaged
 > (Nix + prebuilt binaries), and runs on **Linux, macOS, and Windows**. See
 > [CHANGELOG.md](CHANGELOG.md).
@@ -76,16 +76,24 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Metadata**: TMDB (richer, optional key) + **Cinemeta** (keyless default) for
   movies/series, AniList for anime — with IMDB/MAL id bridging and de-dup.
 - **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
-- **Debrid**: Real-Debrid magnet → instant CDN URL (add → select → unrestrict).
+- **Debrid**: Real-Debrid (add → select → unrestrict) or TorBox (create →
+  request link, with a real bulk cache check) — magnet → instant CDN URL.
 - **P2P**: librqbit engine streaming uncached / no-debrid torrents over a local
   Range-aware HTTP server.
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
   vlc (launch-only).
-- **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord presence.
+- **Session**: SQLite resume, AniSkip/Jikan, AniList/MAL tracking, Discord
+  presence. Autoplay-next keeps a single mpv alive and appends the next episode
+  to its playlist, so mpv's own Next button works too.
+- **Library**: a local watchlist (watching / completed / planning / …) that
+  updates itself as you watch, browsable in the TUI and via
+  `open-media library`, with best-effort AniList/MAL status dual-write.
 - **Subtitles**: optional OpenSubtitles/SubDL/Jimaku fetch through the
   `open-subtitle` engine, passed to players as temp `--sub-file` tracks.
-- **TUI**: `open-media` with no args → Search → Results → Seasons → Episodes → Sources →
-  play, with a focusable filter/sort panel that persists to your config.
+- **TUI**: `open-media` with no args → Home (Continue Watching + Library) →
+  Search → Results → Seasons → Episodes → Sources → play. Results stream in
+  incrementally as providers respond, mouse (click/wheel) is supported, and the
+  Sources filter/sort panel persists to your config.
 
 ## Install
 
@@ -147,16 +155,22 @@ open-media play "interstellar"                   # one-shot: search → best sou
 open-media play "frieren" --season 1 --episode 1
 open-media login anilist                         # optional anime progress tracking token
 open-media login mal                             # MyAnimeList OAuth (needs mal_client_id, see below)
+open-media library list                          # local watchlist (add --status watching)
+open-media library plan "dune part two"          # save as plan-to-watch
+open-media library watching "frieren"            # mark as currently watching
+open-media library watched "interstellar"        # mark as completed
 open-media config show                           # print config summary (secrets masked)
 open-media config path                           # print the config file path
 ```
 
 `open-media config set` supports the scalar keys most users need:
-`tmdb_api_key`, `real_debrid_token`, `anilist_token`, `mal_token`,
+`tmdb_api_key`, `real_debrid_token`, `torbox_token`, `anilist_token`,
+`mal_token`, `mal_client_id`, `mal_client_secret`,
 `debrid_provider`, `player_command`, `quality`, `nyaa_category`, `theme`,
 `show_uncached`, `nyaa_direct`, `cinemeta`, `skip_intro_outro`, `skip_filler`,
 `autoplay_next`, `resume`, `discord_presence`, `telemetry`,
-`cleanup_after_playback`, `complete_threshold`, and `http_port`. List/nested
+`cleanup_after_playback`, `complete_threshold`, `http_port`, and
+`player.thumbnail_previews`. List/nested
 values such as `torrentio_providers`, `player.args`, `[subtitles]`, and
 `[ui.sources]` are still edited directly in `config.toml`.
 
@@ -170,14 +184,16 @@ the Nix store. `open-media init` creates it.
 |---------------|---------|---------|
 | `[credentials]` `tmdb_api_key` | — | optional TMDB v3 key (Cinemeta is the keyless default) |
 | `[credentials]` `real_debrid_token` | — | instant cached playback (else P2P) |
+| `[credentials]` `torbox_token` | — | TorBox API key (used when `debrid_provider = "torbox"`) |
 | `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking (`open-media login anilist` / `login mal`) |
 | `[credentials]` `mal_client_id` | — | your MAL API client id (register at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig), App Type `other`, redirect URL `http://localhost:42069/callback`); MAL tokens then auto-refresh |
-| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend |
+| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend: `real-debrid` or `torbox` |
 | `[providers]` `cinemeta` / `nyaa_direct` | `true` | keyless movie/series source; direct nyaa.si |
 | `[providers]` `quality` | `best` | `best` / `2160p` / `1080p` / `720p` / `480p` |
 | `[providers]` `show_uncached` | `false` | include uncached sources (slower to start) |
 | `[providers]` `torrentio_providers` | yts,eztv,…,nyaasi | Torrentio trackers, priority order |
 | `[player]` `command` / `args` | `mpv` / `["--fullscreen"]` | player + extra args |
+| `[player]` `thumbnail_previews` | `false` | seekbar thumbnails for streams; requires user-installed mpv scripts (thumbfast + uosc or a compatible OSC) |
 | `[streaming]` `http_port` / `cleanup_after_playback` | `3131` / `true` | local P2P stream server |
 | `[behavior]` `skip_intro_outro` / `resume` | `true` | AniSkip OP/ED; resume from last position |
 | `[behavior]` `skip_filler` / `complete_threshold` / `discord_presence` | `false` / `0.85` / `false` | binge filler-skip; mark-complete fraction; Discord RPC |
@@ -194,7 +210,7 @@ the Nix store. `open-media init` creates it.
 
 open-media has a single **anonymous** usage ping once per launch so the project
 can estimate how many active installs exist. It is **on by default (opt-out)**,
-but the shipped `0.6.1` binary still points at a placeholder collector endpoint,
+but the shipped binaries (as of `0.6.3`) still point at a placeholder collector endpoint,
 so the reporter is currently inert and sends nothing until a real endpoint is
 configured in a future release.
 

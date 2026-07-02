@@ -1,6 +1,6 @@
 # continue-plan.md
 
-Actionable engineering follow-ups after the 0.6.1 audit. The broader backlog
+Actionable engineering follow-ups (current as of 0.6.3). The broader backlog
 lives in `future-features.md`; this file is for concrete work that is close enough
 to pick up.
 
@@ -24,7 +24,12 @@ anime per-episode titles from Jikan/streaming metadata; keyless Torrentio tracke
 parsing; positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB
 bridge; subtitles via `open-media-subs`; Windows mpv/Discord IPC and release
 artifact; shared HTTP timeouts/retry in `open-media-net`; source-level playback
-failover; MSRV CI; crates.io publishing.
+failover; MSRV CI; crates.io publishing; local library/watchlist (`LibraryStore`
+port, SQLite adapter, `open-media library` subcommand, playback auto-status);
+TUI Home screen with Continue Watching + Library screen with status filters;
+mpv playlist next-episode playback (`PlaylistControl` port); opt-in mpv
+thumbnail previews (`player.thumbnail_previews`); incremental/streaming search
+results into the TUI; TUI mouse support.
 
 ---
 
@@ -36,8 +41,8 @@ failover; MSRV CI; crates.io publishing.
 the old `instantAvailability` behavior is not reliable for this pipeline. That is
 safe for Torrentio-flagged candidates (the addon provides cache/direct-url state),
 but non-Torrentio candidates stay `CacheState::Unknown`. Revisit when RD exposes a
-working bulk endpoint or when we add another debrid backend with a better cache
-API.
+working bulk endpoint. Note: the TorBox backend implements a real `check_cached`
+(`/torrents/checkcached`), so this limitation is RD-specific now.
 
 ### 2. MAL OAuth acquisition and refresh — ✅ done
 
@@ -72,12 +77,11 @@ Telemetry plumbing and privacy tests exist, but the shipped endpoint is the
 `PLACEHOLDER` sentinel, so default-on telemetry is inert. Either wire a real
 collector endpoint or document the feature as disabled until the collector exists.
 
-### 6. A second debrid backend
+### 6. A second debrid backend — ✅ done (TorBox)
 
-Add Torbox, AllDebrid, or Premiumize to prove the `DebridProvider` abstraction in
-production. This should be a new adapter module/crate plus composition-root and
-config wiring, not core/app changes unless the port contract is genuinely missing
-something.
+TorBox shipped as the second `DebridProvider` (`open-media-debrid/src/torbox.rs`):
+new adapter + composition-root/config wiring only, no core/app changes — the OCP
+claim held. AllDebrid/Premiumize remain in `future-features.md`.
 
 ---
 
@@ -87,8 +91,6 @@ something.
   materializes temp tracks, but there is no local `.srt`/`.vtt` sidecar discovery.
 - **Player discovery on Windows/macOS:** IPC parity and artifacts are done; player
   lookup is still PATH-based. Consider platform-aware default paths for mpv/vlc.
-- **Recent-history home screen:** `HistoryStore::recent()` exists, but the TUI has
-  no continue-watching home surface yet.
 - **Rich stream progress:** expose P2P peers/speed/buffer health and debrid/cache
   status in the TUI.
 - **Shell completions:** add `open-media completions {bash,zsh,fish}`.
