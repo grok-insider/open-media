@@ -77,6 +77,17 @@ pub struct SourceQuery {
     /// also match a sequel release that numbers continuously (S2E01 as `… - 21`).
     /// `None` for movies, season 1, and providers without a relation graph.
     pub absolute_episode: Option<u32>,
+    /// Kitsu id for anime, from the [`IdBridge`]. Kitsu entries mirror AniList's
+    /// per-entry numbering (a sequel season is its own id, episodes from 1), so
+    /// a provider with native kitsu addressing (Torrentio) can serve anime
+    /// without any IMDB season arithmetic.
+    pub kitsu: Option<u64>,
+    /// Season within the **IMDB-numbered** series that this entry occupies,
+    /// from the [`IdBridge`]. AniList numbers every season as its own entry
+    /// starting at 1, so for a bridged later-season anime `season` is 1 while
+    /// `imdb_season` is the real one. IMDB-keyed providers must prefer this
+    /// over `season` when present. `None` for non-anime.
+    pub imdb_season: Option<u32>,
     /// Include candidates that are *not* cached on the debrid service.
     pub include_uncached: bool,
 }

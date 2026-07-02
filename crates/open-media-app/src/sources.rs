@@ -11,17 +11,24 @@ impl Engine {
     /// support the media kind (e.g. nyaa for a live-action movie) are skipped.
     pub async fn find_sources(&self, req: &PlayRequest) -> CoreResult<Vec<SourceCandidate>> {
         let absolute_episode = self.absolute_episode(req).await;
-        // Enrich anime with an IMDB id (best-effort) *before* the query is built,
-        // so the IMDB-keyed providers (Torrentio → debrid) light up for anime
-        // that AniList only knows by anilist/mal id. A no-op for everything that
-        // already has an imdb id or when no bridge is wired.
+        // Bridge anime ids (best-effort) *before* the query is built, so the
+        // IMDB-keyed providers (Torrentio → debrid) light up for anime that
+        // AniList only knows by anilist/mal id — including the kitsu id for
+        // native anime addressing and the real IMDB season for bridged
+        // later-season entries. A no-op for everything non-anime or when no
+        // bridge is wired.
         let mut media = req.media.clone();
-        self.enrich_imdb(&mut media).await;
+        let bridged = self.bridge_anime_ids(&mut media).await;
         let query = SourceQuery {
             media,
             season: req.season,
             episode: req.episode,
             absolute_episode,
+            kitsu: bridged.as_ref().and_then(|b| b.kitsu),
+            imdb_season: bridged
+                .as_ref()
+                .and_then(|b| b.imdb_season)
+                .and_then(|s| u32::try_from(s).ok()),
             include_uncached: req.include_uncached,
         };
 

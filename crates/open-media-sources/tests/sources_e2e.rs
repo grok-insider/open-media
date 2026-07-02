@@ -59,6 +59,8 @@ async fn torrentio_movie_parses_cached_and_uncached() {
         season: None,
         episode: None,
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: true,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -107,6 +109,8 @@ async fn torrentio_series_uses_season_episode_path() {
         season: Some(1),
         episode: Some(1),
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -116,9 +120,9 @@ async fn torrentio_series_uses_season_episode_path() {
 
 #[tokio::test]
 async fn torrentio_without_imdb_returns_empty() {
-    // An AniList-only anime (no IMDB id) makes Torrentio a clean no-op, not an
-    // error — nyaa serves anime. The base URL is unreachable to prove no request
-    // is even attempted.
+    // An AniList-only anime (no IMDB and no kitsu id) makes Torrentio a clean
+    // no-op, not an error — nyaa serves anime. The base URL is unreachable to
+    // prove no request is even attempted.
     let src = TorrentioSource::with_base_url("testcfg", "http://127.0.0.1:1");
     let q = SourceQuery {
         media: media(
@@ -129,10 +133,126 @@ async fn torrentio_without_imdb_returns_empty() {
         season: Some(1),
         episode: Some(1),
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
     let out = src.find(&q).await.unwrap();
     assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn torrentio_anime_prefers_native_kitsu_addressing() {
+    // A bridged anime with a kitsu id is addressed as kitsu:{id}:{ep} — kitsu
+    // mirrors AniList's per-entry numbering, so no IMDB season math is needed.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testcfg/stream/series/kitsu:47099:5.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "streams": [
+                { "name": "[RD+] nyaasi", "title": "Eminence S02E05 1080p\n👤 80 💾 1.4 GB", "url": "https://rd/e5.mkv" }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let src = TorrentioSource::with_base_url("testcfg", server.uri());
+    let q = SourceQuery {
+        media: media(
+            MediaKind::Anime,
+            IdSet::default()
+                .with_anilist(161964)
+                .with_imdb("tt14115938"),
+            "The Eminence in Shadow Season 2",
+        ),
+        season: Some(1), // AniList's flat numbering
+        episode: Some(5),
+        absolute_episode: None,
+        kitsu: Some(47099),
+        imdb_season: Some(2),
+        include_uncached: false,
+    };
+    let candidates = src.find(&q).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].direct_url.is_some());
+}
+
+#[tokio::test]
+async fn torrentio_falls_back_to_imdb_at_bridged_season_when_kitsu_is_empty() {
+    // kitsu addressing knows nothing for this entry → fall back to the IMDB id,
+    // and crucially at imdb_season (2), not AniList's flat season (1).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testcfg/stream/series/kitsu:47099:5.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "streams": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/testcfg/stream/series/tt14115938:2:5.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "streams": [
+                { "name": "[RD+] subsplease", "title": "Eminence S02E05 1080p\n👤 55 💾 1.4 GB", "url": "https://rd/imdb-e5.mkv" }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let src = TorrentioSource::with_base_url("testcfg", server.uri());
+    let q = SourceQuery {
+        media: media(
+            MediaKind::Anime,
+            IdSet::default()
+                .with_anilist(161964)
+                .with_imdb("tt14115938"),
+            "The Eminence in Shadow Season 2",
+        ),
+        season: Some(1),
+        episode: Some(5),
+        absolute_episode: None,
+        kitsu: Some(47099),
+        imdb_season: Some(2),
+        include_uncached: false,
+    };
+    let candidates = src.find(&q).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].direct_url.as_deref(),
+        Some("https://rd/imdb-e5.mkv")
+    );
+}
+
+#[tokio::test]
+async fn torrentio_anime_movie_uses_kitsu_movie_path_without_imdb() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testcfg/stream/movie/kitsu:48346.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "streams": [
+                { "name": "[RD+] nyaasi", "title": "Lost Echoes 1080p\n👤 40 💾 3.1 GB", "url": "https://rd/movie.mkv" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = TorrentioSource::with_base_url("testcfg", server.uri());
+    let q = SourceQuery {
+        media: media(
+            MediaKind::Movie,
+            IdSet::default().with_anilist(171952),
+            "The Eminence in Shadow: Lost Echoes",
+        ),
+        season: None,
+        episode: None,
+        absolute_episode: None,
+        kitsu: Some(48346),
+        imdb_season: None,
+        include_uncached: false,
+    };
+    let candidates = src.find(&q).await.unwrap();
+    assert_eq!(candidates.len(), 1);
 }
 
 #[tokio::test]
@@ -168,6 +288,8 @@ async fn nyaa_rss_search_returns_candidates() {
         season: Some(1),
         episode: Some(1),
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
     let candidates = src.find(&q).await.unwrap();
@@ -230,6 +352,8 @@ async fn nyaa_filters_out_wrong_season_releases() {
         season: Some(1),
         episode: Some(1),
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
 
@@ -302,6 +426,8 @@ async fn nyaa_matches_absolute_numbered_sequel_episode() {
         episode: Some(1),
         // offset (S1 = 20 eps) + episode 1 = absolute 21.
         absolute_episode: Some(21),
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
 
@@ -378,6 +504,8 @@ async fn nyaa_season_one_does_not_fetch_or_match_absolute_release() {
         episode: Some(1),
         // True season 1: no prior-seasons offset, so no absolute number.
         absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
         include_uncached: false,
     };
 

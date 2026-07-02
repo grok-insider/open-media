@@ -277,39 +277,50 @@ impl Engine {
         }
     }
 
-    /// Populate `media.ids.imdb` from the [`IdBridge`] when it is missing.
+    /// Bridge an anime's ids: populate `media.ids.imdb` when it is missing and
+    /// return the full [`BridgedIds`] for the source query.
     ///
-    /// This is the hinge of anime→IMDB source enrichment: the IMDB-keyed source
+    /// This is the hinge of anime source enrichment: the IMDB-keyed source
     /// providers (Torrentio, and through them the debrid cache) short-circuit
-    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa. Looking
-    /// up an IMDB id for the anime's anilist/mal id here — right before the
-    /// [`SourceQuery`] is built — lets those providers serve anime with **no
-    /// change to the providers themselves** (they already key off `imdb`).
+    /// when `ids.imdb` is `None`, so AniList anime only ever reach nyaa.
+    /// Looking up the bridged identity here — right before the [`SourceQuery`]
+    /// is built — lets those providers serve anime; the returned kitsu id and
+    /// IMDB season additionally let Torrentio address the entry natively /
+    /// at the correct season.
     ///
     /// Best-effort and side-effect-free beyond the passed `media`:
-    /// - only runs for [`MediaKind::Anime`] that lack an imdb id and have an
-    ///   anilist/mal id to bridge from, and only when a bridge is wired;
+    /// - only runs for [`MediaKind::Anime`] with an anilist/mal id to bridge
+    ///   from, and only when a bridge is wired;
     /// - a bridge error or a `None` result leaves `media` untouched (the title
     ///   keeps its nyaa sources). It must never fail the caller.
     ///
     /// [`SourceQuery`]: open_media_core::ports::SourceQuery
-    async fn enrich_imdb(&self, media: &mut Media) {
-        if media.kind != MediaKind::Anime || media.ids.imdb.is_some() {
-            return;
+    /// [`BridgedIds`]: open_media_core::ports::BridgedIds
+    async fn bridge_anime_ids(
+        &self,
+        media: &mut Media,
+    ) -> Option<open_media_core::ports::BridgedIds> {
+        if media.kind != MediaKind::Anime {
+            return None;
         }
-        let Some(bridge) = &self.id_bridge else {
-            return;
-        };
-        match bridge.imdb_for(&media.ids).await {
-            Ok(Some(imdb)) => {
-                tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
-                media.ids.imdb = Some(imdb);
+        let bridge = self.id_bridge.as_ref()?;
+        match bridge.resolve(&media.ids).await {
+            Ok(Some(bridged)) => {
+                if media.ids.imdb.is_none() {
+                    if let Some(imdb) = &bridged.imdb {
+                        tracing::debug!(imdb = %imdb, "bridged anime to IMDB id for source lookup");
+                        media.ids.imdb = Some(imdb.clone());
+                    }
+                }
+                Some(bridged)
             }
             Ok(None) => {
-                tracing::debug!("no IMDB mapping for anime; keeping anime-native sources");
+                tracing::debug!("no id mapping for anime; keeping anime-native sources");
+                None
             }
             Err(e) => {
                 tracing::debug!(error = %e, "id bridge lookup failed; keeping anime-native sources");
+                None
             }
         }
     }

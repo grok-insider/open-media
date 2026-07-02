@@ -1404,6 +1404,56 @@ async fn bridge_miss_leaves_anime_without_imdb() {
     assert_eq!(*seen.lock().unwrap(), vec![None]);
 }
 
+/// The anime addressing fields of one source query: (imdb, kitsu, imdb_season).
+type SeenCoordinates = (Option<String>, Option<u64>, Option<u32>);
+
+/// Captures the anime addressing fields of each source query.
+struct CoordinateCaptureSource {
+    seen: Arc<Mutex<Vec<SeenCoordinates>>>,
+}
+
+#[async_trait]
+impl SourceProvider for CoordinateCaptureSource {
+    fn name(&self) -> &str {
+        "coordinate-capture"
+    }
+    async fn find(&self, query: &SourceQuery) -> CoreResult<Vec<SourceCandidate>> {
+        self.seen.lock().unwrap().push((
+            query.media.ids.imdb.clone(),
+            query.kitsu,
+            query.imdb_season,
+        ));
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn bridge_supplies_kitsu_and_imdb_season_to_the_source_query() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let engine = Engine::builder()
+        .add_source(Arc::new(CoordinateCaptureSource { seen: seen.clone() }))
+        .id_bridge(Arc::new(FakeBridge {
+            bridged: Some(open_media_core::ports::BridgedIds {
+                imdb: Some("tt14115938".into()),
+                kitsu: Some(47099),
+                imdb_season: Some(2),
+                ..Default::default()
+            }),
+        }))
+        .build();
+
+    engine
+        .find_sources(&play_request(anime_no_imdb()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(Some("tt14115938".to_string()), Some(47099), Some(2))],
+        "the query must carry the bridged imdb id, kitsu id, and IMDB season"
+    );
+}
+
 #[tokio::test]
 async fn bridge_not_invoked_without_bridge_wired() {
     // No bridge → anime keeps its missing imdb (nyaa-only path), no panic.
