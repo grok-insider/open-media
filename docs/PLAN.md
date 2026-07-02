@@ -101,8 +101,9 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       focusable filter/sort side panel on Sources, persisted to `[ui.sources]`.
 - [x] Logs routed off the alternate screen in TUI mode.
 - **M4 — met:** verified end-to-end with Wisp — live search → seasons/episodes →
-  ranked, filterable sources → clean quit. Theme support and poster/still rendering
-  landed later; first-run wizard and home-screen polish remain follow-ups.
+  ranked, filterable sources → clean quit. Theme support, poster/still rendering,
+  the Home/Library screens, and mouse support landed later; a first-run wizard
+  remains a follow-up.
 
 ## Phase 10 — Packaging & release ✅
 - [x] Nix flake: `packages.x86_64-linux.{open-media,default}` (buildRustPackage; cmake +
@@ -130,7 +131,7 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 ## Post-0.1 hardening (ongoing)
 
 After 0.1.0, several audit, portability, release, and UX passes landed. Current
-workspace version: `0.6.1`. `CHANGELOG.md` remains the release source of truth;
+workspace version: `0.6.3`. `CHANGELOG.md` remains the release source of truth;
 this section summarizes the roadmap-relevant state.
 
 - **Keyless metadata:** `CinemetaProvider` — movies/series search with no TMDB key;
@@ -164,6 +165,15 @@ this section summarizes the roadmap-relevant state.
   keyless Torrentio tracker parsing; shared `open-media-net` HTTP timeouts/retry;
   source-level playback failover; MSRV CI; crates.io publishing for every crate;
   and `open-media --version` naming cleanup.
+- **0.6.2–0.6.3 shipped work:** local library/watchlist (new `LibraryStore` port +
+  SQLite adapter, `open-media library {list,plan,watching,watched}`, automatic
+  status/progress updates during playback with best-effort tracker dual-write);
+  TUI Home screen (Continue Watching) and Library screen with status filters;
+  mpv playlist next-episode playback (new `PlaylistControl` port — autoplay keeps
+  one mpv alive and appends the next episode so mpv's own Next works); opt-in mpv
+  thumbnail previews (`player.thumbnail_previews`, thumbfast-compatible);
+  streaming/incremental search results into the TUI (`Engine::search_incremental`);
+  and TUI mouse support (click + wheel).
 
 **Remaining follow-ups** (MAL OAuth/refresh, RD cache-check limitations, nyaa
 pagination/load-more, list/nested config setters, telemetry collector activation,
