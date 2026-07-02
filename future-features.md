@@ -38,7 +38,6 @@ Ideas deferred past the committed roadmap. Pull these into `docs/PLAN.md` or
 ## UI / UX
 
 - Init wizard for first-run setup.
-- Recent-history / continue-watching home screen.
 - fzf-style fuzzy in-TUI filter; alias map (`jjk` → `Jujutsu Kaisen`).
 - Rich progress for P2P (peers, speed, buffer health) and debrid (cache/cache-warm
   state).
