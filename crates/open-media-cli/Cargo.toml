@@ -50,6 +50,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

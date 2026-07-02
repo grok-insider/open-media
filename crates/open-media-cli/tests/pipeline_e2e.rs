@@ -193,3 +193,87 @@ async fn search_survives_a_failing_provider() {
         .unwrap();
     assert_eq!(results.len(), 1);
 }
+
+#[tokio::test]
+async fn anime_bridges_to_imdb_and_gets_torrentio_sources() {
+    // The regression that motivated this test: Fribb's dataset changed its
+    // `imdb_id` field from a string to an array, the bridge failed to parse it,
+    // and every anime silently lost its Torrentio (debrid) sources. Serve the
+    // *current* upstream schema and prove the whole enrich→torrentio path.
+    let fribb = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "type": "TV", "anilist_id": 130298, "mal_id": 48316,
+                "imdb_id": ["tt14115938"], "kitsu_id": 44107,
+                "themoviedb_id": { "tv": 119495 }, "season": { "tvdb": 1, "tmdb": 1 }
+            }
+        ])))
+        .mount(&fribb)
+        .await;
+
+    let torrentio = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testcfg/stream/series/tt14115938:1:7.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "streams": [
+                {
+                    "name": "[RD+] Torrentio\n1080p",
+                    "title": "The Eminence in Shadow S01E07 1080p WEB\n👤 120 💾 1.4 GB",
+                    "url": "https://rd-cdn.example/cached/eminence-s01e07.mkv"
+                }
+            ]
+        })))
+        .mount(&torrentio)
+        .await;
+
+    let cache_dir = tempfile::tempdir().unwrap();
+    let engine = Engine::builder()
+        .add_source(Arc::new(TorrentioSource::with_base_url(
+            "testcfg",
+            torrentio.uri(),
+        )))
+        .id_bridge(Arc::new(
+            open_media_metadata::FribbIdBridge::with_url_and_cache(
+                fribb.uri(),
+                cache_dir.path().join("anime-id-map.json"),
+            ),
+        ))
+        .build();
+
+    // An AniList-discovered anime: anilist/mal ids only, no IMDB.
+    let media = open_media_core::model::Media {
+        kind: MediaKind::Anime,
+        ids: open_media_core::model::IdSet::default()
+            .with_anilist(130298)
+            .with_mal(48316),
+        title: "The Eminence in Shadow".into(),
+        original_title: None,
+        year: Some(2022),
+        score: None,
+        overview: None,
+        poster: None,
+        genres: vec![],
+        status: None,
+        episode_count: Some(20),
+        season_count: Some(1),
+    };
+    let req = PlayRequest {
+        media,
+        season: Some(1),
+        episode: Some(7),
+        episode_title: None,
+        episode_still: None,
+        episode_runtime_minutes: None,
+        include_uncached: true,
+    };
+
+    let candidates = engine.find_sources(&req).await.unwrap();
+    assert!(
+        !candidates.is_empty(),
+        "bridged anime must get Torrentio sources"
+    );
+    assert!(candidates.iter().any(|c| c.provider.contains("orrentio")
+        || c.direct_url.is_some()
+        || c.cache == CacheState::Cached));
+}
