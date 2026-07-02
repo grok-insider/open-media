@@ -2346,7 +2346,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "open-media-app"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-config"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dirs",
  "open-media-core",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-core"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -2410,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-debrid"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-history"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "open-media-core",
  "rusqlite",
@@ -2434,7 +2434,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-metadata"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-net"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "open-media-core",
  "reqwest",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-player"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-sources"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-stream"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "librqbit",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-subs"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-telemetry"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "open-media-track"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "async-trait",
  "open-media-core",

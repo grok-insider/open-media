@@ -4,6 +4,21 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5](https://github.com/grok-insider/open-media/compare/v0.6.4...v0.6.5) - 2026-07-02
+
+### Added
+
+- *(player)* decouple the mpv Next button from auto-advance
+- *(sources)* native kitsu addressing and bridged-season IMDB queries for anime
+- anime episode stills and synopsis via the id bridge
+- *(track)* derive OP/ED auto-skip from embedded chapters when AniSkip is empty
+
+### Fixed
+
+- *(cli)* render multi-line overviews as separate lines
+- *(metadata)* tolerate Fribb anime-list schema change, restoring anime debrid sources
+- *(metadata)* strip inline HTML from AniList descriptions
+
 ## 0.6.4
 
 - Added MAL OAuth PKCE login with automatic token refresh for persistent authentication.
