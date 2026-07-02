@@ -288,12 +288,20 @@ fn media_detail_lines(m: &Media) -> Vec<Line<'static>> {
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(
-        m.overview
-            .clone()
-            .unwrap_or_else(|| "No overview available.".into()),
-    ));
+    match &m.overview {
+        Some(o) => push_multiline(&mut lines, o),
+        None => lines.push(Line::from("No overview available.")),
+    }
     lines
+}
+
+/// Push a plain-text block as one `Line` per source line. ratatui drops `\n`
+/// inside a single `Line`, which would glue paragraphs together — overviews
+/// carry real newlines (e.g. AniList `<br>`s converted by the adapter).
+fn push_multiline(lines: &mut Vec<Line<'static>>, text: &str) {
+    for l in text.split('\n') {
+        lines.push(Line::from(l.to_string()));
+    }
 }
 
 fn draw_seasons(f: &mut Frame, app: &App, area: Rect) {
@@ -432,12 +440,12 @@ fn draw_episode_panel(f: &mut Frame, app: &App, area: Rect) {
             match (episode_overview, series_overview) {
                 (Some(o), _) => {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(o.clone()));
+                    push_multiline(&mut lines, o);
                 }
                 (None, Some(o)) => {
                     lines.push(Line::from(""));
                     lines.push(Line::from(label("About the series:")));
-                    lines.push(Line::from(o.clone()));
+                    push_multiline(&mut lines, o);
                 }
                 (None, None) => {
                     lines.push(Line::from(""));
