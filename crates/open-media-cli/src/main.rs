@@ -213,6 +213,10 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 mask(&cfg.credentials.real_debrid_token)
             );
             println!(
+                "  torbox_token          = {}",
+                mask(&cfg.credentials.torbox_token)
+            );
+            println!(
                 "  anilist_token         = {}",
                 mask(&cfg.credentials.anilist_token)
             );
@@ -286,6 +290,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 // Strings — taken verbatim.
                 "tmdb_api_key" => cfg.credentials.tmdb_api_key = value.to_string(),
                 "real_debrid_token" => cfg.credentials.real_debrid_token = value.to_string(),
+                "torbox_token" => cfg.credentials.torbox_token = value.to_string(),
                 "anilist_token" => cfg.credentials.anilist_token = value.to_string(),
                 "mal_token" => cfg.credentials.mal_token = value.to_string(),
                 "debrid_provider" => cfg.credentials.debrid_provider = value.to_string(),

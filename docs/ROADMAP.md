@@ -57,7 +57,8 @@ The session features that make it pleasant.
 - PLAN Phase 10 (**M5**).
 
 ### v1.0 — "stable & broad"
-- A second debrid backend (Torbox or AllDebrid) proving the abstraction.
+- ~~A second debrid backend proving the abstraction~~ — shipped early: TorBox
+  landed in the 0.6 line.
 - Robustness: retries/backoff everywhere, graceful source failover, good error UX.
 - Documented, tested, MSRV-pinned.
 
@@ -72,7 +73,8 @@ The session features that make it pleasant.
 | Sources | Direct nyaa.si (RSS) | v0.1 |
 | Sources | Jackett/Prowlarr indexers | future |
 | Debrid | Real-Debrid | v0.1 |
-| Debrid | Torbox / AllDebrid / Premiumize | v1.0 / future |
+| Debrid | TorBox | v0.6 |
+| Debrid | AllDebrid / Premiumize | future |
 | Streaming | librqbit P2P + Range server | v0.1 |
 | Player | mpv (launch) | v0.1 |
 | Player | mpv IPC (resume/skip/track) | v0.2 |

@@ -15,7 +15,7 @@ Ideas deferred past the committed roadmap. Pull these into `docs/PLAN.md` or
 
 ## Debrid
 
-- Torbox, AllDebrid, or Premiumize backend (v1.0 should ship at least one).
+- AllDebrid or Premiumize backend (TorBox and Real-Debrid are already shipped).
 - Debrid library mode: list/manage what is already in the user's debrid account;
   replay without a fresh source search.
 - Background cache warming for the next episode while watching the current one.
