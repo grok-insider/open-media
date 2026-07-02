@@ -4,6 +4,11 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.4
+
+- Added MAL OAuth PKCE login with automatic token refresh for persistent authentication.
+- Added TorBox as a new debrid provider alongside Real-Debrid.
+
 ## 0.6.3
 
 - Added mouse support to the TUI.
