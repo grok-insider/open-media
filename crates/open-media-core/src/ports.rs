@@ -342,9 +342,40 @@ pub trait SubtitleProvider: Send + Sync {
 pub trait IdBridge: Send + Sync {
     fn name(&self) -> &str;
 
-    /// Resolve an IMDB id for the given ids (keyed off the anilist/mal dialect),
-    /// or `Ok(None)` when no mapping exists or the lookup could not be performed.
-    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>>;
+    /// Resolve the cross-database ids for the given ids (keyed off the
+    /// anilist/mal dialect), or `Ok(None)` when no mapping exists or the lookup
+    /// could not be performed.
+    async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<BridgedIds>>;
+
+    /// Convenience: just the IMDB id from [`IdBridge::resolve`].
+    async fn imdb_for(&self, ids: &IdSet) -> CoreResult<Option<String>> {
+        Ok(self.resolve(ids).await?.and_then(|b| b.imdb))
+    }
+}
+
+/// The cross-database ids one anime entry bridges to.
+///
+/// AniList numbers every season as its own entry starting at episode 1, while
+/// IMDB/TVDB and TMDB number seasons within one series id. `imdb`/`tmdb_tv`
+/// are therefore **series-level** ids, and the `*_season`/`*_episode_offset`
+/// fields say where this entry lands inside them: entry episode `n` maps to
+/// season `*_season`, episode `n + *_episode_offset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BridgedIds {
+    pub imdb: Option<String>,
+    /// TMDB series id (episodic entries).
+    pub tmdb_tv: Option<u64>,
+    /// TMDB movie id (film entries).
+    pub tmdb_movie: Option<u64>,
+    /// Kitsu id — per-entry like AniList (episode numbering already aligns).
+    pub kitsu: Option<u64>,
+    /// Season within the IMDB/TVDB-numbered series. `0` = specials; a negative
+    /// value means the upstream dataset uses absolute numbering for the entry.
+    pub imdb_season: Option<i32>,
+    /// Season within the TMDB-numbered series (same semantics).
+    pub tmdb_season: Option<i32>,
+    pub imdb_episode_offset: Option<u32>,
+    pub tmdb_episode_offset: Option<u32>,
 }
 
 /// Reports a "now watching" activity to a presence service (Discord RPC).

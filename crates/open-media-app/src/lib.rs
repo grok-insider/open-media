@@ -145,15 +145,136 @@ impl Engine {
 
     /// List the episodes of a season. Returns the first provider that knows the id
     /// dialect and reports episodes; `Ok(vec![])` when none do.
+    ///
+    /// For AniList/MAL-keyed media (anime), the picked list is then best-effort
+    /// **overlaid** with stills/synopses from the TMDB/IMDB-keyed providers via
+    /// the [`IdBridge`]: AniList knows titles but carries no per-episode art or
+    /// synopsis, while TMDB (key configured) or Cinemeta (keyless) usually do —
+    /// they just can't be queried without the bridged series id and the season
+    /// the entry occupies in that series' numbering.
+    ///
+    /// [`IdBridge`]: open_media_core::ports::IdBridge
     pub async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>> {
+        let mut eps = Vec::new();
         for provider in &self.metadata {
-            if let Ok(eps) = provider.episodes(ids, season).await {
-                if !eps.is_empty() {
-                    return Ok(eps);
+            if let Ok(found) = provider.episodes(ids, season).await {
+                if !found.is_empty() {
+                    eps = found;
+                    break;
                 }
             }
         }
-        Ok(Vec::new())
+        self.overlay_bridged_episode_details(ids, &mut eps).await;
+        Ok(eps)
+    }
+
+    /// Fill missing per-episode details (still, synopsis, air date, runtime,
+    /// rating, title) from a bridged TMDB/IMDB identity. Best-effort: any miss
+    /// (no bridge, no mapping, providers can't serve the bridged id) leaves the
+    /// list untouched. Never fails the caller.
+    async fn overlay_bridged_episode_details(&self, ids: &IdSet, eps: &mut [Episode]) {
+        // Only for media the TMDB/IMDB-keyed providers could NOT have served
+        // directly (anime discovered via AniList/MAL), and only when something
+        // is actually missing.
+        if eps.is_empty() || ids.tmdb.is_some() || ids.imdb.is_some() {
+            return;
+        }
+        if ids.anilist.is_none() && ids.mal.is_none() {
+            return;
+        }
+        if eps
+            .iter()
+            .all(|e| e.still.is_some() && e.overview.is_some())
+        {
+            return;
+        }
+        let Some(bridge) = &self.id_bridge else {
+            return;
+        };
+        let bridged = match bridge.resolve(ids).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!(error = %e, "id bridge lookup failed; keeping bare episode list");
+                return;
+            }
+        };
+
+        // Two attempts, in provider-registration preference order: TMDB ids
+        // first (the TMDB provider is registered ahead of Cinemeta and is the
+        // richer source when a key is configured), then IMDB ids (keyless
+        // Cinemeta). Each uses ITS database's season/offset coordinates for
+        // this entry; a negative season means absolute numbering upstream,
+        // which can't be mapped per-season.
+        let attempts = [
+            (
+                bridged
+                    .tmdb_tv
+                    .and_then(|id| i32::try_from(id).ok())
+                    .map(|id| IdSet::default().with_tmdb(id)),
+                bridged.tmdb_season,
+                bridged.tmdb_episode_offset.unwrap_or(0),
+            ),
+            (
+                bridged
+                    .imdb
+                    .clone()
+                    .map(|id| IdSet::default().with_imdb(id)),
+                bridged.imdb_season,
+                bridged.imdb_episode_offset.unwrap_or(0),
+            ),
+        ];
+        for (bridged_ids, bridged_season, offset) in attempts {
+            let (Some(bridged_ids), Some(season)) = (bridged_ids, bridged_season) else {
+                continue;
+            };
+            let Ok(season) = u32::try_from(season) else {
+                continue;
+            };
+            let mut overlay = Vec::new();
+            for provider in &self.metadata {
+                if let Ok(found) = provider.episodes(&bridged_ids, season).await {
+                    if !found.is_empty() {
+                        overlay = found;
+                        break;
+                    }
+                }
+            }
+            if overlay.is_empty() {
+                continue;
+            }
+            let by_number: std::collections::HashMap<u32, &Episode> =
+                overlay.iter().map(|e| (e.number, e)).collect();
+            let mut applied = false;
+            for ep in eps.iter_mut() {
+                let Some(src) = by_number.get(&(ep.number + offset)) else {
+                    continue;
+                };
+                if ep.still.is_none() {
+                    ep.still = src.still.clone();
+                }
+                if ep.overview.is_none() {
+                    ep.overview = src.overview.clone();
+                }
+                if ep.air_date.is_none() {
+                    ep.air_date = src.air_date.clone();
+                }
+                if ep.runtime_minutes.is_none() {
+                    ep.runtime_minutes = src.runtime_minutes;
+                }
+                if ep.rating.is_none() {
+                    ep.rating = src.rating;
+                }
+                if ep.title.is_none() {
+                    ep.title = src.title.clone();
+                }
+                applied = true;
+            }
+            if applied {
+                tracing::debug!(season, offset, "overlaid bridged episode details");
+                return;
+            }
+        }
     }
 
     /// Populate `media.ids.imdb` from the [`IdBridge`] when it is missing.
