@@ -4,19 +4,15 @@ High-level version milestones and the feature matrix. The phased engineering pla
 lives in `docs/PLAN.md`; deferred follow-ups live in `continue-plan.md` and
 nice-to-haves in `future-features.md`.
 
-## Status (2026-07)
+## Status (2026-06)
 
 The full engineering plan (PLAN Phases 0–10) is **implemented and shipping**; the
-current workspace version is `0.6.3`. The app covers discover → source → resolve
+current workspace version is `0.6.1`. The app covers discover → source → resolve
 → play, session features, the TUI, Nix/CI packaging, crates.io publishing, and
 prebuilt Linux/macOS/Windows archives. Post-MVP work already landed includes
 keyless Cinemeta, AniList/MAL→IMDB bridging for anime, external subtitle fetching,
 episode titles, theme support, poster/still rendering, source fallback,
 auto-advance/binge, search pagination for TMDB/AniList, and Windows IPC support.
-The 0.6.2/0.6.3 batch added a local library/watchlist (`open-media library` +
-Library TUI screen), a Home screen with Continue Watching, mpv playlist
-next-episode playback, opt-in mpv thumbnail previews, streaming/incremental
-search results, and TUI mouse support.
 The remaining committed follow-ups are tracked in `continue-plan.md`.
 
 ## Versions
@@ -49,8 +45,7 @@ The session features that make it pleasant.
 - ratatui TUI: search → results → seasons → episodes → sources → playing, with a
   focusable filter/sort side panel on Sources (persisted to `[ui.sources]`).
 - Themes and poster/still rendering via terminal image protocols are implemented.
-- The Home (Continue Watching) and Library screens plus mouse support landed in
-  0.6.2/0.6.3. Still to come: an init wizard.
+- Still to come: an init wizard and richer home/continue-watching surfaces.
 - PLAN Phase 9 (**M4**).
 
 ### v0.4 — "it ships"
@@ -88,15 +83,9 @@ The session features that make it pleasant.
 | Tracking | Trakt (movies/series) | future |
 | Presence | Discord RPC | v0.2 |
 | History | SQLite resume + recents | v0.2 |
-| Library | Local watchlist (`open-media library` + Library screen) | v0.6 |
-| Playback | mpv playlist next-episode (in-player Next target) | v0.6 |
-| Playback | Opt-in mpv thumbnail previews (thumbfast) | v0.6 |
 | UI | clap CLI | v0.1 |
 | UI | ratatui TUI + themes | v0.3 |
 | UI | poster/still thumbnails | v0.5 |
-| UI | Home screen (Continue Watching) | v0.6 |
-| UI | Streaming/incremental search results | v0.6 |
-| UI | Mouse support | v0.6 |
 | Subtitles | OpenSubtitles/SubDL/Jimaku via open-subtitle | v0.3 |
 | Packaging | Nix flake + HM module | v0.4 |
 | Packaging | Automated releases (release-plz → GitHub Releases + cachix) | v0.4 |

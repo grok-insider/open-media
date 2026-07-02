@@ -85,11 +85,9 @@ backend knows nothing about trackers.
 | `StreamResolver` | chosen candidate → `Playback` (debrid or P2P) | HybridResolver |
 | `Player` | launch a player for a `Playback` | mpv, vlc |
 | `PlaybackControl` | live IPC: seek / position / pause / chapters / quit | mpv |
-| `PlaylistControl` | live IPC playlist ops: append next item / active index | mpv |
 | `Tracker` | sync progress/status/score to a list service | AniList, MAL, Composite |
 | `Enricher` | skip-times + filler/recap flags for an episode | AniSkip, Jikan |
 | `HistoryStore` | persist/resume local watch progress | SQLite |
-| `LibraryStore` | persist the local library/watchlist (media-level status) | SQLite |
 | `SubtitleProvider` | find/decode external subtitles for a title/episode | open-subtitle adapter |
 | `IdBridge` | bridge AniList/MAL ids to IMDB for source providers | Fribb anime-lists bridge |
 | `PresenceReporter` | "now watching" rich presence | Discord |
@@ -99,17 +97,7 @@ backend knows nothing about trackers.
 are different capabilities (ISP). vlc can only be launched; mpv additionally
 exposes IPC. A `PlaySession::control()` returns `Some` only for players that
 support it, so resume/auto-skip degrade gracefully instead of being impossible to
-express. `PlaylistControl` follows the same pattern: `Player::playlist_control()`
-returns `Some` only for players with live playlist IPC (mpv), letting autoplay
-keep one player process alive and append the next episode; launch-only players
-fall back to relaunching per episode.
-
-**Why `LibraryStore` is separate from `HistoryStore`.** History is per-episode
-resume positions; the library is a media-level list (status like
-watching/completed/planning plus display metadata) surfaced in the TUI Library
-screen and `open-media library`. This local watchlist is distinct from the
-still-future "debrid library mode" (browsing a debrid account like a Jellyfin
-library), which remains a deferral.
+express.
 
 **Why `DebridProvider` is shaped like rdbatch's `Provider`.** rdbatch proved one
 interface cleanly abstracts Real-Debrid *and* Torbox despite very different APIs.

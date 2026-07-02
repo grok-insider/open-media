@@ -38,10 +38,10 @@ member entry in the root `Cargo.toml`. Crate prefix is `open-media-`.
 | `crates/open-media-sources` | Torrentio addon + direct nyaa.si (RSS); release-tag parsing. | `SourceProvider` |
 | `crates/open-media-debrid` | Real-Debrid REST client (+ future AllDebrid/Torbox/Premiumize). | `DebridProvider` |
 | `crates/open-media-stream` | librqbit P2P engine + Range HTTP server, and the hybrid resolver that picks debrid-direct vs P2P. | `StreamResolver` |
-| `crates/open-media-player` | mpv launch + JSON-IPC control plane; vlc launch-only. | `Player`, `PlaybackControl`, `PlaylistControl`, `PlaySession` |
+| `crates/open-media-player` | mpv launch + JSON-IPC control plane; vlc launch-only. | `Player`, `PlaybackControl`, `PlaySession` |
 | `crates/open-media-subs` | Adapter around the `open-subtitle` engine (OpenSubtitles/SubDL/Jimaku, decoded temp tracks). | `SubtitleProvider` |
 | `crates/open-media-track` | AniList/MAL trackers (+ composite dual-write), AniSkip/Jikan enricher, Discord presence. | `Tracker`, `Enricher`, `PresenceReporter` |
-| `crates/open-media-history` | SQLite watch-progress store for resume + recents, plus the local library/watchlist. | `HistoryStore`, `LibraryStore` |
+| `crates/open-media-history` | SQLite watch-progress store for resume + recents. | `HistoryStore` |
 | `crates/open-media-telemetry` | Anonymous, opt-out active-install ping (version/OS/arch/random id). **Never carries anything about what is watched.** | `UsageReporter` |
 | `crates/open-media-app` | Application use-cases + the `Engine` that composes ports. **Depends only on `open-media-core`.** | — (consumes ports) |
 | `crates/open-media-cli` | The `open-media` binary: arg parsing, the **composition root** (`compose.rs`), and the ratatui TUI. | — (wires adapters) |
@@ -66,9 +66,8 @@ open-media-cli ──▶ open-media-app ──▶ open-media-core ◀── ever
 
 1. **Ports** (`open-media-core::ports`) are small, focused, object-safe `async` traits:
    `MetadataProvider`, `SourceProvider`, `DebridProvider`, `StreamResolver`,
-   `Player`/`PlaybackControl`/`PlaylistControl`, `Tracker`, `Enricher`,
-   `HistoryStore`, `LibraryStore`, `SubtitleProvider`, `IdBridge`,
-   `PresenceReporter`, `UsageReporter`.
+   `Player`/`PlaybackControl`, `Tracker`, `Enricher`, `HistoryStore`,
+   `SubtitleProvider`, `IdBridge`, `PresenceReporter`, `UsageReporter`.
 
    **Privacy invariant (`UsageReporter`):** usage telemetry must only ever carry
    the fields in `UsageInfo` (app version, OS, arch, a random install id). It must
