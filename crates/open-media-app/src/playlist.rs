@@ -1,38 +1,27 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use open_media_core::error::CoreResult;
-use open_media_core::ports::{
-    HistoryStore, PlaySession, PlaybackControl, PlaylistControl, PlaylistItem, PresenceReporter,
-    Tracker,
-};
+use open_media_core::ports::{PlaySession, PlaybackControl, PlaylistControl, PlaylistItem};
 use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 use crate::library::unix_now;
-use crate::playback::{chapters_from_skip, MonitorCtx};
+use crate::playback::{chapters_from_skip, MonitorCtx, ProgressMeter};
 use crate::{Engine, PlayRequest};
 
 impl Engine {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn monitor_playlist_session(
         &self,
         session: &mut Box<dyn PlaySession>,
         playlist: Arc<dyn PlaylistControl>,
-        first_req: PlayRequest,
-        first_ctx: MonitorCtx,
-        first_skip: SkipTimes,
-        last_pos: Arc<AtomicU32>,
-        last_dur: Arc<AtomicU32>,
+        first: PlaylistEntry,
+        progress: ProgressMeter,
     ) -> CoreResult<bool> {
-        let filler = self.filler_episodes(&first_req.media.ids).await;
+        let filler = self.filler_episodes(&first.req.media.ids).await;
         let completed = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(PlaylistMonitorState {
-            entries: vec![PlaylistEntry {
-                req: first_req,
-                ctx: first_ctx,
-                skip: first_skip,
-            }],
+            entries: vec![first],
             active: 0,
             appended_until: 0,
             marked_complete: Vec::new(),
@@ -42,17 +31,12 @@ impl Engine {
             .await;
 
         let monitor = monitor_playlist_playback(
+            self,
             session.control(),
             playlist.clone(),
-            self.history.clone(),
-            self.presence.clone(),
-            self.tracker.clone(),
-            self.complete_threshold,
             completed.clone(),
             state.clone(),
-            last_pos.clone(),
-            last_dur.clone(),
-            self,
+            progress.clone(),
             filler,
         );
 
@@ -62,14 +46,10 @@ impl Engine {
         };
         wait_result?;
 
-        let (req, pos, dur) = {
+        let (req, (pos, dur)) = {
             let guard = state.lock().unwrap();
             let active = guard.active.min(guard.entries.len().saturating_sub(1));
-            (
-                guard.entries[active].req.clone(),
-                last_pos.load(Ordering::Relaxed),
-                last_dur.load(Ordering::Relaxed),
-            )
+            (guard.entries[active].req.clone(), progress.snapshot())
         };
         if self.mark_completed_if_needed(&req, pos, dur).await {
             completed.store(true, Ordering::Relaxed);
@@ -156,10 +136,12 @@ impl Engine {
     }
 }
 
-struct PlaylistEntry {
-    req: PlayRequest,
-    ctx: MonitorCtx,
-    skip: SkipTimes,
+/// One queued episode: the request plus the monitor context and skip windows
+/// captured when it was resolved.
+pub(crate) struct PlaylistEntry {
+    pub(crate) req: PlayRequest,
+    pub(crate) ctx: MonitorCtx,
+    pub(crate) skip: SkipTimes,
 }
 
 struct PlaylistMonitorState {
@@ -169,19 +151,13 @@ struct PlaylistMonitorState {
     marked_complete: Vec<usize>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn monitor_playlist_playback(
+    engine: &Engine,
     control: Option<Arc<dyn PlaybackControl>>,
     playlist: Arc<dyn PlaylistControl>,
-    history: Option<Arc<dyn HistoryStore>>,
-    presence: Option<Arc<dyn PresenceReporter>>,
-    tracker: Option<Arc<dyn Tracker>>,
-    complete_threshold: f32,
     any_completed: Arc<AtomicBool>,
     state: Arc<Mutex<PlaylistMonitorState>>,
-    last_pos: Arc<AtomicU32>,
-    last_dur: Arc<AtomicU32>,
-    engine: &Engine,
+    progress: ProgressMeter,
     filler: Vec<u32>,
 ) {
     let Some(ctrl) = control else {
@@ -221,7 +197,7 @@ async fn monitor_playlist_playback(
             }
         };
         if let Some(previous) = active_changed {
-            let (req, already_marked, pos, dur) = {
+            let (req, already_marked, (pos, dur)) = {
                 let mut guard = state.lock().unwrap();
                 let already = guard.marked_complete.contains(&previous);
                 if !already {
@@ -230,21 +206,20 @@ async fn monitor_playlist_playback(
                 (
                     guard.entries[previous].req.clone(),
                     already,
-                    last_pos.load(Ordering::Relaxed),
-                    last_dur.load(Ordering::Relaxed),
+                    progress.snapshot(),
                 )
             };
             if !already_marked {
-                let completed = dur > 0 && (pos as f32 / dur as f32) >= complete_threshold;
+                let completed = dur > 0 && (pos as f32 / dur as f32) >= engine.complete_threshold;
                 if completed {
                     any_completed.store(true, Ordering::Relaxed);
-                    if let (Some(t), Some(ep)) = (&tracker, req.episode) {
+                    if let (Some(t), Some(ep)) = (&engine.tracker, req.episode) {
                         let _ = t.update_progress(&req.media.ids, ep).await;
                     }
                 }
             }
-            last_pos.store(0, Ordering::Relaxed);
-            last_dur.store(0, Ordering::Relaxed);
+            progress.pos.store(0, Ordering::Relaxed);
+            progress.dur.store(0, Ordering::Relaxed);
             let chapters = {
                 let guard = state.lock().unwrap();
                 chapters_from_skip(&guard.entries[guard.active].skip)
@@ -267,10 +242,10 @@ async fn monitor_playlist_playback(
         let pos = ctrl.position().await.ok().flatten().unwrap_or(0);
         let dur = ctrl.duration().await.ok().flatten().unwrap_or(0);
         if pos > 0 {
-            last_pos.store(pos, Ordering::Relaxed);
+            progress.pos.store(pos, Ordering::Relaxed);
         }
         if dur > 0 {
-            last_dur.store(dur, Ordering::Relaxed);
+            progress.dur.store(dur, Ordering::Relaxed);
         }
 
         let (ctx, skip) = {
@@ -300,7 +275,7 @@ async fn monitor_playlist_playback(
             }
         }
 
-        if let Some(h) = &history {
+        if let Some(h) = &engine.history {
             let _ = h.save(&WatchProgress {
                 media_key: ctx.media_key.clone(),
                 season: ctx.season,
@@ -311,7 +286,7 @@ async fn monitor_playlist_playback(
             });
         }
 
-        if let Some(p) = &presence {
+        if let Some(p) = &engine.presence {
             let paused = ctrl.is_paused().await.ok().flatten().unwrap_or(false);
             let _ = p
                 .update(&Activity {

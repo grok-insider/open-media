@@ -263,7 +263,7 @@ pub(super) fn select_library_item(app: &mut App) {
         let episode = app.sel_episode;
         tokio::spawn(async move {
             let media = engine.details(&media.ids).await.unwrap_or(media);
-            send_sources(&engine, &tx, media, season, episode, None, None, None).await;
+            send_sources(&engine, &tx, sources_request(media, season, episode)).await;
         });
         return;
     }
@@ -359,7 +359,7 @@ pub(super) fn select_result(app: &mut App) {
         let media = engine.details(&media.ids).await.unwrap_or(media);
         if media.kind == MediaKind::Movie {
             // Movies have no coordinates or episode title.
-            send_sources(&engine, &tx, media, None, None, None, None, None).await;
+            send_sources(&engine, &tx, sources_request(media, None, None)).await;
             return;
         }
         // Episodic: list seasons. >1 → picker; otherwise jump straight to the
@@ -440,42 +440,40 @@ pub(super) fn select_episode(app: &mut App) {
     app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
     let tx = app.tx.clone();
-    let (season, episode, title, still, runtime) = (
-        Some(ep.season),
-        Some(ep.number),
-        ep.title,
-        ep.still,
-        ep.runtime_minutes,
-    );
+    let req = PlayRequest {
+        media,
+        season: Some(ep.season),
+        episode: Some(ep.number),
+        episode_title: ep.title,
+        episode_still: ep.still,
+        episode_runtime_minutes: ep.runtime_minutes,
+        include_uncached: true,
+    };
     tokio::spawn(async move {
-        send_sources(&engine, &tx, media, season, episode, title, still, runtime).await;
+        send_sources(&engine, &tx, req).await;
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn send_sources(
-    engine: &Arc<Engine>,
-    tx: &mpsc::UnboundedSender<Msg>,
-    media: Media,
-    season: Option<u32>,
-    episode: Option<u32>,
-    episode_title: Option<String>,
-    episode_still: Option<String>,
-    episode_runtime_minutes: Option<u32>,
-) {
-    let req = PlayRequest {
-        media: media.clone(),
-        season,
-        episode,
-        episode_title,
-        episode_still,
-        episode_runtime_minutes,
-        include_uncached: true,
-    };
+async fn send_sources(engine: &Arc<Engine>, tx: &mpsc::UnboundedSender<Msg>, req: PlayRequest) {
+    let media = req.media.clone();
     let _ = match engine.find_sources(&req).await {
         Ok(candidates) => tx.send(Msg::Sources { media, candidates }),
         Err(e) => tx.send(Msg::Error(e.to_string())),
     };
+}
+
+/// Build the `find_sources` request for a picked title/episode. Uncached
+/// sources are always requested here; the UI filter decides their visibility.
+fn sources_request(media: Media, season: Option<u32>, episode: Option<u32>) -> PlayRequest {
+    PlayRequest {
+        media,
+        season,
+        episode,
+        episode_title: None,
+        episode_still: None,
+        episode_runtime_minutes: None,
+        include_uncached: true,
+    }
 }
 
 pub(super) fn play_selected(app: &mut App) {
