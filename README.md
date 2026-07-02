@@ -76,7 +76,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Metadata**: TMDB (richer, optional key) + **Cinemeta** (keyless default) for
   movies/series, AniList for anime — with IMDB/MAL id bridging and de-dup.
 - **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
-- **Debrid**: Real-Debrid magnet → instant CDN URL (add → select → unrestrict).
+- **Debrid**: Real-Debrid (add → select → unrestrict) or TorBox (create →
+  request link, with a real bulk cache check) — magnet → instant CDN URL.
 - **P2P**: librqbit engine streaming uncached / no-debrid torrents over a local
   Range-aware HTTP server.
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
@@ -181,8 +182,9 @@ the Nix store. `open-media init` creates it.
 |---------------|---------|---------|
 | `[credentials]` `tmdb_api_key` | — | optional TMDB v3 key (Cinemeta is the keyless default) |
 | `[credentials]` `real_debrid_token` | — | instant cached playback (else P2P) |
+| `[credentials]` `torbox_token` | — | TorBox API key (used when `debrid_provider = "torbox"`) |
 | `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking |
-| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend |
+| `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend: `real-debrid` or `torbox` |
 | `[providers]` `cinemeta` / `nyaa_direct` | `true` | keyless movie/series source; direct nyaa.si |
 | `[providers]` `quality` | `best` | `best` / `2160p` / `1080p` / `720p` / `480p` |
 | `[providers]` `show_uncached` | `false` | include uncached sources (slower to start) |

@@ -36,7 +36,7 @@ member entry in the root `Cargo.toml`. Crate prefix is `open-media-`.
 | `crates/open-media-config` | Config schema, load/save, XDG paths, the secrets policy. | — |
 | `crates/open-media-metadata` | TMDB + **Cinemeta** (keyless) for movies/series; AniList for anime. | `MetadataProvider` |
 | `crates/open-media-sources` | Torrentio addon + direct nyaa.si (RSS); release-tag parsing. | `SourceProvider` |
-| `crates/open-media-debrid` | Real-Debrid REST client (+ future AllDebrid/Torbox/Premiumize). | `DebridProvider` |
+| `crates/open-media-debrid` | Real-Debrid + TorBox REST clients (+ future AllDebrid/Premiumize). | `DebridProvider` |
 | `crates/open-media-stream` | librqbit P2P engine + Range HTTP server, and the hybrid resolver that picks debrid-direct vs P2P. | `StreamResolver` |
 | `crates/open-media-player` | mpv launch + JSON-IPC control plane; vlc launch-only. | `Player`, `PlaybackControl`, `PlaylistControl`, `PlaySession` |
 | `crates/open-media-subs` | Adapter around the `open-subtitle` engine (OpenSubtitles/SubDL/Jimaku, decoded temp tracks). | `SubtitleProvider` |
