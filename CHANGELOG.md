@@ -4,19 +4,15 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.5](https://github.com/grok-insider/open-media/compare/v0.6.3...v0.6.5) - 2026-07-02
+## 0.6.5
 
-### Added
-
-- *(debrid)* add TorBox backend
-- *(cli)* add MAL OAuth PKCE login with auto-refresh
-
-### Changed
-
-- Merge dev into feat/mal-oauth-login (resolve README conflicts)
-- Merge branch 'dev' into feat/torbox-debrid
-- remove all too_many_arguments suppressions
-- *(app)* split engine into concern modules
+- Added MyAnimeList OAuth login with PKCE flow via `open-media login mal`, including auto-refresh of access tokens with a 7-day margin before expiry and graceful failure that never blocks playback
+- Added TorBox as a new debrid provider backend, with bulk cache checking via `/torrents/checkcached` and support for per-file CDN links
+- Changed Torrentio configuration string to include `torbox=`
+- Fixed all remaining clippy warnings and removed all `allow(clippy::too_many_arguments)` suppressions
+- Refactored the TUI module into a directory of named submodules for better maintainability
+- Refactored the engine into separate concern modules for search, sources, playback, playlist, library, and builder
+- Improved terminal UI layout with shared geometry module for consistent mouse hit-testing and drawing
 
 ## 0.6.4
 
