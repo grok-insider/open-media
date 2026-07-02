@@ -1404,6 +1404,100 @@ async fn bridge_miss_leaves_anime_without_imdb() {
     assert_eq!(*seen.lock().unwrap(), vec![None]);
 }
 
+// ---- Embedded-chapter OP/ED skip fallback ----------------------------------
+
+mod chapter_skip {
+    use crate::playback::skip_from_chapters;
+    use open_media_core::ports::Chapter;
+
+    fn ch(title: &str, time_secs: u32) -> Chapter {
+        Chapter {
+            title: title.into(),
+            time_secs,
+        }
+    }
+
+    #[test]
+    fn detects_op_and_ed_by_common_chapter_names() {
+        // A typical anime release: Intro → OP → episode parts → ED → Preview.
+        let chapters = vec![
+            ch("Intro", 0),
+            ch("OP", 60),
+            ch("Part A", 150),
+            ch("Part B", 700),
+            ch("ED", 1320),
+            ch("Preview", 1410),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(1440));
+        // "Intro" (0..60) matches first as the opening window.
+        let op = skip.opening.unwrap();
+        assert_eq!((op.start, op.end), (0, 60));
+        let ed = skip.ending.unwrap();
+        assert_eq!((ed.start, ed.end), (1320, 1410));
+    }
+
+    #[test]
+    fn window_end_is_next_chapter_or_duration() {
+        // ED is the last chapter → window runs to the file's end.
+        let chapters = vec![ch("Opening", 30), ch("Part A", 120), ch("Ending", 1300)];
+        let skip = skip_from_chapters(&chapters, Some(1420));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1300, 1420)));
+    }
+
+    #[test]
+    fn implausible_window_lengths_are_rejected() {
+        // "Opening" spanning 20 minutes is a mislabeled chapter, not an OP —
+        // auto-skipping it would eat most of the episode.
+        let chapters = vec![ch("Opening", 0), ch("Ending", 1200)];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert!(
+            skip.opening.is_none(),
+            "20-minute 'opening' must be rejected"
+        );
+        // The trailing "Ending" (200s) is also over the plausible cap.
+        assert!(skip.ending.is_none());
+    }
+
+    #[test]
+    fn token_matching_avoids_prose_false_positives() {
+        let chapters = vec![
+            ch("Operation Z", 0),      // contains "op" as substring, not token
+            ch("The Red Wedding", 90), // "ed" substring
+            ch("Introspection Hour", 180),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(300));
+        assert!(skip.is_empty());
+    }
+
+    #[test]
+    fn matches_are_case_insensitive_and_tokenized() {
+        let chapters = vec![
+            ch("opening credits", 10),
+            ch("Part A", 100),
+            ch("ending / credits", 1200),
+            ch("next", 1290),
+        ];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert_eq!(skip.opening.map(|o| (o.start, o.end)), Some((10, 100)));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1200, 1290)));
+    }
+
+    #[test]
+    fn no_chapters_or_unnamed_chapters_yield_empty() {
+        assert!(skip_from_chapters(&[], Some(1400)).is_empty());
+        let unnamed = vec![ch("", 0), ch("", 700)];
+        assert!(skip_from_chapters(&unnamed, Some(1400)).is_empty());
+    }
+
+    #[test]
+    fn unsorted_chapter_lists_are_handled() {
+        let chapters = vec![ch("ED", 1320), ch("OP", 60), ch("Part A", 150)];
+        let skip = skip_from_chapters(&chapters, Some(1400));
+        assert_eq!(skip.opening.map(|o| (o.start, o.end)), Some((60, 150)));
+        assert_eq!(skip.ending.map(|e| (e.start, e.end)), Some((1320, 1400)));
+    }
+}
+
 /// The anime addressing fields of one source query: (imdb, kitsu, imdb_season).
 type SeenCoordinates = (Option<String>, Option<u64>, Option<u32>);
 

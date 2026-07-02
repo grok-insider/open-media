@@ -7,7 +7,7 @@ use open_media_core::ports::{PlaySession, PlaybackControl, PlaylistControl, Play
 use open_media_core::tracking::{Activity, SkipTimes, WatchProgress};
 
 use crate::library::unix_now;
-use crate::playback::{chapters_from_skip, MonitorCtx, ProgressMeter};
+use crate::playback::{chapters_from_skip, skip_from_chapters, MonitorCtx, ProgressMeter};
 use crate::{Engine, PlayRequest};
 
 impl Engine {
@@ -125,6 +125,7 @@ impl Engine {
                 .episode_still
                 .clone()
                 .or_else(|| next.media.poster.clone()),
+            chapter_skip_fallback: self.enricher.is_some(),
         };
         let mut guard = state.lock().unwrap();
         guard.entries.push(PlaylistEntry {
@@ -172,6 +173,8 @@ async fn monitor_playlist_playback(
     if !initial_chapters.is_empty() {
         let _ = ctrl.set_chapters(&initial_chapters).await;
     }
+    // Entries whose embedded chapters were already probed for skip windows.
+    let mut probed_entries = std::collections::HashSet::new();
 
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -224,7 +227,12 @@ async fn monitor_playlist_playback(
                 let guard = state.lock().unwrap();
                 chapters_from_skip(&guard.entries[guard.active].skip)
             };
-            let _ = ctrl.set_chapters(&chapters).await;
+            // Only overwrite the player's chapter list when we actually have
+            // skip chapters — an empty set would wipe the file's own embedded
+            // chapters (which double as the skip fallback below).
+            if !chapters.is_empty() {
+                let _ = ctrl.set_chapters(&chapters).await;
+            }
             let active_req = {
                 let guard = state.lock().unwrap();
                 guard.entries[guard.active].req.clone()
@@ -248,7 +256,7 @@ async fn monitor_playlist_playback(
             progress.dur.store(dur, Ordering::Relaxed);
         }
 
-        let (ctx, skip) = {
+        let (ctx, mut skip, active) = {
             let guard = state.lock().unwrap();
             let entry = &guard.entries[guard.active];
             (
@@ -259,10 +267,33 @@ async fn monitor_playlist_playback(
                     title: entry.ctx.title.clone(),
                     detail: entry.ctx.detail.clone(),
                     image: entry.ctx.image.clone(),
+                    chapter_skip_fallback: entry.ctx.chapter_skip_fallback,
                 },
                 entry.skip,
+                guard.active,
             )
         };
+
+        // No external skip data for this entry: derive OP/ED windows from the
+        // playing file's embedded chapter names, once per entry.
+        if ctx.chapter_skip_fallback
+            && skip.is_empty()
+            && dur > 0
+            && !probed_entries.contains(&active)
+        {
+            probed_entries.insert(active);
+            if let Ok(embedded) = ctrl.chapters().await {
+                let derived = skip_from_chapters(&embedded, Some(dur));
+                if !derived.is_empty() {
+                    tracing::debug!("derived OP/ED skip windows from embedded chapters");
+                    let mut guard = state.lock().unwrap();
+                    if let Some(entry) = guard.entries.get_mut(active) {
+                        entry.skip = derived;
+                    }
+                    skip = derived;
+                }
+            }
+        }
 
         if let Some(op) = skip.opening {
             if op.is_meaningful() && pos >= op.start && pos < op.start + 2 {
