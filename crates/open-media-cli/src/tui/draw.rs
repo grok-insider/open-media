@@ -265,12 +265,20 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
                     continue_list_item(item, &app.theme, inner_w)
                 }
                 // No leading arrow — list highlight_symbol ("▶ ") owns selection.
-                HomeRow::OpenLibrary => {
-                    action_list_item("Library", "browse all saved titles", "2", &app.theme, inner_w)
-                }
-                HomeRow::Search => {
-                    action_list_item("Search", "find movies, series, anime", "/", &app.theme, inner_w)
-                }
+                HomeRow::OpenLibrary => action_list_item(
+                    "Library",
+                    "browse all saved titles",
+                    "2",
+                    &app.theme,
+                    inner_w,
+                ),
+                HomeRow::Search => action_list_item(
+                    "Search",
+                    "find movies, series, anime",
+                    "/",
+                    &app.theme,
+                    inner_w,
+                ),
             })
             .collect()
     };
