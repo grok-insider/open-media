@@ -1,16 +1,18 @@
+use open_media_core::model::{IdSet, MediaKind};
 use open_media_core::stream::{CacheState, Quality, ReleaseTags, SourceCandidate};
-use open_media_core::tracking::ListStatus;
+use open_media_core::tracking::{LibraryItem, ListStatus};
 use ratatui::prelude::Rect;
 
-use super::draw::{seed_health, source_row, SeedHealth};
+use super::draw::{progress_cells_filled, seed_health, source_row, SeedHealth};
 use super::input::search_status;
 use super::layout::{
     list_index_at, panel_control_at, results_layout, sources_layout, sources_side_panel_layout,
 };
 use super::state::{
-    cycle_opt, cycle_quality, visible_indices, LibraryFilter, PanelControl, SortKey, SourceFilters,
+    build_home_rows, cycle_opt, cycle_quality, visible_indices, HomeRow, LibraryFilter, Nav,
+    PanelControl, Root, Screen, SortKey, SourceFilters, Theme,
 };
-use super::{PANEL_MIN_WIDTH, PANEL_WIDTH, RESULT_PANEL_WIDTH};
+use super::{sources_nav_stack, PANEL_MIN_WIDTH, PANEL_WIDTH, RESULT_PANEL_WIDTH};
 
 fn cand(
     provider: &str,
@@ -264,14 +266,175 @@ fn library_filter_cycles_and_maps_status() {
 }
 
 #[test]
+fn theme_presets_differ_for_dark_and_light() {
+    let dark = Theme::from_cfg("dark");
+    let light = Theme::from_cfg("light");
+    let auto = Theme::from_cfg("auto");
+    assert_eq!(dark.bg, auto.bg);
+    assert_ne!(dark.bg, light.bg);
+    assert_ne!(dark.accent, light.accent);
+    // Media-app dark: charcoal canvas + distinct cyan-ish accent and selection.
+    assert_ne!(dark.bg, dark.selection_bg);
+    assert_ne!(dark.text, dark.dim);
+    assert_ne!(dark.success, dark.danger);
+}
+
+#[test]
+fn root_digit_keys_map_to_tabs() {
+    assert_eq!(Root::from_digit('1'), Some(Root::Home));
+    assert_eq!(Root::from_digit('2'), Some(Root::Library));
+    assert_eq!(Root::from_digit('3'), Some(Root::Search));
+    assert_eq!(Root::from_digit('0'), None);
+    assert_eq!(Root::Home.label(), "Home");
+    assert_eq!(Root::Library.as_screen(), Screen::Library);
+    assert!(Screen::Home.is_root());
+    assert!(Screen::Sources.is_drill());
+    assert!(!Screen::Search.is_drill());
+}
+
+#[test]
+fn nav_esc_semantics_pop_to_root() {
+    let mut nav = Nav::new(Root::Search);
+    nav.set_stack([Screen::Results, Screen::Sources]);
+    assert_eq!(nav.current(), Screen::Sources);
+    assert!(nav.pop());
+    assert_eq!(nav.current(), Screen::Results);
+    assert!(nav.pop());
+    assert!(nav.is_at_root());
+    assert_eq!(nav.current(), Screen::Search);
+    // Empty stack: pop is a no-op (Esc must not quit — handled in input).
+    assert!(!nav.pop());
+    assert_eq!(nav.current(), Screen::Search);
+}
+
+#[test]
+fn nav_library_root_keeps_breadcrumb_root_through_drill() {
+    // Library entry must not pretend to be under Search after drilling in.
+    let mut nav = Nav::new(Root::Library);
+    nav.set_stack([Screen::Results, Screen::Episodes, Screen::Sources]);
+    assert_eq!(nav.root, Root::Library);
+    assert_eq!(nav.root.label(), "Library");
+    assert_eq!(nav.current(), Screen::Sources);
+    assert!(nav.pop());
+    assert_eq!(nav.current(), Screen::Episodes);
+    assert_eq!(nav.root, Root::Library);
+}
+
+#[test]
+fn sources_stack_skips_seasons_episodes_when_not_loaded_for_title() {
+    // Resume / movie path: no seasons or episodes loaded for this title.
+    assert_eq!(
+        sources_nav_stack(true, 0, false, true),
+        vec![Screen::Results, Screen::Sources]
+    );
+    assert_eq!(
+        sources_nav_stack(false, 0, false, true),
+        vec![Screen::Sources]
+    );
+}
+
+#[test]
+fn sources_stack_includes_seasons_and_episodes_when_loaded() {
+    assert_eq!(
+        sources_nav_stack(true, 5, true, true),
+        vec![
+            Screen::Results,
+            Screen::Seasons,
+            Screen::Episodes,
+            Screen::Sources
+        ]
+    );
+    // Multi-season but jumped to sources without loading episodes (should not
+    // invent an Episodes level).
+    assert_eq!(
+        sources_nav_stack(true, 5, false, true),
+        vec![Screen::Results, Screen::Seasons, Screen::Sources]
+    );
+}
+
+fn lib_item(title: &str, kind: MediaKind, updated_at: i64) -> LibraryItem {
+    LibraryItem {
+        media_key: format!("k:{title}"),
+        ids: IdSet::default(),
+        title: title.into(),
+        kind,
+        poster: None,
+        year: Some(2021),
+        status: ListStatus::Watching,
+        last_season: Some(1),
+        last_episode: Some(1),
+        position_secs: 10,
+        duration_secs: 100,
+        updated_at,
+    }
+}
+
+#[test]
+fn progress_2x5_maps_percent_to_ten_cells() {
+    assert_eq!(progress_cells_filled(0.0), 0);
+    assert_eq!(progress_cells_filled(0.5), 5); // top row full
+    assert_eq!(progress_cells_filled(0.94), 9);
+    assert_eq!(progress_cells_filled(1.0), 10);
+    assert_eq!(progress_cells_filled(1.5), 10);
+}
+
+#[test]
+fn home_rows_group_by_kind_newest_groups_first() {
+    let mut sorted = vec![
+        lib_item("Fresh Anime", MediaKind::Anime, 300),
+        lib_item("Mid Anime", MediaKind::Anime, 200),
+        lib_item("Older Series", MediaKind::Series, 100),
+    ];
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    let rows = build_home_rows(&sorted);
+    let labels: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            HomeRow::Section(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels[0], "Anime · 2");
+    assert_eq!(labels[1], "Tv · 1");
+    assert!(labels.contains(&"Actions"));
+    assert!(!HomeRow::Section("x".into()).is_selectable());
+    assert!(HomeRow::Continue(0).is_selectable());
+}
+
+#[test]
+fn input_source_never_sets_quit_on_esc() {
+    // Structural guarantee: shipped handle_key Esc arms must not assign
+    // should_quit. Read the input module source once so a future regression
+    // that reintroduces `Esc => should_quit` fails this test.
+    let src = include_str!("input.rs");
+    // No single-arm quit on Esc (historical Search bug).
+    assert!(
+        !src.contains("KeyCode::Esc => app.should_quit"),
+        "Esc must not quit the TUI"
+    );
+    assert!(
+        src.contains("Esc from Search always returns to Home"),
+        "Search Esc must document go-home behavior"
+    );
+    assert!(
+        src.contains("app.go_root(Root::Home)"),
+        "Search Esc must call go_root(Home)"
+    );
+}
+
+#[test]
 fn search_status_distinguishes_partial_final_and_failures() {
     assert_eq!(
-        search_status(12, 0, false),
+        search_status(12, &[], false),
         "12 results · still searching..."
     );
-    assert_eq!(search_status(12, 0, true), "12 results");
+    assert_eq!(search_status(12, &[], true), "12 results");
     assert_eq!(
-        search_status(12, 2, false),
-        "12 results · still searching... · 2 providers failed"
+        search_status(12, &[String::from("anilist")], false),
+        "12 results · still searching... · anilist failed"
+    );
+    assert_eq!(
+        search_status(12, &[String::from("tmdb"), String::from("anilist")], false),
+        "12 results · still searching... · 2 providers failed: tmdb, anilist"
     );
 }

@@ -1,5 +1,5 @@
 use open_media_core::error::{CoreError, CoreResult};
-use open_media_core::model::Media;
+use open_media_core::model::{Media, MediaKind};
 use open_media_core::tracking::{LibraryItem, ListStatus};
 
 use crate::{Engine, PlayRequest};
@@ -124,6 +124,95 @@ impl Engine {
             .as_ref()
             .ok_or_else(|| CoreError::Config("no library store configured".into()))?;
         store.upsert(item)
+    }
+
+    /// If a library row already exists for `media`, update its `kind` (and fold
+    /// any newly known ids) without resetting status or progress.
+    ///
+    /// Used when details reclassifies Series → Anime via the id bridge so Home
+    /// and Library badges update without waiting for the next play session.
+    pub fn sync_library_kind(&self, media: &Media) -> CoreResult<()> {
+        let Some(store) = &self.library else {
+            return Ok(());
+        };
+        let key = media
+            .ids
+            .primary_key()
+            .unwrap_or_else(|| media.display_title().to_string());
+        let items = store.list(None)?;
+        let Some(mut item) = items.into_iter().find(|i| {
+            i.media_key == key
+                || (media.ids.imdb.is_some() && i.ids.imdb == media.ids.imdb)
+                || (media.ids.anilist.is_some() && i.ids.anilist == media.ids.anilist)
+        }) else {
+            return Ok(());
+        };
+        if item.kind == media.kind
+            && item.ids.imdb == media.ids.imdb
+            && item.ids.anilist == media.ids.anilist
+            && item.ids.mal == media.ids.mal
+            && item.ids.tmdb == media.ids.tmdb
+        {
+            return Ok(());
+        }
+        item.kind = media.kind;
+        item.ids.merge(&media.ids);
+        // Prefer the hydrated title when the library row was sparse.
+        if !media.title.is_empty() {
+            item.title = media.display_title().to_string();
+        }
+        store.upsert(&item)
+    }
+
+    /// Walk the local library and upgrade Series/Movie → Anime when the id
+    /// bridge reverse-maps the row into the anime catalog (Fribb).
+    ///
+    /// Intended for TUI boot so Home/Library badges are correct without the
+    /// user opening every Cinemeta-sourced anime once. Never downgrades Anime.
+    /// Returns how many rows were rewritten.
+    pub async fn refine_library_kinds(&self) -> CoreResult<usize> {
+        let Some(store) = &self.library else {
+            return Ok(0);
+        };
+        let Some(bridge) = &self.id_bridge else {
+            return Ok(0);
+        };
+        let items = store.list(None)?;
+        let mut upgraded = 0usize;
+        for mut item in items {
+            if item.kind == MediaKind::Anime {
+                continue;
+            }
+            // Need at least one dialect the bridge can look up.
+            if item.ids.imdb.is_none()
+                && item.ids.tmdb.is_none()
+                && item.ids.anilist.is_none()
+                && item.ids.mal.is_none()
+            {
+                continue;
+            }
+            match bridge.resolve(&item.ids).await {
+                Ok(Some(_)) => {
+                    tracing::debug!(
+                        title = %item.title,
+                        key = %item.media_key,
+                        "library row reclassified as Anime via id bridge"
+                    );
+                    item.kind = MediaKind::Anime;
+                    store.upsert(&item)?;
+                    upgraded += 1;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        key = %item.media_key,
+                        "library kind refine bridge lookup failed"
+                    );
+                }
+            }
+        }
+        Ok(upgraded)
     }
 }
 

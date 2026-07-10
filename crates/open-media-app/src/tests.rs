@@ -3,7 +3,8 @@ use crate::search::dedup_by_imdb;
 use async_trait::async_trait;
 use open_media_core::model::{Episode, IdSet, Season};
 use open_media_core::ports::{
-    Chapter, PlayOptions, PlaySession, PlaybackControl, PlaylistControl, PlaylistItem, SourceQuery,
+    Chapter, IdBridge, PlayOptions, PlaySession, PlaybackControl, PlaylistControl, PlaylistItem,
+    SourceQuery,
 };
 use open_media_core::stream::{CacheState, Playback, PlaybackOrigin, Quality, SourceCandidate};
 use open_media_core::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
@@ -103,6 +104,197 @@ async fn details_merges_input_ids_into_result() {
         .unwrap();
     assert_eq!(media.ids.mal, Some(52991));
     assert_eq!(media.ids.anilist, Some(154587));
+}
+
+/// Cinemeta-style details: Series + IMDB only (no AniList).
+struct SeriesImdbMeta;
+
+#[async_trait]
+impl MetadataProvider for SeriesImdbMeta {
+    fn name(&self) -> &str {
+        "series-imdb"
+    }
+    async fn search(&self, _query: &str, _kind: Option<MediaKind>) -> CoreResult<Vec<Media>> {
+        Ok(vec![])
+    }
+    async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
+        Ok(Media {
+            kind: MediaKind::Series,
+            ids: ids.clone(),
+            title: "Mushoku Tensei".into(),
+            original_title: None,
+            year: Some(2021),
+            score: None,
+            overview: None,
+            poster: None,
+            genres: vec!["Animation".into(), "Fantasy".into()],
+            status: None,
+            episode_count: Some(23),
+            season_count: Some(1),
+        })
+    }
+    async fn seasons(&self, _ids: &IdSet) -> CoreResult<Vec<Season>> {
+        Ok(vec![])
+    }
+    async fn episodes(&self, _ids: &IdSet, _season: u32) -> CoreResult<Vec<Episode>> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn details_upgrades_series_to_anime_when_bridge_hits_imdb() {
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeriesImdbMeta))
+        .id_bridge(Arc::new(FakeBridge::imdb("tt13293588")))
+        .build();
+    let media = engine
+        .details(&IdSet::default().with_imdb("tt13293588"))
+        .await
+        .unwrap();
+    assert_eq!(media.kind, MediaKind::Anime);
+    assert_eq!(media.ids.imdb.as_deref(), Some("tt13293588"));
+}
+
+#[tokio::test]
+async fn details_keeps_series_when_bridge_misses() {
+    let engine = Engine::builder()
+        .add_metadata(Arc::new(SeriesImdbMeta))
+        // Bridge that never maps (bridged = None).
+        .id_bridge(Arc::new(FakeBridge { bridged: None }))
+        .build();
+    let media = engine
+        .details(&IdSet::default().with_imdb("tt2861424"))
+        .await
+        .unwrap();
+    assert_eq!(media.kind, MediaKind::Series);
+}
+
+#[tokio::test]
+async fn sync_library_kind_upgrades_existing_row() {
+    let library = Arc::new(MemoryLibrary::default());
+    library
+        .upsert(&LibraryItem {
+            media_key: "imdb:tt13293588".into(),
+            ids: IdSet::default().with_imdb("tt13293588"),
+            title: "Mushoku Tensei".into(),
+            kind: MediaKind::Series,
+            poster: None,
+            year: Some(2021),
+            status: ListStatus::Watching,
+            last_season: Some(1),
+            last_episode: Some(3),
+            position_secs: 100,
+            duration_secs: 1400,
+            updated_at: 1,
+        })
+        .unwrap();
+
+    let engine = Engine::builder().library(library.clone()).build();
+    let media = Media {
+        kind: MediaKind::Anime,
+        ids: IdSet::default().with_imdb("tt13293588"),
+        title: "Mushoku Tensei: Jobless Reincarnation".into(),
+        original_title: None,
+        year: Some(2021),
+        score: None,
+        overview: None,
+        poster: None,
+        genres: vec![],
+        status: None,
+        episode_count: None,
+        season_count: None,
+    };
+    engine.sync_library_kind(&media).unwrap();
+
+    let items = library.list(None).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].kind, MediaKind::Anime);
+    // Progress preserved.
+    assert_eq!(items[0].last_episode, Some(3));
+    assert_eq!(items[0].position_secs, 100);
+    assert_eq!(items[0].status, ListStatus::Watching);
+}
+
+#[tokio::test]
+async fn refine_library_kinds_upgrades_series_with_imdb_hit() {
+    let library = Arc::new(MemoryLibrary::default());
+    library
+        .upsert(&LibraryItem {
+            media_key: "imdb:tt13293588".into(),
+            ids: IdSet::default().with_imdb("tt13293588"),
+            title: "Mushoku Tensei".into(),
+            kind: MediaKind::Series,
+            poster: None,
+            year: Some(2021),
+            status: ListStatus::Watching,
+            last_season: Some(1),
+            last_episode: Some(3),
+            position_secs: 100,
+            duration_secs: 1400,
+            updated_at: 1,
+        })
+        .unwrap();
+    // Western show — bridge will still "hit" with FakeBridge for any imdb;
+    // use bridged=None path for a second row via a bridge that only maps one id.
+    library
+        .upsert(&LibraryItem {
+            media_key: "imdb:tt2861424".into(),
+            ids: IdSet::default().with_imdb("tt2861424"),
+            title: "Rick and Morty".into(),
+            kind: MediaKind::Series,
+            poster: None,
+            year: Some(2013),
+            status: ListStatus::Watching,
+            last_season: Some(1),
+            last_episode: Some(1),
+            position_secs: 50,
+            duration_secs: 1300,
+            updated_at: 2,
+        })
+        .unwrap();
+
+    // FakeBridge returns Some for any id present — upgrade both when wired.
+    // Selective: only Mushoku's imdb yields a mapping.
+    struct SelectiveBridge;
+    #[async_trait]
+    impl IdBridge for SelectiveBridge {
+        fn name(&self) -> &str {
+            "selective"
+        }
+        async fn resolve(
+            &self,
+            ids: &IdSet,
+        ) -> CoreResult<Option<open_media_core::ports::BridgedIds>> {
+            if ids.imdb.as_deref() == Some("tt13293588") {
+                Ok(Some(open_media_core::ports::BridgedIds {
+                    imdb: Some("tt13293588".into()),
+                    ..Default::default()
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    let engine = Engine::builder()
+        .library(library.clone())
+        .id_bridge(Arc::new(SelectiveBridge))
+        .build();
+    let n = engine.refine_library_kinds().await.unwrap();
+    assert_eq!(n, 1);
+
+    let items = library.list(None).unwrap();
+    let mushoku = items
+        .iter()
+        .find(|i| i.ids.imdb.as_deref() == Some("tt13293588"))
+        .unwrap();
+    let rick = items
+        .iter()
+        .find(|i| i.ids.imdb.as_deref() == Some("tt2861424"))
+        .unwrap();
+    assert_eq!(mushoku.kind, MediaKind::Anime);
+    assert_eq!(mushoku.last_episode, Some(3)); // progress kept
+    assert_eq!(rick.kind, MediaKind::Series);
 }
 
 fn media_with_ids(title: &str, ids: IdSet) -> Media {
@@ -273,15 +465,25 @@ async fn incremental_search_reports_provider_failures_without_failing() {
         }))
         .build();
 
-    let mut failed_counts = Vec::new();
+    let mut failures = Vec::new();
     let final_results = engine
         .search_incremental("x", None, |progress| {
-            failed_counts.push((progress.failed_providers, progress.finished));
+            failures.push((
+                progress.failed_providers,
+                progress.failed_provider_names,
+                progress.finished,
+            ));
         })
         .await
         .unwrap();
 
-    assert_eq!(failed_counts, vec![(1, false), (1, true)]);
+    assert_eq!(
+        failures,
+        vec![
+            (1, vec![String::from("bad")], false),
+            (1, vec![String::from("bad")], true),
+        ]
+    );
     assert_eq!(final_results.len(), 1);
 }
 
@@ -1550,9 +1752,8 @@ impl IdBridge for FakeBridge {
         "fake-bridge"
     }
     async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<open_media_core::ports::BridgedIds>> {
-        // Mirror the real bridge: only answer when there's an anime id to
-        // bridge from.
-        if ids.anilist.is_some() || ids.mal.is_some() {
+        // Mirror Fribb: forward (anilist/mal) *or* reverse (imdb/tmdb) hit.
+        if ids.anilist.is_some() || ids.mal.is_some() || ids.imdb.is_some() || ids.tmdb.is_some() {
             Ok(self.bridged.clone())
         } else {
             Ok(None)

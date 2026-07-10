@@ -111,6 +111,166 @@ pub fn rank(candidates: &mut [SourceCandidate], prefs: &ScoringPrefs) {
     });
 }
 
+/// Drop candidates whose release title shares **no** significant tokens with
+/// `media_title`.
+///
+/// Torrentio (and similar id-keyed scrapers) occasionally return multi-file or
+/// mis-tagged torrents under the right IMDB id — e.g. a *Handmaid's Tale* pack
+/// under Mushoku Tensei's `tt…` path. Those can still be **debrid-cached**, and
+/// [`score_candidate`]'s huge cached bonus would rank them above real uncached
+/// releases. Filtering by title tokens before rank closes that hole.
+///
+/// Returns how many candidates were removed. If `media_title` has no usable
+/// tokens (empty / only noise / only very short words), nothing is dropped.
+pub fn filter_title_mismatch(candidates: &mut Vec<SourceCandidate>, media_title: &str) -> usize {
+    let media_tokens = significant_title_tokens(media_title);
+    if media_tokens.is_empty() {
+        return 0;
+    }
+    let before = candidates.len();
+    candidates.retain(|c| title_matches_media(media_title, &c.title));
+    before.saturating_sub(candidates.len())
+}
+
+/// Whether the candidate release name is acceptable for `media_title`.
+///
+/// Only drops candidates that look like a **real release title** with zero
+/// token overlap. Sparse stubs (`ep=1`, quality-only tags) are kept so we do
+/// not over-filter legitimately terse provider output.
+pub fn title_matches_media(media_title: &str, candidate_title: &str) -> bool {
+    let media_tokens = significant_title_tokens(media_title);
+    if media_tokens.is_empty() {
+        return true;
+    }
+    // No significant tokens in the release name → nothing to contradict the
+    // media title (coordinate/quality-only labels).
+    if significant_title_tokens(candidate_title).is_empty() {
+        return true;
+    }
+    title_shares_media_token(&media_tokens, candidate_title)
+}
+
+fn title_shares_media_token(media_tokens: &[String], candidate_title: &str) -> bool {
+    let haystack = normalize_title(candidate_title);
+    media_tokens.iter().any(|t| haystack.contains(t.as_str()))
+}
+
+/// Significant tokens from a human media title (for matching release names).
+fn significant_title_tokens(title: &str) -> Vec<String> {
+    normalize_title(title)
+        .split_whitespace()
+        .filter(|t| t.len() >= 3 && !is_noise_token(t))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Lowercase, replace non-alphanumerics with spaces (keeps `s03e01`-style tokens
+/// intact as single tokens when digits/letters mix).
+fn normalize_title(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = true;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_space = false;
+        } else if !last_space {
+            out.push(' ');
+            last_space = true;
+        }
+    }
+    out
+}
+
+fn is_noise_token(t: &str) -> bool {
+    matches!(
+        t,
+        // Articles / conjunctions
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "into"
+            // Release-quality / container noise common in torrent names
+            | "1080p"
+            | "2160p"
+            | "720p"
+            | "480p"
+            | "360p"
+            | "web"
+            | "webdl"
+            | "webrip"
+            | "bluray"
+            | "bdrip"
+            | "hdtv"
+            | "hdrip"
+            | "proper"
+            | "repack"
+            | "extended"
+            | "remux"
+            | "multi"
+            | "subs"
+            | "multisubs"
+            | "dual"
+            | "audio"
+            | "hevc"
+            | "x264"
+            | "x265"
+            | "h264"
+            | "h265"
+            | "avc"
+            | "av1"
+            | "aac"
+            | "ac3"
+            | "dts"
+            | "truehd"
+            | "atmos"
+            | "hdr"
+            | "sdr"
+            | "10bit"
+            | "8bit"
+            | "nf"
+            | "amzn"
+            | "dsnp"
+            | "hulu"
+            | "cr"
+            | "bili"
+            | "batch"
+            | "complete"
+            | "season"
+            | "episode"
+            | "series"
+            | "movie"
+            | "mkv"
+            | "mp4"
+            | "avi"
+    ) || is_episode_coordinate_token(t)
+}
+
+/// `s01e02`, `s03e001`, bare `e01`, `ep01`.
+fn is_episode_coordinate_token(t: &str) -> bool {
+    let b = t.as_bytes();
+    if b.len() >= 4 && b[0] == b's' {
+        // sNN…eNN…
+        if let Some(epos) = t.find('e') {
+            if epos > 1
+                && t[1..epos].chars().all(|c| c.is_ascii_digit())
+                && !t[epos + 1..].is_empty()
+                && t[epos + 1..].chars().all(|c| c.is_ascii_digit())
+            {
+                return true;
+            }
+        }
+    }
+    if (t.starts_with("ep") || t.starts_with('e')) && t.len() <= 5 {
+        let rest = t.trim_start_matches("ep").trim_start_matches('e');
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Index of the recommended candidate (best score), or `None` if empty.
 pub fn recommended_index(candidates: &[SourceCandidate], prefs: &ScoringPrefs) -> Option<usize> {
     candidates
@@ -207,5 +367,74 @@ mod tests {
         let healthy = candidate(Quality::P1080, CacheState::Unknown, Some(100));
         let starved = candidate(Quality::P1080, CacheState::Unknown, Some(1));
         assert!(score_candidate(&healthy, &prefs) > score_candidate(&starved, &prefs));
+    }
+
+    fn titled(title: &str, cache: CacheState) -> SourceCandidate {
+        let mut c = candidate(Quality::P1080, cache, Some(1));
+        c.title = title.into();
+        c
+    }
+
+    #[test]
+    fn title_match_keeps_matching_release() {
+        assert!(title_matches_media(
+            "Mushoku Tensei: Jobless Reincarnation",
+            "[Erai-raws] Mushoku Tensei S03E01 [1080p CR WEB-DL AVC AAC][MultiSub]"
+        ));
+        assert!(title_matches_media(
+            "Rick and Morty",
+            "Rick.and.Morty.S09E07.1080p.WEB.h264"
+        ));
+    }
+
+    #[test]
+    fn title_match_rejects_handmaids_under_mushoku() {
+        // Live Torrentio pollution: multi-file Handmaid pack under Mushoku's tt id.
+        assert!(!title_matches_media(
+            "Mushoku Tensei: Jobless Reincarnation",
+            "The.Handmaids.Tale.1080p.Multi.Subs.AAC.x265-DLKING\n\
+             The.Handmaids.Tale.S03E001.1080p.Multi.Subs.AAC.x265-DLKING.mkv\n\
+             👤 1 💾 1.84 GB ⚙️ ThePirateBay"
+        ));
+    }
+
+    #[test]
+    fn filter_drops_cached_title_mismatch_before_rank() {
+        let media = "Mushoku Tensei: Jobless Reincarnation";
+        let mut list = vec![
+            titled(
+                "The.Handmaids.Tale.1080p.Multi.Subs.AAC.x265-DLKING",
+                CacheState::Cached,
+            ),
+            titled(
+                "[ToonsHub] Mushoku Tensei Jobless Reincarnation S03E01 1080p",
+                CacheState::Uncached,
+            ),
+            titled(
+                "[Erai-raws] Mushoku Tensei S03E01 [1080p]",
+                CacheState::Uncached,
+            ),
+        ];
+        let dropped = filter_title_mismatch(&mut list, media);
+        assert_eq!(dropped, 1);
+        assert_eq!(list.len(), 2);
+        assert!(list
+            .iter()
+            .all(|c| c.title.to_ascii_lowercase().contains("mushoku")));
+
+        // After filter, rank must not resurrect the junk — and uncached Mushoku
+        // rows remain available (cached junk is gone, so prefer_cached cannot
+        // promote Handmaid's over real releases).
+        let prefs = ScoringPrefs::default();
+        rank(&mut list, &prefs);
+        assert!(list[0].title.to_ascii_lowercase().contains("mushoku"));
+    }
+
+    #[test]
+    fn filter_keeps_all_when_media_title_has_no_tokens() {
+        let mut list = vec![titled("Anything.At.All.1080p", CacheState::Cached)];
+        assert_eq!(filter_title_mismatch(&mut list, ""), 0);
+        assert_eq!(filter_title_mismatch(&mut list, "Up"), 0); // too short
+        assert_eq!(list.len(), 1);
     }
 }

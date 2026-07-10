@@ -1,5 +1,6 @@
-//! Fribb anime-lists [`IdBridge`] — AniList/MAL → IMDB.
+//! Fribb anime-lists [`IdBridge`] — AniList/MAL ↔ IMDB/TMDB.
 //!
+//! ## Forward (AniList/MAL → IMDB)
 //! Anime is discovered through AniList, which never carries an IMDB id. The
 //! IMDB-keyed source path (Torrentio, and through it the debrid cache) therefore
 //! short-circuits for anime, leaving them with only the anime-native (nyaa)
@@ -7,6 +8,11 @@
 //! an IMDB id so the application layer can populate [`IdSet::imdb`] *before*
 //! building the source query — at which point Torrentio/Real-Debrid light up for
 //! anime with no change to the source providers.
+//!
+//! ## Reverse (IMDB/TMDB → anime catalog)
+//! Cinemeta/TMDB-first titles are Movie/Series only. A reverse hit means the
+//! identity is in Fribb's anime list, so the app can upgrade kind to Anime
+//! without treating Western "Animation" genre as anime (Pixar, Rick and Morty).
 //!
 //! ## Data source
 //! [Fribb's anime-lists] `anime-list-full.json`: a flat JSON array of objects
@@ -76,8 +82,9 @@ enum OneOrMany {
 }
 
 impl OneOrMany {
-    /// The first non-empty `tt…` id, if any.
-    fn first_imdb(&self) -> Option<&str> {
+    /// Every non-empty `tt…` id (order preserved). Used to reverse-index all
+    /// aliases so an IMDB-first title still maps into the anime catalog.
+    fn all_imdb(&self) -> Vec<&str> {
         let candidates: &[String] = match self {
             OneOrMany::One(s) => std::slice::from_ref(s),
             OneOrMany::Many(v) => v.as_slice(),
@@ -85,7 +92,13 @@ impl OneOrMany {
         candidates
             .iter()
             .map(|s| s.trim())
-            .find(|s| s.starts_with("tt"))
+            .filter(|s| s.starts_with("tt"))
+            .collect()
+    }
+
+    /// The first non-empty `tt…` id, if any.
+    fn first_imdb(&self) -> Option<&str> {
+        self.all_imdb().into_iter().next()
     }
 }
 
@@ -204,15 +217,26 @@ impl BridgedEntry {
     }
 }
 
-/// A parsed, in-memory id map: anilist→entry and mal→entry.
+/// A parsed, in-memory id map: anilist/mal → entry (forward) and imdb/tmdb →
+/// entry (reverse).
+///
+/// Reverse indexes answer "is this IMDB/TMDB title in the anime catalog?" so a
+/// Cinemeta/TMDB series can be reclassified as [`MediaKind::Anime`] without
+/// mistaking Western animation genres for anime.
 ///
 /// This is the **pure**, network-free core of the bridge — built from already
 /// parsed entries and queried with a borrowed [`IdSet`] — so the lookup logic is
 /// unit-testable offline without touching HTTP or the filesystem.
+///
+/// [`MediaKind::Anime`]: open_media_core::model::MediaKind::Anime
 #[derive(Debug, Default)]
 pub(crate) struct AnimeIdMap {
     by_anilist: HashMap<i32, BridgedEntry>,
     by_mal: HashMap<i32, BridgedEntry>,
+    /// IMDB `tt…` → first-seen anime entry (all aliases from multi-id rows).
+    by_imdb: HashMap<String, BridgedEntry>,
+    by_tmdb_tv: HashMap<u64, BridgedEntry>,
+    by_tmdb_movie: HashMap<u64, BridgedEntry>,
 }
 
 impl AnimeIdMap {
@@ -237,6 +261,23 @@ impl AnimeIdMap {
             }
             if let Some(mal) = entry.mal_id {
                 map.by_mal.entry(mal).or_insert_with(|| bridged.clone());
+            }
+            // Reverse: every tt id on the row (not only the first) so
+            // IMDB-first discovery still hits the anime catalog.
+            if let Some(imdb_field) = &entry.imdb_id {
+                for tt in imdb_field.all_imdb() {
+                    map.by_imdb
+                        .entry(tt.to_string())
+                        .or_insert_with(|| bridged.clone());
+                }
+            }
+            if let Some(tv) = bridged.tmdb_tv {
+                map.by_tmdb_tv.entry(tv).or_insert_with(|| bridged.clone());
+            }
+            if let Some(movie) = bridged.tmdb_movie {
+                map.by_tmdb_movie
+                    .entry(movie)
+                    .or_insert_with(|| bridged.clone());
             }
         }
         map
@@ -274,9 +315,15 @@ impl AnimeIdMap {
         Ok(map)
     }
 
-    /// The full bridged entry for the given ids, preferring the AniList dialect
-    /// over MAL (AniList is open-media's primary anime id). `None` when neither
-    /// id is present or neither has a mapping.
+    /// The full bridged entry for the given ids.
+    ///
+    /// Lookup order (first hit wins):
+    /// 1. AniList (primary anime dialect)
+    /// 2. MAL
+    /// 3. IMDB reverse (Cinemeta / Torrentio-first titles)
+    /// 4. TMDB reverse (tv map, then movie map)
+    ///
+    /// `None` when no dialect is present or none is in the anime catalog.
     pub(crate) fn entry_for(&self, ids: &IdSet) -> Option<&BridgedEntry> {
         if let Some(anilist) = ids.anilist {
             if let Some(entry) = self.by_anilist.get(&anilist) {
@@ -288,6 +335,21 @@ impl AnimeIdMap {
                 return Some(entry);
             }
         }
+        if let Some(imdb) = &ids.imdb {
+            if let Some(entry) = self.by_imdb.get(imdb) {
+                return Some(entry);
+            }
+        }
+        if let Some(tmdb) = ids.tmdb {
+            if let Ok(id) = u64::try_from(tmdb) {
+                if let Some(entry) = self.by_tmdb_tv.get(&id) {
+                    return Some(entry);
+                }
+                if let Some(entry) = self.by_tmdb_movie.get(&id) {
+                    return Some(entry);
+                }
+            }
+        }
         None
     }
 
@@ -295,6 +357,12 @@ impl AnimeIdMap {
     #[cfg(test)]
     pub(crate) fn imdb_for(&self, ids: &IdSet) -> Option<String> {
         self.entry_for(ids).and_then(|e| e.imdb.clone())
+    }
+
+    /// Whether the ids resolve to a known anime catalog entry.
+    #[cfg(test)]
+    pub(crate) fn is_anime(&self, ids: &IdSet) -> bool {
+        self.entry_for(ids).is_some()
     }
 }
 
@@ -493,8 +561,8 @@ impl IdBridge for FribbIdBridge {
     }
 
     async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<BridgedIds>> {
-        // Nothing to bridge from if the caller has neither anilist nor mal id.
-        if ids.anilist.is_none() && ids.mal.is_none() {
+        // Need at least one dialect we can look up (forward or reverse).
+        if ids.anilist.is_none() && ids.mal.is_none() && ids.imdb.is_none() && ids.tmdb.is_none() {
             return Ok(None);
         }
         Ok(self
@@ -650,9 +718,57 @@ mod tests {
     }
 
     #[test]
-    fn no_anime_ids_yields_none() {
-        // Only an imdb/tmdb id present — nothing to bridge from.
-        let ids = IdSet::default().with_tmdb(157336);
+    fn reverse_imdb_hits_anime_catalog() {
+        // Cinemeta/TMDB-first path: only IMDB known. Fixture entry 1 is anime.
+        let entry_map = map();
+        let ids = IdSet::default().with_imdb("tt14115938");
+        assert!(entry_map.is_anime(&ids));
+        assert_eq!(entry_map.imdb_for(&ids).as_deref(), Some("tt14115938"));
+        assert_eq!(entry_map.entry_for(&ids).unwrap().tmdb_tv, Some(119495));
+    }
+
+    #[test]
+    fn reverse_imdb_secondary_alias_also_hits() {
+        // Movie fixture carries two tt ids; reverse indexes both.
+        let entry_map = map();
+        let ids = IdSet::default().with_imdb("tt0089206");
+        assert!(entry_map.is_anime(&ids));
+        // Forward-facing BridgedEntry still exposes the first imdb.
+        assert_eq!(entry_map.imdb_for(&ids).as_deref(), Some("tt1920940"));
+    }
+
+    #[test]
+    fn reverse_tmdb_tv_hits_anime_catalog() {
+        let ids = IdSet::default().with_tmdb(119495);
+        assert!(map().is_anime(&ids));
+    }
+
+    #[test]
+    fn reverse_unknown_imdb_is_not_anime() {
+        // Western animation / live-action series are not in Fribb → stay Tv.
+        let ids = IdSet::default().with_imdb("tt2861424"); // Rick and Morty
+        assert!(!map().is_anime(&ids));
         assert_eq!(map().imdb_for(&ids), None);
+    }
+
+    #[test]
+    fn reverse_unknown_tmdb_is_not_anime() {
+        // Interstellar (Pixar-adjacent film id space) — not in Fribb.
+        let ids = IdSet::default().with_tmdb(157336);
+        assert!(!map().is_anime(&ids));
+        assert_eq!(map().imdb_for(&ids), None);
+    }
+
+    #[test]
+    fn forward_prefers_anilist_over_reverse_imdb() {
+        // anilist 199 → tt0245429; shared reverse on tt14115938 would be wrong.
+        let ids = IdSet::default().with_anilist(199).with_imdb("tt14115938");
+        assert_eq!(map().imdb_for(&ids).as_deref(), Some("tt0245429"));
+    }
+
+    #[test]
+    fn empty_id_set_yields_none() {
+        assert_eq!(map().imdb_for(&IdSet::default()), None);
+        assert!(!map().is_anime(&IdSet::default()));
     }
 }

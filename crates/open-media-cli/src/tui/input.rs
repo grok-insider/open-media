@@ -9,7 +9,7 @@ use open_media_core::model::{Episode, Media, MediaKind};
 use open_media_core::tracking::LibraryItem;
 use tokio::sync::mpsc;
 
-use super::state::{cycle_opt, cycle_quality, Focus, LibraryFilter, PanelControl, Screen};
+use super::state::{cycle_opt, cycle_quality, Focus, HomeRow, PanelControl, Root, Screen};
 use super::{App, Msg};
 
 pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -31,22 +31,50 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
-    if code == KeyCode::Char('/') && app.screen != Screen::Search {
-        app.screen = Screen::Search;
-        app.status = "Type a title and press Enter".into();
+    // Global quit — never Esc.
+    if code == KeyCode::Char('q') {
+        // On Search, allow typing 'q' into the query.
+        if app.screen() != Screen::Search {
+            app.should_quit = true;
+            return;
+        }
+    }
+
+    // Top-level tab shortcuts (1/2/3) when not typing a search query.
+    if app.screen() != Screen::Search {
+        if let KeyCode::Char(c) = code {
+            if let Some(root) = Root::from_digit(c) {
+                app.go_root(root);
+                return;
+            }
+        }
+    }
+
+    // Tab key switches roots when at root level (Sources uses Tab for panel focus).
+    if code == KeyCode::Tab && app.nav.is_at_root() {
+        let next = match app.nav.root {
+            Root::Home => Root::Library,
+            Root::Library => Root::Search,
+            Root::Search => Root::Home,
+        };
+        app.go_root(next);
         return;
     }
 
-    match app.screen {
+    if code == KeyCode::Char('/') && app.screen() != Screen::Search {
+        app.go_root(Root::Search);
+        return;
+    }
+
+    match app.screen() {
         Screen::Home => match code {
-            KeyCode::Char('j') | KeyCode::Down => App::list_move(&mut app.home_state, 4, 1),
-            KeyCode::Char('k') | KeyCode::Up => App::list_move(&mut app.home_state, 4, -1),
+            KeyCode::Char('j') | KeyCode::Down => app.home_list_move(1),
+            KeyCode::Char('k') | KeyCode::Up => app.home_list_move(-1),
             KeyCode::Enter => select_home(app),
-            KeyCode::Char('l') => {
-                app.screen = Screen::Library;
-                app.load_library();
+            KeyCode::Esc => {
+                app.status = "Press q to quit".into();
             }
-            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+            KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
         Screen::Library => match code {
@@ -65,7 +93,9 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.load_library();
             }
             KeyCode::Enter => select_library_item(app),
-            KeyCode::Esc => app.screen = Screen::Home,
+            KeyCode::Esc => {
+                app.status = "Press q to quit".into();
+            }
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -75,7 +105,10 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Backspace => {
                 app.query.pop();
             }
-            KeyCode::Esc => app.should_quit = true,
+            KeyCode::Esc => {
+                // Esc from Search always returns to Home — never quits.
+                app.go_root(Root::Home);
+            }
             _ => {}
         },
         Screen::Results => match code {
@@ -86,7 +119,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 App::list_move(&mut app.results_state, app.results.len(), -1)
             }
             KeyCode::Enter => select_result(app),
-            KeyCode::Esc => app.screen = Screen::Search,
+            KeyCode::Esc => nav_back(app),
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -98,7 +131,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 App::list_move(&mut app.seasons_state, app.seasons.len(), -1)
             }
             KeyCode::Enter => select_season(app),
-            KeyCode::Esc => app.screen = Screen::Results,
+            KeyCode::Esc => nav_back(app),
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -110,18 +143,18 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 App::list_move(&mut app.episodes_state, app.episodes.len(), -1)
             }
             KeyCode::Enter => select_episode(app),
-            // Back to Seasons if we came through a multi-season picker, else Results.
-            KeyCode::Esc => {
-                app.screen = if app.seasons.len() > 1 {
-                    Screen::Seasons
-                } else {
-                    Screen::Results
-                }
-            }
+            KeyCode::Esc => nav_back(app),
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
         Screen::Sources => handle_sources_key(app, code),
+    }
+}
+
+/// Pop one drill-down level, or reaffirm the root if already empty.
+fn nav_back(app: &mut App) {
+    if !app.nav.pop() {
+        app.go_root(app.nav.root);
     }
 }
 
@@ -144,18 +177,7 @@ fn handle_sources_key(app: &mut App, code: KeyCode) {
                 App::list_move(&mut app.candidates_state, app.visible.len(), -1)
             }
             KeyCode::Enter => play_selected(app),
-            KeyCode::Esc => {
-                app.screen = if app
-                    .media
-                    .as_ref()
-                    .map(|m| m.kind.is_episodic())
-                    .unwrap_or(false)
-                {
-                    Screen::Episodes
-                } else {
-                    Screen::Results
-                }
-            }
+            KeyCode::Esc => nav_back(app),
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -214,25 +236,29 @@ pub(super) fn activate_control(app: &mut App) {
 }
 
 pub(super) fn select_home(app: &mut App) {
-    match app.home_state.selected().unwrap_or(0) {
-        0 => {
-            app.library_filter = LibraryFilter::Watching;
-            app.screen = Screen::Library;
-            app.load_library();
+    let Some(idx) = app.home_state.selected() else {
+        return;
+    };
+    let Some(row) = app.home_rows.get(idx).cloned() else {
+        return;
+    };
+    match row {
+        HomeRow::Section(_) => {
+            // Non-selectable headers — nudge to next real row.
+            app.home_list_move(1);
         }
-        1 => {
-            app.library_filter = LibraryFilter::Planned;
-            app.screen = Screen::Library;
-            app.load_library();
+        HomeRow::Continue(i) => {
+            let Some(item) = app.continue_watching.get(i).cloned() else {
+                return;
+            };
+            open_library_item(app, item);
         }
-        2 => {
-            app.library_filter = LibraryFilter::Completed;
-            app.screen = Screen::Library;
-            app.load_library();
+        HomeRow::OpenLibrary => {
+            app.library_filter = super::state::LibraryFilter::All;
+            app.go_root(Root::Library);
         }
-        _ => {
-            app.screen = Screen::Search;
-            app.status = "Type a title and press Enter".into();
+        HomeRow::Search => {
+            app.go_root(Root::Search);
         }
     }
 }
@@ -244,6 +270,19 @@ pub(super) fn select_library_item(app: &mut App) {
     let Some(item) = app.library.get(idx).cloned() else {
         return;
     };
+    open_library_item(app, item);
+}
+
+fn open_library_item(app: &mut App, item: LibraryItem) {
+    // Keep Library as root so breadcrumbs reflect where we came from.
+    if app.screen() == Screen::Library {
+        app.nav.root = Root::Library;
+    }
+    // From Home continue-watching: root stays Home for Esc back to Home.
+
+    // Wipe any previous title's seasons/episodes/sources (and bump browse_id).
+    app.clear_drill_state();
+
     let media = media_from_library_item(&item);
     app.results = vec![media.clone()];
     app.results_state.select(Some(0));
@@ -257,16 +296,27 @@ pub(super) fn select_library_item(app: &mut App) {
         app.sel_episode_runtime = None;
         app.busy = true;
         app.status = "Finding saved episode sources…".into();
+        let browse_id = app.browse_id;
         let engine = app.engine.clone();
         let tx = app.tx.clone();
         let season = app.sel_season;
         let episode = app.sel_episode;
         tokio::spawn(async move {
             let media = engine.details(&media.ids).await.unwrap_or(media);
-            send_sources(&engine, &tx, sources_request(media, season, episode)).await;
+            // Persist Series→Anime reclassification so Home/Library badges update.
+            let _ = engine.sync_library_kind(&media);
+            send_sources(
+                &engine,
+                &tx,
+                browse_id,
+                sources_request(media, season, episode),
+            )
+            .await;
         });
         return;
     }
+    // select_result also clears drill state (second bump is fine — nothing in flight yet
+    // with the previous id except if we already spawned above).
     select_result(app);
 }
 
@@ -297,7 +347,8 @@ pub(super) fn start_search(app: &mut App) {
     app.busy = true;
     app.results.clear();
     app.results_state.select(None);
-    app.screen = Screen::Search;
+    // Full root switch: clear drill lists + invalidate in-flight browse msgs.
+    app.go_root(Root::Search);
     app.status = format!("Searching “{query}”…");
     let engine = app.engine.clone();
     let tx = app.tx.clone();
@@ -319,19 +370,26 @@ pub(super) fn start_search(app: &mut App) {
     });
 }
 
-pub(super) fn search_status(results: usize, failed_providers: usize, finished: bool) -> String {
+pub(super) fn search_status(
+    results: usize,
+    failed_provider_names: &[String],
+    finished: bool,
+) -> String {
     let mut status = if finished {
         format!("{results} results")
     } else {
         format!("{results} results · still searching...")
     };
+    let failed_providers = failed_provider_names.len();
     if failed_providers > 0 {
-        let noun = if failed_providers == 1 {
-            "provider"
+        if let [name] = failed_provider_names {
+            status.push_str(&format!(" · {name} failed"));
         } else {
-            "providers"
-        };
-        status.push_str(&format!(" · {failed_providers} {noun} failed"));
+            status.push_str(&format!(
+                " · {failed_providers} providers failed: {}",
+                failed_provider_names.join(", ")
+            ));
+        }
     }
     status
 }
@@ -343,36 +401,38 @@ pub(super) fn select_result(app: &mut App) {
     let Some(media) = app.results.get(idx).cloned() else {
         return;
     };
+    // Drop prior title seasons/episodes/sources so Esc cannot re-enter them.
+    app.clear_drill_state();
     app.busy = true;
     app.status = "Loading…".into();
-    // Reset prior episodic state so a new pick doesn't inherit stale coordinates.
-    app.seasons.clear();
-    app.sel_season = None;
-    app.sel_episode = None;
-    app.sel_episode_title = None;
-    app.sel_episode_still = None;
-    app.sel_episode_runtime = None;
+    let browse_id = app.browse_id;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
         // Hydrate ids (IMDB) for sources; fall back to the search result.
+        // Also reclassifies Series→Anime when Fribb knows the IMDB/TMDB id.
         let media = engine.details(&media.ids).await.unwrap_or(media);
+        let _ = engine.sync_library_kind(&media);
         if media.kind == MediaKind::Movie {
             // Movies have no coordinates or episode title.
-            send_sources(&engine, &tx, sources_request(media, None, None)).await;
+            send_sources(&engine, &tx, browse_id, sources_request(media, None, None)).await;
             return;
         }
         // Episodic: list seasons. >1 → picker; otherwise jump straight to the
         // single (or synthetic, for flat-numbered anime) season's episodes.
         match engine.seasons(&media.ids).await {
             Ok(seasons) if seasons.len() > 1 => {
-                let _ = tx.send(Msg::Seasons(media, seasons));
+                let _ = tx.send(Msg::Seasons {
+                    browse_id,
+                    media,
+                    seasons,
+                });
             }
             Ok(seasons) => {
                 let season = seasons.first().map(|s| s.number).unwrap_or(1);
-                fetch_episodes(&engine, &tx, media, season).await;
+                fetch_episodes(&engine, &tx, browse_id, media, season).await;
             }
-            Err(_) => fetch_episodes(&engine, &tx, media, 1).await,
+            Err(_) => fetch_episodes(&engine, &tx, browse_id, media, 1).await,
         }
     });
 }
@@ -382,12 +442,19 @@ pub(super) fn select_season(app: &mut App) {
         return;
     };
     let season = app.seasons.get(idx).map(|s| s.number).unwrap_or(1);
+    // Invalidate prior episode/source fetches for another season.
+    let browse_id = app.begin_browse_step();
+    app.episodes.clear();
+    app.episodes_state.select(None);
+    app.candidates.clear();
+    app.candidates_state.select(None);
+    app.visible.clear();
     app.busy = true;
     app.status = format!("Loading season {season}…");
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
-        fetch_episodes(&engine, &tx, media, season).await;
+        fetch_episodes(&engine, &tx, browse_id, media, season).await;
     });
 }
 
@@ -396,6 +463,7 @@ pub(super) fn select_season(app: &mut App) {
 async fn fetch_episodes(
     engine: &Arc<Engine>,
     tx: &mpsc::UnboundedSender<Msg>,
+    browse_id: u64,
     media: Media,
     season: u32,
 ) {
@@ -403,7 +471,12 @@ async fn fetch_episodes(
         Ok(eps) if !eps.is_empty() => eps,
         _ => fallback_episodes(season, media.episode_count.unwrap_or(1).max(1)),
     };
-    let _ = tx.send(Msg::Episodes(media, season, episodes));
+    let _ = tx.send(Msg::Episodes {
+        browse_id,
+        media,
+        season,
+        episodes,
+    });
 }
 
 /// Bare episodes `1..=count` with no titles — the graceful fallback when a
@@ -436,6 +509,11 @@ pub(super) fn select_episode(app: &mut App) {
     app.sel_episode_title = ep.title.clone();
     app.sel_episode_still = ep.still.clone();
     app.sel_episode_runtime = ep.runtime_minutes;
+    // New source fetch; drop late replies from a previous episode pick.
+    let browse_id = app.begin_browse_step();
+    app.candidates.clear();
+    app.candidates_state.select(None);
+    app.visible.clear();
     app.busy = true;
     app.status = format!("Finding sources for {}…", ep_coordinate(&ep));
     let engine = app.engine.clone();
@@ -450,15 +528,27 @@ pub(super) fn select_episode(app: &mut App) {
         include_uncached: true,
     };
     tokio::spawn(async move {
-        send_sources(&engine, &tx, req).await;
+        send_sources(&engine, &tx, browse_id, req).await;
     });
 }
 
-async fn send_sources(engine: &Arc<Engine>, tx: &mpsc::UnboundedSender<Msg>, req: PlayRequest) {
+async fn send_sources(
+    engine: &Arc<Engine>,
+    tx: &mpsc::UnboundedSender<Msg>,
+    browse_id: u64,
+    req: PlayRequest,
+) {
     let media = req.media.clone();
     let _ = match engine.find_sources(&req).await {
-        Ok(candidates) => tx.send(Msg::Sources { media, candidates }),
-        Err(e) => tx.send(Msg::Error(e.to_string())),
+        Ok(candidates) => tx.send(Msg::Sources {
+            browse_id,
+            media,
+            candidates,
+        }),
+        Err(e) => tx.send(Msg::Error {
+            browse_id,
+            error: e.to_string(),
+        }),
     };
 }
 
@@ -493,6 +583,7 @@ pub(super) fn play_selected(app: &mut App) {
     app.busy = true;
     app.status = format!("Playing {}…", media.display_title());
 
+    let browse_id = app.browse_id;
     let engine = app.engine.clone();
     let tx = app.tx.clone();
     tokio::spawn(async move {
@@ -508,7 +599,11 @@ pub(super) fn play_selected(app: &mut App) {
         let _ = tx.send(Msg::Status("Resolving + launching player…".into()));
         let _ = match engine.play(&req, &candidate).await {
             Ok(()) => tx.send(Msg::PlayEnded),
-            Err(e) => tx.send(Msg::Error(e.to_string())),
+            // Drop if the user navigated to another title while playback resolved.
+            Err(e) => tx.send(Msg::Error {
+                browse_id,
+                error: e.to_string(),
+            }),
         };
     });
 }

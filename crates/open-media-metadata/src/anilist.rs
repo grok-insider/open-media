@@ -132,9 +132,10 @@ impl AniListProvider {
         .await?;
         let status = resp.status();
         if !status.is_success() {
+            let message = anilist_http_error_message(status, resp).await;
             return Err(CoreError::Remote {
                 service: "anilist".into(),
-                message: format!("HTTP {status}"),
+                message,
             });
         }
         let parsed: GqlResponse<T> = resp.json().await.map_err(|e| CoreError::Parse {
@@ -219,6 +220,32 @@ impl AniListProvider {
         }
         Ok(Some(total))
     }
+}
+
+async fn anilist_http_error_message(
+    status: reqwest::StatusCode,
+    resp: reqwest::Response,
+) -> String {
+    let fallback = format!("HTTP {status}");
+    let Ok(body) = resp.text().await else {
+        return fallback;
+    };
+    let Some(message) = anilist_error_body_message(&body) else {
+        return fallback;
+    };
+    format!("HTTP {status}: {message}")
+}
+
+fn anilist_error_body_message(body: &str) -> Option<String> {
+    let parsed: GqlResponse<serde_json::Value> = serde_json::from_str(body).ok()?;
+    let errors = parsed.errors?;
+    let message = errors
+        .into_iter()
+        .map(|e| e.message.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    (!message.is_empty()).then_some(message)
 }
 
 /// Pick the TV `PREQUEL` node (most episodes wins) from a connection — shared by

@@ -1,49 +1,94 @@
-//! Screen/focus enums, the theme palette, and the Sources filter/sort state
-//! (with its pure filtering/sorting/cycling helpers).
+//! Screen/focus enums, navigation stack, the theme palette, and the Sources
+//! filter/sort state (with its pure filtering/sorting/cycling helpers).
 
 use open_media_core::stream::{CacheState, Quality, SourceCandidate};
 use open_media_core::tracking::ListStatus;
 use ratatui::prelude::*;
 
 /// Semantic colors the TUI draws with. Replaces scattered `Color::*` literals
-/// so the palette can be swapped wholesale by `ui.theme`. Two presets exist:
-/// [`Theme::dark`] (the historical hardcoded look) and [`Theme::light`].
+/// so the palette can be swapped wholesale by `ui.theme`.
 #[derive(Clone, Copy)]
 pub(super) struct Theme {
+    /// Full-frame background.
+    pub(super) bg: Color,
+    /// Subtle surface for panels / cards.
+    pub(super) surface: Color,
     /// Headings, focused borders, primary highlights.
     pub(super) accent: Color,
+    /// Primary body text.
+    pub(super) text: Color,
     /// Footer/status body text.
     pub(super) status: Color,
-    /// Secondary/label text and unfocused borders.
+    /// Secondary/label text.
     pub(super) dim: Color,
+    /// Muted / placeholder text.
+    pub(super) muted: Color,
+    /// Unfocused borders.
+    pub(super) border: Color,
+    /// Focused borders (usually accent).
+    pub(super) border_focus: Color,
     /// Selection / highlight background.
     pub(super) selection_bg: Color,
     /// Selection / highlight foreground.
     pub(super) selection_fg: Color,
+    /// Healthy / cached / success.
+    pub(super) success: Color,
+    /// Medium seed health / warning.
+    pub(super) warn: Color,
+    /// Low seed health / danger.
+    pub(super) danger: Color,
+    /// Movie kind badge.
+    pub(super) badge_movie: Color,
+    /// Series/TV kind badge.
+    pub(super) badge_series: Color,
+    /// Anime kind badge.
+    pub(super) badge_anime: Color,
 }
 
 impl Theme {
-    /// The original hardcoded palette — kept byte-for-byte so `dark`/`auto` is a
-    /// no-op for existing users.
+    /// Media-app charcoal with a restrained cyan accent.
     fn dark() -> Self {
         Self {
-            accent: Color::Cyan,
-            status: Color::Gray,
-            dim: Color::DarkGray,
-            selection_bg: Color::DarkGray,
-            selection_fg: Color::White,
+            bg: Color::Rgb(20, 20, 22),
+            surface: Color::Rgb(28, 28, 32),
+            accent: Color::Rgb(64, 180, 180),
+            text: Color::Rgb(225, 225, 228),
+            status: Color::Rgb(160, 160, 168),
+            dim: Color::Rgb(120, 120, 128),
+            muted: Color::Rgb(90, 90, 98),
+            border: Color::Rgb(60, 60, 68),
+            border_focus: Color::Rgb(64, 180, 180),
+            selection_bg: Color::Rgb(45, 58, 62),
+            selection_fg: Color::Rgb(240, 240, 242),
+            success: Color::Rgb(120, 190, 120),
+            warn: Color::Rgb(210, 180, 90),
+            danger: Color::Rgb(200, 110, 110),
+            badge_movie: Color::Rgb(120, 150, 200),
+            badge_series: Color::Rgb(150, 140, 200),
+            badge_anime: Color::Rgb(200, 140, 160),
         }
     }
 
-    /// A light palette: a deeper accent that reads on light backgrounds, darker
-    /// dim/secondary text, and a light selection band with dark text.
+    /// Light palette: deeper accent, darker secondary text.
     fn light() -> Self {
         Self {
-            accent: Color::Blue,
-            status: Color::DarkGray,
-            dim: Color::Gray,
-            selection_bg: Color::Gray,
-            selection_fg: Color::Black,
+            bg: Color::Rgb(248, 248, 250),
+            surface: Color::Rgb(255, 255, 255),
+            accent: Color::Rgb(30, 100, 180),
+            text: Color::Rgb(28, 28, 32),
+            status: Color::Rgb(70, 70, 78),
+            dim: Color::Rgb(100, 100, 110),
+            muted: Color::Rgb(140, 140, 150),
+            border: Color::Rgb(180, 180, 190),
+            border_focus: Color::Rgb(30, 100, 180),
+            selection_bg: Color::Rgb(210, 225, 240),
+            selection_fg: Color::Rgb(20, 20, 24),
+            success: Color::Rgb(40, 130, 70),
+            warn: Color::Rgb(160, 120, 20),
+            danger: Color::Rgb(170, 50, 50),
+            badge_movie: Color::Rgb(50, 90, 150),
+            badge_series: Color::Rgb(90, 70, 150),
+            badge_anime: Color::Rgb(150, 60, 90),
         }
     }
 
@@ -60,9 +105,9 @@ impl Theme {
     /// Border color for a pane given its focus state.
     pub(super) fn border(&self, focused: bool) -> Color {
         if focused {
-            self.accent
+            self.border_focus
         } else {
-            self.dim
+            self.border
         }
     }
 
@@ -75,8 +120,53 @@ impl Theme {
     }
 }
 
-/// Which screen is active.
-#[derive(Clone, Copy, PartialEq)]
+/// Top-level destinations shown as tabs. Drill-down screens live on the stack.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Root {
+    Home,
+    Library,
+    Search,
+}
+
+impl Root {
+    pub(super) const ALL: [Root; 3] = [Root::Home, Root::Library, Root::Search];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Root::Home => "Home",
+            Root::Library => "Library",
+            Root::Search => "Search",
+        }
+    }
+
+    pub(super) fn short(self) -> &'static str {
+        match self {
+            Root::Home => "H",
+            Root::Library => "L",
+            Root::Search => "S",
+        }
+    }
+
+    pub(super) fn as_screen(self) -> Screen {
+        match self {
+            Root::Home => Screen::Home,
+            Root::Library => Screen::Library,
+            Root::Search => Screen::Search,
+        }
+    }
+
+    pub(super) fn from_digit(c: char) -> Option<Root> {
+        match c {
+            '1' => Some(Root::Home),
+            '2' => Some(Root::Library),
+            '3' => Some(Root::Search),
+            _ => None,
+        }
+    }
+}
+
+/// Which screen is active (root or drill-down).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Screen {
     Home,
     Library,
@@ -85,6 +175,138 @@ pub(super) enum Screen {
     Seasons,
     Episodes,
     Sources,
+}
+
+impl Screen {
+    pub(super) fn is_root(self) -> bool {
+        matches!(self, Screen::Home | Screen::Library | Screen::Search)
+    }
+
+    pub(super) fn is_drill(self) -> bool {
+        !self.is_root()
+    }
+}
+
+/// Root tab + drill-down stack. Esc pops; empty stack stays on the root.
+#[derive(Clone, Debug)]
+pub(super) struct Nav {
+    pub(super) root: Root,
+    stack: Vec<Screen>,
+}
+
+impl Nav {
+    pub(super) fn new(root: Root) -> Self {
+        Self {
+            root,
+            stack: Vec::new(),
+        }
+    }
+
+    pub(super) fn current(&self) -> Screen {
+        self.stack
+            .last()
+            .copied()
+            .unwrap_or_else(|| self.root.as_screen())
+    }
+
+    pub(super) fn is_at_root(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    /// Jump to a top-level tab and clear any drill-down.
+    pub(super) fn go_root(&mut self, root: Root) {
+        self.root = root;
+        self.stack.clear();
+    }
+
+    /// Push a drill-down screen (Results / Seasons / Episodes / Sources).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn push(&mut self, screen: Screen) {
+        debug_assert!(screen.is_drill());
+        self.stack.push(screen);
+    }
+
+    /// Replace the entire drill stack (last entry is current).
+    pub(super) fn set_stack(&mut self, screens: impl IntoIterator<Item = Screen>) {
+        self.stack = screens.into_iter().filter(|s| s.is_drill()).collect();
+    }
+
+    /// Pop one level. Returns `true` if something was popped.
+    pub(super) fn pop(&mut self) -> bool {
+        self.stack.pop().is_some()
+    }
+}
+
+/// Rows on the Home screen (continue-watching items + quick actions).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum HomeRow {
+    /// Non-selectable section label (e.g. "Anime · 2").
+    Section(String),
+    /// Index into the continue-watching list.
+    Continue(usize),
+    OpenLibrary,
+    Search,
+}
+
+impl HomeRow {
+    pub(super) fn is_selectable(&self) -> bool {
+        !matches!(self, HomeRow::Section(_))
+    }
+}
+
+/// Pure home-row layout: kind sections (recent-first groups) + actions.
+///
+/// `continue_watching` must already be sorted newest-first.
+pub(super) fn build_home_rows(
+    continue_watching: &[open_media_core::tracking::LibraryItem],
+) -> Vec<HomeRow> {
+    use open_media_core::model::MediaKind;
+
+    // Partition indices while preserving newest-first order within each kind.
+    let mut anime = Vec::new();
+    let mut series = Vec::new();
+    let mut movies = Vec::new();
+    for (i, item) in continue_watching.iter().enumerate() {
+        match item.kind {
+            MediaKind::Anime => anime.push(i),
+            MediaKind::Series => series.push(i),
+            MediaKind::Movie => movies.push(i),
+        }
+    }
+
+    // Group order: by most recent item in the group (first index after global sort).
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    if !anime.is_empty() {
+        groups.push(("Anime", anime));
+    }
+    if !series.is_empty() {
+        // Match the kind badge label ("Tv") for consistency.
+        groups.push(("Tv", series));
+    }
+    if !movies.is_empty() {
+        groups.push(("Movies", movies));
+    }
+    groups.sort_by_key(|(_, idxs)| {
+        std::cmp::Reverse(
+            idxs.first()
+                .map(|&i| continue_watching[i].updated_at)
+                .unwrap_or(0),
+        )
+    });
+
+    let mut rows = Vec::new();
+    for (label, idxs) in groups {
+        rows.push(HomeRow::Section(format!("{label} · {}", idxs.len())));
+        for i in idxs {
+            rows.push(HomeRow::Continue(i));
+        }
+    }
+    if !continue_watching.is_empty() {
+        rows.push(HomeRow::Section("Actions".into()));
+    }
+    rows.push(HomeRow::OpenLibrary);
+    rows.push(HomeRow::Search);
+    rows
 }
 
 /// Which pane has keyboard focus on the Sources screen.
@@ -368,4 +590,40 @@ pub(super) fn cycle_quality(current: Option<Quality>, dir: i32) -> Option<Qualit
     ];
     let pos = all.iter().position(|&q| q == current).unwrap_or(0) as i32;
     all[(pos + dir).rem_euclid(all.len() as i32) as usize]
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::*;
+
+    #[test]
+    fn nav_starts_at_root() {
+        let nav = Nav::new(Root::Home);
+        assert!(nav.is_at_root());
+        assert_eq!(nav.current(), Screen::Home);
+    }
+
+    #[test]
+    fn nav_push_pop_restores_root() {
+        let mut nav = Nav::new(Root::Search);
+        nav.push(Screen::Results);
+        nav.push(Screen::Sources);
+        assert_eq!(nav.current(), Screen::Sources);
+        assert!(nav.pop());
+        assert_eq!(nav.current(), Screen::Results);
+        assert!(nav.pop());
+        assert!(nav.is_at_root());
+        assert_eq!(nav.current(), Screen::Search);
+        assert!(!nav.pop());
+    }
+
+    #[test]
+    fn go_root_clears_stack() {
+        let mut nav = Nav::new(Root::Home);
+        nav.push(Screen::Results);
+        nav.go_root(Root::Library);
+        assert!(nav.is_at_root());
+        assert_eq!(nav.current(), Screen::Library);
+        assert_eq!(nav.root, Root::Library);
+    }
 }

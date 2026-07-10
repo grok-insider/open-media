@@ -164,8 +164,15 @@ fn scoring_prefs(cfg: &Config) -> ScoringPrefs {
 /// Build the Torrentio addon config path segment from user config.
 ///
 /// Mirrors miru: `providers=...|sort=qualitysize|qualityfilter=scr,cam` and, when
-/// a debrid token is present, `|debridoptions=nodownloadlinks|realdebrid=KEY`
-/// (omitting `nodownloadlinks` when uncached results are wanted).
+/// a debrid token is present, `|realdebrid=KEY` (or torbox).
+///
+/// We deliberately **do not** send `debridoptions=nodownloadlinks`. That flag
+/// makes Torrentio return only debrid-instant rows; when the only cached hit is
+/// mis-indexed junk (e.g. Handmaid's Tale under Mushoku's IMDB id) and our
+/// title-mismatch filter drops it, the user would see **zero** sources even
+/// though many correct uncached releases exist. Cache preference is applied
+/// client-side in [`Engine::find_sources`] / scoring (`prefer_cached` + optional
+/// uncached strip with empty-list fallback).
 fn torrentio_config_string(cfg: &Config) -> String {
     let providers = cfg.providers.torrentio_providers.join(",");
     let mut parts = vec![
@@ -174,16 +181,11 @@ fn torrentio_config_string(cfg: &Config) -> String {
         "qualityfilter=scr,cam".to_string(),
     ];
     // Only inject a debrid param for the *active* backend — matches the
-    // `DebridProvider` wiring gate so the two never disagree.
+    // `DebridProvider` wiring gate so the two never disagree. RD/TorBox still
+    // mark which streams are cached; they just no longer hide uncached ones.
     if cfg.has_real_debrid() {
-        if !cfg.providers.show_uncached {
-            parts.push("debridoptions=nodownloadlinks".to_string());
-        }
         parts.push(format!("realdebrid={}", cfg.credentials.real_debrid_token));
     } else if cfg.has_torbox() {
-        if !cfg.providers.show_uncached {
-            parts.push("debridoptions=nodownloadlinks".to_string());
-        }
         parts.push(format!("torbox={}", cfg.credentials.torbox_token));
     }
     parts.join("|")

@@ -67,6 +67,8 @@ pub struct SearchProgress {
     /// Number of providers that failed. Failures are non-fatal when at least one
     /// metadata provider is configured.
     pub failed_providers: usize,
+    /// Names of providers that failed, in completion order.
+    pub failed_provider_names: Vec<String>,
     /// `true` once every configured provider has completed or failed.
     pub finished: bool,
 }
@@ -120,6 +122,10 @@ impl Engine {
 
     /// Hydrate full details (and extra ids, e.g. IMDB) for a known item by trying
     /// each metadata provider until one understands the id dialect.
+    ///
+    /// After a successful hydrate, kind may be refined Series/Movie → Anime when
+    /// the wired [`IdBridge`] reverse-maps the title into the anime catalog
+    /// (Fribb). Anime is never downgraded.
     pub async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
         let mut last_err = None;
         for provider in &self.metadata {
@@ -129,6 +135,7 @@ impl Engine {
                 // mal id from AniList) survive into the hydrated result.
                 Ok(mut media) => {
                     media.ids.merge(ids);
+                    self.refine_kind_from_bridge(&mut media).await;
                     return Ok(media);
                 }
                 Err(e) => last_err = Some(e),
@@ -136,6 +143,38 @@ impl Engine {
         }
         Err(last_err
             .unwrap_or_else(|| CoreError::NotFound("no metadata provider resolved details".into())))
+    }
+
+    /// Upgrade Series/Movie → Anime when Fribb (or another [`IdBridge`]) knows
+    /// this identity as anime. Never downgrades Anime. Best-effort: bridge
+    /// miss/error leaves `media` unchanged.
+    async fn refine_kind_from_bridge(&self, media: &mut Media) {
+        if media.kind == MediaKind::Anime {
+            return;
+        }
+        let Some(bridge) = &self.id_bridge else {
+            return;
+        };
+        match bridge.resolve(&media.ids).await {
+            Ok(Some(bridged)) => {
+                tracing::debug!(
+                    title = %media.title,
+                    from = ?media.kind,
+                    "reclassified as Anime via id bridge"
+                );
+                media.kind = MediaKind::Anime;
+                // Fold any missing IMDB so sources light up without a second hop.
+                if media.ids.imdb.is_none() {
+                    if let Some(imdb) = bridged.imdb {
+                        media.ids.imdb = Some(imdb);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "id bridge kind refine failed");
+            }
+        }
     }
 
     /// List the seasons of an episodic item. Returns the first provider that knows

@@ -56,20 +56,21 @@ impl Engine {
             .collect::<FuturesUnordered<_>>();
         let mut acc = SearchAccumulator::default();
         let mut completed = 0usize;
-        let mut failed = 0usize;
+        let mut failed_provider_names = Vec::new();
 
         while let Some((name, result)) = calls.next().await {
             completed += 1;
             match result {
                 Ok(items) => acc.extend(items),
                 Err(e) => {
-                    failed += 1;
+                    failed_provider_names.push(name.to_string());
                     tracing::warn!(provider = name, error = %e, "metadata search failed");
                 }
             }
             on_progress(SearchProgress {
                 results: acc.results().to_vec(),
-                failed_providers: failed,
+                failed_providers: failed_provider_names.len(),
+                failed_provider_names: failed_provider_names.clone(),
                 finished: completed == total,
             });
         }

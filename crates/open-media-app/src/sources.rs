@@ -1,7 +1,7 @@
 use open_media_core::error::CoreResult;
 use open_media_core::ports::SourceQuery;
 use open_media_core::scoring;
-use open_media_core::stream::SourceCandidate;
+use open_media_core::stream::{CacheState, SourceCandidate};
 
 use crate::{Engine, PlayRequest};
 
@@ -46,6 +46,38 @@ impl Engine {
             match result {
                 Ok(mut found) => candidates.append(&mut found),
                 Err(e) => tracing::warn!(source = name, error = %e, "source lookup failed"),
+            }
+        }
+
+        // Drop mis-tagged indexer junk (e.g. Torrentio returning a multi-file
+        // Handmaid's Tale pack under Mushoku's IMDB id). Must run *before* rank
+        // so a debrid-cached wrong title cannot dominate via prefer_cached.
+        let dropped = scoring::filter_title_mismatch(&mut candidates, query.media.display_title());
+        if dropped > 0 {
+            tracing::debug!(
+                dropped,
+                media = %query.media.display_title(),
+                "dropped source candidates with no title-token overlap"
+            );
+        }
+
+        // Prefer cached-only when the user opted out of uncached, but never
+        // collapse to an empty list after title filtering removed the only
+        // (wrong) cached hit — fall back to uncached so something playable
+        // remains.
+        if !req.include_uncached {
+            let cached: Vec<SourceCandidate> = candidates
+                .iter()
+                .filter(|c| c.cache == CacheState::Cached)
+                .cloned()
+                .collect();
+            if !cached.is_empty() {
+                candidates = cached;
+            } else if !candidates.is_empty() {
+                tracing::debug!(
+                    media = %query.media.display_title(),
+                    "no title-matching cached sources; keeping uncached"
+                );
             }
         }
 

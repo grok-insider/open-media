@@ -350,15 +350,18 @@ pub trait SubtitleProvider: Send + Sync {
     async fn fetch(&self, query: &SubtitleQuery) -> CoreResult<Vec<SubtitleTrack>>;
 }
 
-/// Bridges an anime's id dialect (AniList/MAL) to an IMDB id.
+/// Bridges anime catalog identities across AniList/MAL and IMDB/TMDB.
 ///
-/// Anime is discovered via AniList, which carries no IMDB id — but the
-/// IMDB-keyed source providers ([`SourceProvider`] backends like Torrentio/Comet)
-/// and, through them, the debrid cache only light up when [`IdSet::imdb`] is
-/// populated. This port closes that gap: given the ids known for an anime, it
-/// returns the matching `tt…` id (when one exists), which the application layer
-/// merges into the [`IdSet`] before building a source query — no change to the
-/// source providers themselves (they already key off `imdb`).
+/// Two directions, one port:
+/// - **Forward** (AniList/MAL → IMDB/TMDB): anime discovered via AniList carries
+///   no IMDB id, but IMDB-keyed source providers ([`SourceProvider`] backends
+///   like Torrentio/Comet) and the debrid cache only light up when
+///   [`IdSet::imdb`] is populated. The app merges the bridged `tt…` into the
+///   [`IdSet`] before building a source query.
+/// - **Reverse** (IMDB/TMDB → anime catalog): Cinemeta/TMDB-first titles are
+///   stored as Movie/Series. A reverse hit means the title is in the anime
+///   catalog (Fribb), so the app can upgrade kind to Anime without treating
+///   Western "Animation" genre as anime.
 ///
 /// Contract:
 /// - **Best-effort and non-fatal.** A fetch/parse/cache failure must surface as
@@ -376,9 +379,9 @@ pub trait SubtitleProvider: Send + Sync {
 pub trait IdBridge: Send + Sync {
     fn name(&self) -> &str;
 
-    /// Resolve the cross-database ids for the given ids (keyed off the
-    /// anilist/mal dialect), or `Ok(None)` when no mapping exists or the lookup
-    /// could not be performed.
+    /// Resolve cross-database ids when `ids` match a known anime entry
+    /// (anilist/mal *or* imdb/tmdb reverse), or `Ok(None)` when no mapping
+    /// exists or the lookup could not be performed.
     async fn resolve(&self, ids: &IdSet) -> CoreResult<Option<BridgedIds>>;
 
     /// Convenience: just the IMDB id from [`IdBridge::resolve`].

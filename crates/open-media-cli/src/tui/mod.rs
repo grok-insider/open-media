@@ -4,6 +4,7 @@
 //! littlejohn/miru pattern. All engine I/O is `tokio::spawn`ed and posts a
 //! [`Msg`] back, so the UI never blocks. Flow:
 //!   Search → Results → (episodic ⇒ Seasons? ⇒ Episodes) → Sources → play → back.
+//! Top-level tabs: Home · Library · Search. Esc pops the drill-down stack.
 
 mod draw;
 mod input;
@@ -23,7 +24,7 @@ use open_media_app::{Engine, SearchProgress};
 use open_media_config::Config;
 use open_media_core::model::{Episode, Media, Season};
 use open_media_core::stream::SourceCandidate;
-use open_media_core::tracking::LibraryItem;
+use open_media_core::tracking::{LibraryItem, ListStatus};
 use ratatui::prelude::*;
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
@@ -34,8 +35,8 @@ use draw::draw;
 use input::{handle_key, search_status, start_search};
 use mouse::{handle_mouse, LastMouseClick};
 use state::{
-    distinct_languages, distinct_providers, visible_indices, Focus, LibraryFilter, Screen,
-    SourceFilters, Theme,
+    build_home_rows, distinct_languages, distinct_providers, visible_indices, Focus, HomeRow,
+    LibraryFilter, Nav, Root, Screen, SourceFilters, Theme,
 };
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -60,6 +61,12 @@ const RESULT_PANEL_WIDTH: u16 = 42;
 const POSTER_ROWS: u16 = 16;
 const POSTER_TARGET_CELLS: (u16, u16) = (RESULT_PANEL_WIDTH - 2, POSTER_ROWS);
 
+/// Max continue-watching items shown on Home.
+const HOME_CONTINUE_MAX: usize = 20;
+
+/// Braille spinner frames for busy status.
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
 /// Async results posted back to the UI loop.
 enum Msg {
     SearchProgress {
@@ -71,29 +78,79 @@ enum Msg {
         error: String,
     },
     /// Multi-season series → show the season picker.
-    Seasons(Media, Vec<Season>),
+    Seasons {
+        browse_id: u64,
+        media: Media,
+        seasons: Vec<Season>,
+    },
     /// Episodes for a resolved season (real titles when the provider has them).
-    Episodes(Media, u32, Vec<Episode>),
+    Episodes {
+        browse_id: u64,
+        media: Media,
+        season: u32,
+        episodes: Vec<Episode>,
+    },
     Sources {
+        browse_id: u64,
         media: Media,
         candidates: Vec<SourceCandidate>,
     },
     PlayEnded,
     Status(String),
-    Error(String),
+    /// Browse-scoped error (ignored when `browse_id` is stale).
+    Error {
+        browse_id: u64,
+        error: String,
+    },
+    /// Fribb reverse-map upgraded N library rows Series/Movie → Anime; reload lists.
+    LibraryKindsRefined {
+        upgraded: usize,
+    },
+}
+
+/// Esc stack for a Sources screen for the **current** title only.
+/// Never includes Seasons/Episodes unless those lists were loaded for this title
+/// (callers must clear prior-title state first).
+fn sources_nav_stack(
+    has_results: bool,
+    seasons_len: usize,
+    episodes_loaded: bool,
+    episodic_with_coords: bool,
+) -> Vec<Screen> {
+    let mut stack = Vec::new();
+    if has_results {
+        stack.push(Screen::Results);
+    }
+    if seasons_len > 1 {
+        stack.push(Screen::Seasons);
+    }
+    if episodic_with_coords && episodes_loaded {
+        stack.push(Screen::Episodes);
+    }
+    stack.push(Screen::Sources);
+    stack
 }
 
 struct App {
     engine: Arc<Engine>,
-    screen: Screen,
+    nav: Nav,
     query: String,
     search_id: u64,
+    /// Bumped whenever the user starts a new title resolve or season/episode
+    /// fetch so late async replies from a previous pick are dropped.
+    browse_id: u64,
     status: String,
     busy: bool,
     should_quit: bool,
     help: bool,
+    /// Visual tick for spinner animation (~100ms poll).
+    tick: u64,
 
     home_state: ListState,
+    /// Watching items for the Home continue list (newest first).
+    continue_watching: Vec<LibraryItem>,
+    /// Flattened Home rows (continue items + quick actions).
+    home_rows: Vec<HomeRow>,
 
     library: Vec<LibraryItem>,
     all_library: Vec<LibraryItem>,
@@ -162,24 +219,29 @@ impl App {
         let theme = Theme::from_cfg(&cfg.ui.theme);
         let mut panel_state = ListState::default();
         panel_state.select(Some(0));
+        let root = if initial_query.is_some() {
+            Root::Search
+        } else {
+            Root::Home
+        };
         Self {
             engine,
-            screen: if initial_query.is_some() {
-                Screen::Search
-            } else {
-                Screen::Home
-            },
+            nav: Nav::new(root),
             query: initial_query.unwrap_or_default(),
             search_id: 0,
+            browse_id: 0,
             status: "Browse your library or press / to search".into(),
             busy: false,
             should_quit: false,
             help: false,
+            tick: 0,
             home_state: {
                 let mut s = ListState::default();
                 s.select(Some(0));
                 s
             },
+            continue_watching: Vec::new(),
+            home_rows: Vec::new(),
             library: Vec::new(),
             all_library: Vec::new(),
             library_state: ListState::default(),
@@ -211,6 +273,58 @@ impl App {
             tx,
             last_click: None,
         }
+    }
+
+    fn screen(&self) -> Screen {
+        self.nav.current()
+    }
+
+    /// Jump to a top-level tab.
+    fn go_root(&mut self, root: Root) {
+        self.nav.go_root(root);
+        // Drop title-scoped lists so another title never reuses seasons/episodes/sources.
+        self.clear_drill_state();
+        match root {
+            Root::Home => {
+                self.rebuild_home();
+                self.status = "Continue watching or pick a quick action".into();
+            }
+            Root::Library => {
+                self.load_library();
+            }
+            Root::Search => {
+                self.status = "Type a title and press Enter".into();
+            }
+        }
+    }
+
+    /// Invalidate in-flight browse work and wipe title-scoped drill lists.
+    /// Does **not** clear search results or library/home data.
+    fn clear_drill_state(&mut self) {
+        self.browse_id = self.browse_id.wrapping_add(1);
+        self.media = None;
+        self.seasons.clear();
+        self.seasons_state.select(None);
+        self.episodes.clear();
+        self.episodes_state.select(None);
+        self.sel_season = None;
+        self.sel_episode = None;
+        self.sel_episode_title = None;
+        self.sel_episode_still = None;
+        self.sel_episode_runtime = None;
+        self.candidates.clear();
+        self.candidates_state.select(None);
+        self.visible.clear();
+        self.languages.clear();
+        self.providers.clear();
+        self.focus = Focus::List;
+    }
+
+    /// Bump browse generation for a new season/episode/source fetch without
+    /// wiping seasons already on screen (e.g. picking another season).
+    fn begin_browse_step(&mut self) -> u64 {
+        self.browse_id = self.browse_id.wrapping_add(1);
+        self.browse_id
     }
 
     /// Recompute the filtered/sorted view and clamp the list cursor.
@@ -270,12 +384,12 @@ impl App {
         if !self.stills.enabled() {
             return;
         }
-        let target = match self.screen {
+        let target = match self.screen() {
             Screen::Episodes => STILL_TARGET_CELLS,
             Screen::Results => POSTER_TARGET_CELLS,
             _ => return,
         };
-        let url = match self.screen {
+        let url = match self.screen() {
             Screen::Episodes => self.current_still_url(),
             Screen::Results => self.current_result_poster_url(),
             _ => None,
@@ -310,6 +424,95 @@ impl App {
             }
             Err(e) => self.status = format!("Library unavailable: {e}"),
         }
+        self.rebuild_home();
+    }
+
+    /// After details reclassifies Series→Anime, mirror kind onto cached library
+    /// rows so Home/Library badges update without a full filter reload.
+    fn apply_media_kind_to_library_cache(&mut self, media: &Media) {
+        let key = media.ids.primary_key();
+        let matches = |item: &LibraryItem| {
+            key.as_ref().is_some_and(|k| item.media_key == *k)
+                || (media.ids.imdb.is_some() && item.ids.imdb == media.ids.imdb)
+                || (media.ids.anilist.is_some() && item.ids.anilist == media.ids.anilist)
+                || (media.ids.tmdb.is_some() && item.ids.tmdb == media.ids.tmdb)
+        };
+        let mut changed = false;
+        for item in self
+            .all_library
+            .iter_mut()
+            .chain(self.library.iter_mut())
+            .chain(self.continue_watching.iter_mut())
+        {
+            if matches(item) && item.kind != media.kind {
+                item.kind = media.kind;
+                item.ids.merge(&media.ids);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_home();
+        }
+    }
+
+    /// Build Home rows from continue-watching + quick actions.
+    ///
+    /// Continue items are newest-first overall, then **grouped by kind**
+    /// (Anime / Series / Movies). Groups are ordered by the most recent item
+    /// in each group so the freshest shelf sits on top.
+    fn rebuild_home(&mut self) {
+        let mut watching: Vec<LibraryItem> = self
+            .all_library
+            .iter()
+            .filter(|i| i.status == ListStatus::Watching)
+            .cloned()
+            .collect();
+        watching.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+        watching.truncate(HOME_CONTINUE_MAX);
+        self.continue_watching = watching;
+        self.home_rows = build_home_rows(&self.continue_watching);
+        self.clamp_home_selection();
+    }
+
+    /// Keep the Home cursor on a selectable row (skip section headers).
+    fn clamp_home_selection(&mut self) {
+        let len = self.home_rows.len();
+        if len == 0 {
+            self.home_state.select(None);
+            return;
+        }
+        let mut sel = self.home_state.selected().unwrap_or(0).min(len - 1);
+        if !self.home_rows[sel].is_selectable() {
+            // Prefer the next selectable row, else the previous one.
+            if let Some(i) = (sel + 1..len).find(|&i| self.home_rows[i].is_selectable()) {
+                sel = i;
+            } else if let Some(i) = (0..sel).rev().find(|&i| self.home_rows[i].is_selectable()) {
+                sel = i;
+            }
+        }
+        self.home_state.select(Some(sel));
+    }
+
+    /// Move the Home list cursor by `delta`, skipping non-selectable rows.
+    fn home_list_move(&mut self, delta: i32) {
+        let len = self.home_rows.len();
+        if len == 0 || delta == 0 {
+            return;
+        }
+        let start = self.home_state.selected().unwrap_or(0) as i32;
+        let step = if delta > 0 { 1 } else { -1 };
+        let mut cur = start;
+        for _ in 0..len {
+            cur = (cur + step).rem_euclid(len as i32);
+            if self.home_rows[cur as usize].is_selectable() {
+                self.home_state.select(Some(cur as usize));
+                return;
+            }
+        }
+    }
+
+    fn spinner_frame(&self) -> &'static str {
+        SPINNER_FRAMES[(self.tick / 3) as usize % SPINNER_FRAMES.len()]
     }
 
     fn handle_msg(&mut self, msg: Msg) {
@@ -330,26 +533,73 @@ impl App {
                 self.busy = false;
                 self.status = format!("Error: {error}");
             }
-            Msg::Seasons(media, seasons) => {
+            Msg::Seasons {
+                browse_id,
+                media,
+                seasons,
+            } => {
+                if browse_id != self.browse_id {
+                    return;
+                }
                 self.busy = false;
+                // Replace drill lists for this title only.
+                self.episodes.clear();
+                self.episodes_state.select(None);
+                self.candidates.clear();
+                self.candidates_state.select(None);
+                self.visible.clear();
                 self.seasons = seasons;
                 self.seasons_state
                     .select((!self.seasons.is_empty()).then_some(0));
+                self.apply_media_kind_to_library_cache(&media);
                 self.media = Some(media);
-                self.screen = Screen::Seasons;
+                let mut stack = Vec::new();
+                if !self.results.is_empty() {
+                    stack.push(Screen::Results);
+                }
+                stack.push(Screen::Seasons);
+                self.nav.set_stack(stack);
                 self.status = "Pick a season".into();
             }
-            Msg::Episodes(media, season, episodes) => {
+            Msg::Episodes {
+                browse_id,
+                media,
+                season,
+                episodes,
+            } => {
+                if browse_id != self.browse_id {
+                    return;
+                }
                 self.busy = false;
+                self.candidates.clear();
+                self.candidates_state.select(None);
+                self.visible.clear();
                 self.episodes = episodes;
                 self.episodes_state
                     .select((!self.episodes.is_empty()).then_some(0));
                 self.sel_season = Some(season);
+                self.apply_media_kind_to_library_cache(&media);
                 self.media = Some(media);
-                self.screen = Screen::Episodes;
+                // Stack uses only lists belonging to this title.
+                let mut stack = Vec::new();
+                if !self.results.is_empty() {
+                    stack.push(Screen::Results);
+                }
+                if self.seasons.len() > 1 {
+                    stack.push(Screen::Seasons);
+                }
+                stack.push(Screen::Episodes);
+                self.nav.set_stack(stack);
                 self.status = "Pick an episode".into();
             }
-            Msg::Sources { media, candidates } => {
+            Msg::Sources {
+                browse_id,
+                media,
+                candidates,
+            } => {
+                if browse_id != self.browse_id {
+                    return;
+                }
                 self.busy = false;
                 self.candidates = candidates;
                 self.languages = distinct_languages(&self.candidates);
@@ -358,8 +608,16 @@ impl App {
                     .select((!self.candidates.is_empty()).then_some(0));
                 self.focus = Focus::List;
                 self.panel_state.select(Some(0));
+                let episodic_with_coords = media.kind.is_episodic() && self.sel_episode.is_some();
+                let stack = sources_nav_stack(
+                    !self.results.is_empty(),
+                    self.seasons.len(),
+                    !self.episodes.is_empty(),
+                    episodic_with_coords,
+                );
+                self.apply_media_kind_to_library_cache(&media);
                 self.media = Some(media);
-                self.screen = Screen::Sources;
+                self.nav.set_stack(stack);
                 self.recompute_visible();
             }
             Msg::PlayEnded => {
@@ -370,9 +628,23 @@ impl App {
                 self.busy = true;
                 self.status = s;
             }
-            Msg::Error(e) => {
+            Msg::Error { browse_id, error } => {
+                if browse_id != self.browse_id {
+                    return;
+                }
                 self.busy = false;
-                self.status = format!("Error: {e}");
+                self.status = format!("Error: {error}");
+            }
+            Msg::LibraryKindsRefined { upgraded } => {
+                if upgraded == 0 {
+                    return;
+                }
+                // Preserve current screen; only refresh list data so badges move.
+                let on_home = self.nav.root == Root::Home && self.nav.is_at_root();
+                self.load_library();
+                if on_home {
+                    self.status = "Continue watching or pick a quick action".into();
+                }
             }
         }
     }
@@ -382,12 +654,16 @@ impl App {
         self.results_state
             .select((!self.results.is_empty()).then_some(0));
         if !self.results.is_empty() || progress.finished {
-            self.screen = Screen::Results;
+            // Ensure Search is the root and Results is on the stack.
+            if self.nav.root != Root::Search {
+                self.nav.root = Root::Search;
+            }
+            self.nav.set_stack([Screen::Results]);
         }
         self.busy = !progress.finished;
         self.status = search_status(
             self.results.len(),
-            progress.failed_providers,
+            &progress.failed_provider_names,
             progress.finished,
         );
     }
@@ -416,6 +692,29 @@ pub async fn run(engine: Engine, cfg: Config, initial_query: Option<String>) -> 
 
     let mut app = App::new(engine, cfg, tx, stills, still_tx, initial_query);
     app.load_library();
+    // load_library sets a library-oriented status; restore a Home greeting when
+    // we land on the Home tab (Search prefill keeps its own status via start_search).
+    if app.nav.root == Root::Home {
+        app.status = "Continue watching or pick a quick action".into();
+    }
+
+    // Cinemeta-sourced anime land in the DB as Series. Reverse Fribb on boot so
+    // Home/Library show Anime without the user opening each title once.
+    {
+        let engine = app.engine.clone();
+        let tx = app.tx.clone();
+        tokio::spawn(async move {
+            match engine.refine_library_kinds().await {
+                Ok(upgraded) if upgraded > 0 => {
+                    let _ = tx.send(Msg::LibraryKindsRefined { upgraded });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "library kind refine failed");
+                }
+            }
+        });
+    }
 
     // A pre-filled query (`open-media "frieren"`) searches immediately;
     // start_search no-ops on an empty query, so bare `open-media` still lands on
@@ -462,6 +761,7 @@ async fn run_loop(
             app.stills.apply(msg);
         }
         app.request_visible_image();
+        app.tick = app.tick.wrapping_add(1);
 
         if app.should_quit {
             return Ok(());

@@ -269,6 +269,26 @@ async fn anilist_propagates_graphql_errors() {
     assert!(err.to_string().contains("Invalid token"));
 }
 
+#[tokio::test]
+async fn anilist_http_errors_include_graphql_error_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "errors": [{
+                "message": "The AniList API has been temporarily disabled"
+            }],
+            "data": null
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = AniListProvider::with_base_url(server.uri());
+    let err = provider.search("x", None).await.unwrap_err().to_string();
+
+    assert!(err.contains("HTTP 403 Forbidden"));
+    assert!(err.contains("temporarily disabled"));
+}
+
 // --- Cinemeta (keyless) ---
 
 #[tokio::test]
