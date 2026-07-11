@@ -31,15 +31,31 @@
           lib = nixpkgs.lib;
           version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
+          # open-media-subs depends on open-subtitle via git (not crates.io).
+          # importCargoLock needs a NAR hash per git-sourced package name/version.
+          # All open-subtitle-* crates share one monorepo rev, so they share one hash.
+          openSubtitleGitHash = "sha256-aWlWxXYfrabRRX+f94FvdOgQjf0/4qn3NN05avTUVdk=";
+
           open-media = pkgs.rustPlatform.buildRustPackage {
             pname = "open-media";
             inherit version;
             src = ./.;
 
-            # open-media-subs now consumes the open-subtitle engine from crates.io (the
-            # open-subtitle-* crates), so there is no vendored git source and no
-            # outputHashes entry is needed — the lockfile fully pins everything.
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "open-subtitle-compose-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-config-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-core-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-engine-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-identify-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-process-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-providers-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-sync-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-transcribe-0.0.1" = openSubtitleGitHash;
+                "open-subtitle-translate-0.0.1" = openSubtitleGitHash;
+              };
+            };
 
             # Build only the binary crate (and its deps), not the whole workspace.
             cargoBuildFlags = [ "-p" "open-media-cli" ];
