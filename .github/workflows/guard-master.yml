@@ -7,10 +7,9 @@ name: guard master
 # so this job is that check: it fails any PR into `master` whose head is not
 # `dev`. Add it to master's required status checks to make it blocking.
 #
-# Exception: release-plz and the repo-admin manual version-bump workflow open
-# machine-generated PRs from `release-plz-*` branches straight into `master`.
-# Those are sanctioned release paths, so they are allowlisted here — otherwise no
-# release could ever merge.
+# Exception: release-plz, release-please, and manual version-bump workflows open
+# machine-generated PRs straight into `master`. Those are sanctioned release
+# paths, so they are allowlisted here — otherwise no release could ever merge.
 
 on:
   pull_request:
@@ -21,12 +20,12 @@ jobs:
     name: only dev into master
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the PR head branch is dev (or release-plz)
+      - name: Verify the PR head branch is dev (or a release branch)
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
           case "$HEAD_REF" in
-            dev|release-plz-*)
+            dev|release-plz-*|release-plz-manual-*|release-please--*|release-please-manual-*)
               echo "OK: PR into master comes from '$HEAD_REF'."
               ;;
             *)
