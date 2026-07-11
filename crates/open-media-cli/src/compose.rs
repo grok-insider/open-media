@@ -47,8 +47,10 @@ pub fn build_engine(cfg: &Config) -> Engine {
     // AniList needs no key for read/search; it enriches anime discovery.
     builder = builder.add_metadata(Arc::new(AniListProvider::new()));
 
-    // --- Source providers ---
-    builder = builder.add_source(Arc::new(TorrentioSource::new(torrentio_config_string(cfg))));
+    // --- Source providers (opt-in; dual-use posture — see docs/LEGAL.md) ---
+    if cfg.providers.torrentio {
+        builder = builder.add_source(Arc::new(TorrentioSource::new(torrentio_config_string(cfg))));
+    }
     if cfg.providers.nyaa_direct {
         builder = builder.add_source(Arc::new(NyaaSource::with_category(
             cfg.providers.nyaa_category.clone(),
@@ -62,7 +64,7 @@ pub fn build_engine(cfg: &Config) -> Engine {
     // providers can serve them; titles without a mapping keep their nyaa sources.
     builder = builder.id_bridge(Arc::new(FribbIdBridge::new()));
 
-    // --- Debrid + resolver (debrid optional → P2P fallback) ---
+    // --- Debrid + resolver (debrid optional; P2P only when allow_p2p) ---
     let debrid: Option<Arc<dyn open_media_core::ports::DebridProvider>> = if cfg.has_real_debrid() {
         Some(Arc::new(RealDebrid::new(
             &cfg.credentials.real_debrid_token,
@@ -72,10 +74,14 @@ pub fn build_engine(cfg: &Config) -> Engine {
     } else {
         None
     };
-    let p2p = Arc::new(P2pEngine::new(
-        cfg.streaming.http_port,
-        cfg.streaming.cleanup_after_playback,
-    ));
+    let p2p = if cfg.streaming.allow_p2p {
+        Some(Arc::new(P2pEngine::new(
+            cfg.streaming.http_port,
+            cfg.streaming.cleanup_after_playback,
+        )))
+    } else {
+        None
+    };
     builder = builder.resolver(Arc::new(HybridResolver::new(debrid, p2p)));
 
     // --- Player (mpv enables IPC features; vlc is launch-only) ---

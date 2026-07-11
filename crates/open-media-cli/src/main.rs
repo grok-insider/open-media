@@ -17,8 +17,8 @@ use clap::{Parser, Subcommand};
 use open_media_core::model::{Media, MediaKind};
 use open_media_core::tracking::ListStatus;
 
-/// open-media: watch movies, series, and anime from the terminal — via
-/// Real-Debrid (instant, cached) or direct P2P, into mpv/vlc.
+/// open-media: terminal media client — metadata, library, mpv/vlc control;
+/// optional debrid/P2P adapters (off by default; see docs/LEGAL.md).
 #[derive(Debug, Parser)]
 #[command(name = "open-media", version, about, long_about = None)]
 struct Cli {
@@ -102,10 +102,9 @@ enum ConfigAction {
     Set {
         /// `key=value`. Run `open-media config show` for current values; list/nested
         /// keys such as torrentio_providers, player.args, [subtitles], and [ui.sources]
-        /// are edited directly in config.toml for now. mpv thumbnail previews can
-        /// be toggled with player.thumbnail_previews=true; they require
-        /// user-installed mpv scripts such as thumbfast plus uosc or another
-        /// compatible OSC.
+        /// are edited directly in config.toml for now. Source/P2P opt-in:
+        /// torrentio, nyaa_direct, allow_p2p, sources_acknowledged (see docs/LEGAL.md).
+        /// mpv thumbnails: player.thumbnail_previews=true (needs user-installed scripts).
         kv: String,
     },
 }
@@ -176,13 +175,25 @@ fn cmd_init() -> anyhow::Result<()> {
     open_media_config::save(&cfg)?;
     println!("Created {}", path.display());
     println!();
-    println!("Next steps (all optional — search works keyless via Cinemeta + AniList):");
-    println!("  open-media config set real_debrid_token=<your RD token>   # recommended: instant cached playback");
-    println!("  open-media config set tmdb_api_key=<your TMDB v3 key>     # optional: richer movie/series metadata");
+    println!("Legal (dual-use client): open-media does not host media or grant rights to");
+    println!("works. You are responsible for lawful use under the copyright laws of your");
+    println!("jurisdiction and third-party terms. See docs/LEGAL.md in the repository.");
     println!();
+    println!("Defaults: torrent indexes and local P2P are OFF. Search/library work keyless");
+    println!("via Cinemeta + AniList.");
+    println!();
+    println!("Optional next steps:");
+    println!("  open-media config set tmdb_api_key=<your TMDB v3 key>  # richer metadata");
+    println!("  # Stream adapters (read docs/LEGAL.md first):");
+    println!("  open-media config set torrentio=true");
+    println!("  open-media config set nyaa_direct=true");
+    println!("  open-media config set sources_acknowledged=true");
+    println!("  open-media config set real_debrid_token=<token>       # your debrid account");
     println!(
-        "Get keys: https://real-debrid.com/apitoken  +  https://www.themoviedb.org/settings/api"
+        "  # open-media config set allow_p2p=true                # local BitTorrent (may upload)"
     );
+    println!();
+    println!("Keys: https://www.themoviedb.org/settings/api  ·  https://real-debrid.com/apitoken");
     println!();
     println!("Anonymous usage analytics (OS, arch, version, a random id) are ON by");
     println!("default to count active installs — never anything you watch. Opt out with:");
@@ -243,8 +254,13 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
             println!("  quality               = {}", cfg.providers.quality);
             println!("  show_uncached         = {}", cfg.providers.show_uncached);
             println!("  cinemeta              = {}", cfg.providers.cinemeta);
+            println!("  torrentio             = {}", cfg.providers.torrentio);
             println!("  nyaa_direct           = {}", cfg.providers.nyaa_direct);
             println!("  nyaa_category         = {}", cfg.providers.nyaa_category);
+            println!(
+                "  sources_acknowledged  = {}",
+                cfg.providers.sources_acknowledged
+            );
             println!(
                 "  torrentio_providers   = {}",
                 cfg.providers.torrentio_providers.join(", ")
@@ -259,6 +275,7 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
             println!("  player.args           = {}", cfg.player.args.join(" "));
 
             println!("[streaming]");
+            println!("  allow_p2p             = {}", cfg.streaming.allow_p2p);
             println!("  http_port             = {}", cfg.streaming.http_port);
             println!(
                 "  cleanup_after_playback = {}",
@@ -322,8 +339,13 @@ fn cmd_config(action: ConfigAction) -> anyhow::Result<()> {
                 "theme" => cfg.ui.theme = value.to_string(),
                 // Bools — parsed with a clear error on bad input.
                 "show_uncached" => cfg.providers.show_uncached = parse_bool(key, value)?,
+                "torrentio" => cfg.providers.torrentio = parse_bool(key, value)?,
                 "nyaa_direct" => cfg.providers.nyaa_direct = parse_bool(key, value)?,
+                "sources_acknowledged" => {
+                    cfg.providers.sources_acknowledged = parse_bool(key, value)?
+                }
                 "cinemeta" => cfg.providers.cinemeta = parse_bool(key, value)?,
+                "allow_p2p" => cfg.streaming.allow_p2p = parse_bool(key, value)?,
                 "skip_intro_outro" => cfg.behavior.skip_intro_outro = parse_bool(key, value)?,
                 "skip_filler" => cfg.behavior.skip_filler = parse_bool(key, value)?,
                 "autoplay_next" => cfg.behavior.autoplay_next = parse_bool(key, value)?,
@@ -438,9 +460,19 @@ async fn cmd_play(query: &str, season: Option<u32>, episode: Option<u32>) -> any
         .into_iter()
         .filter(|c| c.is_resolvable())
         .collect();
-    let best = resolvable
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no playable source found"))?;
+    let best = resolvable.first().ok_or_else(|| {
+        if !cfg.providers.torrentio && !cfg.providers.nyaa_direct {
+            anyhow::anyhow!(
+                "no source providers enabled. After reading docs/LEGAL.md, opt in with:\n  \
+                 open-media config set torrentio=true\n  \
+                 open-media config set nyaa_direct=true\n  \
+                 open-media config set sources_acknowledged=true\n  \
+                 open-media config set real_debrid_token=…   # and/or allow_p2p=true"
+            )
+        } else {
+            anyhow::anyhow!("no playable source found")
+        }
+    })?;
     println!(
         "  source: [{}] {} {} ({}, {}){}",
         best.provider,

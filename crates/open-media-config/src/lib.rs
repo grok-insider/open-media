@@ -54,7 +54,8 @@ pub struct Credentials {
     /// `"alldebrid"`, `"premiumize"`.
     #[serde(default = "default_debrid")]
     pub debrid_provider: String,
-    /// Real-Debrid API token (optional — empty falls back to P2P streaming).
+    /// Real-Debrid API token (optional — empty means no RD; P2P only if
+    /// `streaming.allow_p2p`).
     #[serde(default)]
     pub real_debrid_token: String,
     /// TorBox API key (optional — used when `debrid_provider = "torbox"`).
@@ -108,11 +109,15 @@ pub struct Providers {
     /// the app works with no TMDB key; disable to rely solely on TMDB.
     #[serde(default = "default_true")]
     pub cinemeta: bool,
-    /// Torrentio sub-providers, highest priority first.
+    /// Wire the Torrentio source adapter. **Off by default** (dual-use / opt-in
+    /// posture — see `docs/LEGAL.md`).
+    #[serde(default)]
+    pub torrentio: bool,
+    /// Torrentio sub-providers, highest priority first (used when `torrentio`).
     #[serde(default = "default_torrentio_providers")]
     pub torrentio_providers: Vec<String>,
-    /// Also query nyaa.si directly (anime), in addition to Torrentio's `nyaasi`.
-    #[serde(default = "default_true")]
+    /// Query nyaa.si directly (anime). **Off by default** (opt-in; see LEGAL.md).
+    #[serde(default)]
     pub nyaa_direct: bool,
     /// nyaa.si category for direct queries (the `c=` RSS parameter). Defaults to
     /// `"1_2"` (English-translated anime); `"1_3"` is raw/untranslated.
@@ -124,17 +129,23 @@ pub struct Providers {
     /// Show uncached candidates in source lists (slower to start).
     #[serde(default)]
     pub show_uncached: bool,
+    /// User has acknowledged `docs/LEGAL.md` before enabling torrent sources.
+    /// Soft flag set via config/init; not a hard runtime gate.
+    #[serde(default)]
+    pub sources_acknowledged: bool,
 }
 
 impl Default for Providers {
     fn default() -> Self {
         Self {
             cinemeta: true,
+            torrentio: false,
             torrentio_providers: default_torrentio_providers(),
-            nyaa_direct: true,
+            nyaa_direct: false,
             nyaa_category: default_nyaa_category(),
             quality: default_quality(),
             show_uncached: false,
+            sources_acknowledged: false,
         }
     }
 }
@@ -168,6 +179,11 @@ impl Default for Player {
 /// Local P2P streaming engine knobs (used when a source is played without debrid).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Streaming {
+    /// Allow the local BitTorrent (librqbit) path. **Off by default** — P2P may
+    /// upload pieces to peers (see `docs/LEGAL.md`). When false, only direct
+    /// URLs and debrid resolution can produce playback.
+    #[serde(default)]
+    pub allow_p2p: bool,
     /// Port for the local librqbit HTTP stream server.
     #[serde(default = "default_stream_port")]
     pub http_port: u16,
@@ -179,6 +195,7 @@ pub struct Streaming {
 impl Default for Streaming {
     fn default() -> Self {
         Self {
+            allow_p2p: false,
             http_port: default_stream_port(),
             cleanup_after_playback: true,
         }
@@ -348,8 +365,8 @@ impl Config {
         self.providers.cinemeta || !self.credentials.tmdb_api_key.is_empty()
     }
 
-    /// Whether the *active* debrid backend has a token configured (else P2P
-    /// streaming is used).
+    /// Whether the *active* debrid backend has a token configured.
+    /// Without debrid, magnet playback needs `streaming.allow_p2p`.
     pub fn has_debrid(&self) -> bool {
         match self.credentials.debrid_provider.as_str() {
             "torbox" => !self.credentials.torbox_token.is_empty(),
@@ -559,9 +576,42 @@ tmdb_api_key = "abc"
         assert!(!cfg.has_debrid());
         assert_eq!(cfg.player.command, "mpv");
         assert!(!cfg.player.thumbnail_previews);
-        assert!(cfg.providers.nyaa_direct);
+        assert!(!cfg.providers.nyaa_direct);
+        assert!(!cfg.providers.torrentio);
+        assert!(!cfg.providers.sources_acknowledged);
+        assert!(!cfg.streaming.allow_p2p);
         assert!(cfg.providers.cinemeta);
         assert!(cfg.behavior.skip_intro_outro);
+    }
+
+    #[test]
+    fn dual_use_source_defaults_are_off() {
+        let cfg = Config::default();
+        assert!(!cfg.providers.torrentio);
+        assert!(!cfg.providers.nyaa_direct);
+        assert!(!cfg.streaming.allow_p2p);
+        assert!(!cfg.providers.sources_acknowledged);
+
+        // Empty document matches Default (opt-in sources stay off).
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(!empty.providers.torrentio);
+        assert!(!empty.providers.nyaa_direct);
+        assert!(!empty.streaming.allow_p2p);
+    }
+
+    #[test]
+    fn opt_in_source_flags_roundtrip() {
+        let mut c = Config::default();
+        c.providers.torrentio = true;
+        c.providers.nyaa_direct = true;
+        c.providers.sources_acknowledged = true;
+        c.streaming.allow_p2p = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.providers.torrentio);
+        assert!(back.providers.nyaa_direct);
+        assert!(back.providers.sources_acknowledged);
+        assert!(back.streaming.allow_p2p);
     }
 
     #[test]

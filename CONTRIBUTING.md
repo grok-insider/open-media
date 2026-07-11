@@ -121,6 +121,23 @@ git tag -a v0.1.0 -m "open-media 0.1.0" && git push origin v0.1.0
 
 ## Scope & legality
 
-open-media is a client for services you authenticate to yourself and for public
-indexes. Contributions must not bundle credentials, scrape behind auth walls, or
-add DRM-circumvention. Keep it a clean, neutral tool.
+open-media is a **dual-use local client**: metadata, library, player control, and
+**optional** adapters for third-party indexes/debrid/P2P that the user enables
+and authenticates themselves. Full notice: [`docs/LEGAL.md`](docs/LEGAL.md).
+
+**Accept** contributions that add ports/adapters, improve UX, tests, docs, or
+packaging while keeping the tool neutral.
+
+**Reject** pull requests that:
+
+- bundle API tokens, shared debrid accounts, credential packs, or magnet/torrent
+  corpora in the repo or release artifacts;
+- scrape behind authentication walls or paywalls;
+- add **DRM circumvention**, key extraction, or cracks of official streaming apps;
+- add project-operated proxies, CDNs, or public rebroadcast servers for media;
+- scrape or mirror pirate streaming **websites** as a primary source path;
+- document or market “how to obtain unlicensed commercial content” as a feature;
+- reverse the opt-in defaults for torrent indexes / local P2P without an explicit
+  project decision and LEGAL.md update.
+
+Keep it a clean, dual-use tool — not a content host or commercial piracy service.

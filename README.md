@@ -4,45 +4,48 @@
 [![Release](https://img.shields.io/github/v/release/grok-insider/open-media?sort=semver)](https://github.com/grok-insider/open-media/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Watch movies, series, and anime from your terminal** — instantly via
-[Real-Debrid](https://real-debrid.com/) (cached, no seeding, no VPN) or directly
-over P2P, streamed into **mpv** or **vlc**. One fast TUI for everything.
+**Terminal media client** — search metadata (movies, series, anime), manage a
+local library, drive **mpv**/**vlc** with resume and tracking. Optional adapters
+can resolve playable streams via your own debrid account or local P2P.
 
-> **Status: released — v0.6.3.** The full pipeline — discover → source → resolve
-> (Real-Debrid or P2P) → play in mpv/vlc — is implemented, tested, packaged
-> (Nix + prebuilt binaries), and runs on **Linux, macOS, and Windows**. See
-> [CHANGELOG.md](CHANGELOG.md).
+> **Status: released — v0.6.3.** Discover → optional sources → resolve → play is
+> implemented, tested, packaged (Nix + prebuilt binaries), and runs on
+> **Linux, macOS, and Windows**. See [CHANGELOG.md](CHANGELOG.md).
+>
+> **Legal:** open-media is dual-use client software. It does not host media or
+> grant rights to works. You are responsible for lawful use in your jurisdiction.
+> See **[docs/LEGAL.md](docs/LEGAL.md)**.
+> Optional torrent indexes and local P2P are **off by default**.
 
 ---
 
 ## Why
 
-There are great single-purpose terminal tools — [`ani-cli`] for anime,
-[`miru`]/[`toru`] for streaming, [`curd`] for AniList-tracked anime — but each
-covers only part of the picture, and the best ideas are scattered across five
-codebases in three languages. open-media unifies them into **one** clean,
-maintainable Rust application:
+Terminal media tools often split discovery, playback control, tracking, and
+architecture across separate projects. open-media brings them into **one** clean,
+maintainable Rust application (engineering prior art is documented in
+[docs/RESEARCH.md](docs/RESEARCH.md) — not a product promise of any particular
+use):
 
-- **One pipeline for all content.** Movies and live-action series via TMDB or
-  keyless Cinemeta, anime via AniList — all resolved through the same source →
-  debrid/P2P → player path.
-- **Real-Debrid first.** Cached releases play instantly from RD's CDN over HTTPS.
-  No torrent traffic on your machine, no seeding, no VPN needed. Falls back to
-  built-in P2P streaming when you have no debrid account or a release is uncached.
-- **nyaa included.** Anime sources come from nyaa.si (directly and via Torrentio),
-  so you get the SubsPlease/Erai-raws releases you actually want.
+- **One pipeline for metadata + playback control.** Movies and live-action series
+  via TMDB or keyless Cinemeta, anime via AniList — same app for search, library,
+  resume, and tracking.
+- **Optional stream resolution.** With adapters enabled, you can use a debrid
+  service you authenticate to (e.g. Real-Debrid/TorBox) or local P2P. Debrid
+  resolution uses HTTPS from the provider's CDN (no local swarm when it
+  succeeds; that is **not** a copyright license). Local P2P may download **and
+  upload** pieces — enable only if you accept that (see
+  [docs/LEGAL.md](docs/LEGAL.md)).
 - **mpv done right.** Launches your existing mpv (and config) and drives it over
   IPC for resume, intro/outro auto-skip (AniSkip), progress tracking, and
   Discord presence.
 - **Clean architecture.** Ports-and-adapters + SOLID, one crate per concern, so
   adding a debrid service, indexer, tracker, or player is a small isolated change.
 
-[`ani-cli`]: https://github.com/pystardust/ani-cli
-[`miru`]: https://github.com/YannickHerrero/miru
-[`toru`]: https://github.com/sweetbbak/toru
-[`curd`]: https://github.com/Wraient/curd
-
 ## The pipeline
+
+Metadata, library, and player control work out of the box. **Source providers and
+local P2P are opt-in** (off by default).
 
 ```
               ┌─────────────┐   search    ┌──────────────────────┐
@@ -52,13 +55,13 @@ maintainable Rust application:
                      ▼                                ▼
               ┌─────────────┐   find      ┌──────────────────────┐
               │   Engine    │────────────▶│  SourceProvider(s)    │  Torrentio + nyaa
-              │  (open-media-app)   │             └──────────┬───────────┘
+              │  (open-media-app)   │             └──────────┬───────────┘  (opt-in)
               └─────────────┘   rank ◀───────────────┘ candidates (+cache flags)
-                     │  best candidate
+                     │  best candidate (when sources enabled)
                      ▼
               ┌─────────────┐  resolve    ┌──────────────────────┐
-              │StreamResolver│───────────▶│ DebridProvider (cached)│ ─▶ direct HTTPS URL
-              │  (open-media-stream)│             │   or P2pEngine (librqbit)│ ─▶ http://127.0.0.1
+              │StreamResolver│───────────▶│ DebridProvider (opt.)  │ ─▶ HTTPS URL
+              │  (open-media-stream)│             │   or P2pEngine (opt-in)  │ ─▶ http://127.0.0.1
               └──────┬──────┘             └──────────────────────┘
                      │  Playback url
                      ▼
@@ -69,17 +72,18 @@ maintainable Rust application:
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
-[docs/RESEARCH.md](docs/RESEARCH.md) for the prior-art analysis this is built on.
+[docs/RESEARCH.md](docs/RESEARCH.md) for engineering prior art.
 
 ## Features
 
 - **Metadata**: TMDB (richer, optional key) + **Cinemeta** (keyless default) for
   movies/series, AniList for anime — with IMDB/MAL id bridging and de-dup.
-- **Sources**: Torrentio (all trackers, cache-aware) + direct nyaa.si (RSS).
-- **Debrid**: Real-Debrid (add → select → unrestrict) or TorBox (create →
-  request link, with a real bulk cache check) — magnet → instant CDN URL.
-- **P2P**: librqbit engine streaming uncached / no-debrid torrents over a local
-  Range-aware HTTP server.
+- **Sources (opt-in)**: Torrentio (all trackers, cache-aware) + direct nyaa.si
+  (RSS). Off by default — see [Optional source adapters](#optional-source-adapters).
+- **Debrid (optional)**: Real-Debrid or TorBox with **your** token — magnet → CDN
+  URL when configured.
+- **P2P (opt-in)**: librqbit local engine over a localhost Range-aware HTTP server.
+  May upload to peers; off unless `streaming.allow_p2p = true`.
 - **Player**: mpv (launch + JSON-IPC: resume seek, auto-skip OP/ED, progress) and
   vlc (launch-only).
 - **Session**: SQLite resume, AniSkip/Jikan OP/ED + filler skip (with a
@@ -93,9 +97,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and
 - **Subtitles**: optional OpenSubtitles/SubDL/Jimaku fetch through the
   `open-subtitle` engine, passed to players as temp `--sub-file` tracks.
 - **TUI**: `open-media` with no args → Home (Continue Watching + Library) →
-  Search → Results → Seasons → Episodes → Sources → play. Results stream in
-  incrementally as providers respond, mouse (click/wheel) is supported, and the
-  Sources filter/sort panel persists to your config.
+  Search → Results → (optional) Seasons / Episodes / Sources → play when sources
+  are enabled. Results stream in incrementally as providers respond; mouse
+  (click/wheel) is supported; the Sources filter/sort panel persists to config.
 
 ## Install
 
@@ -141,40 +145,62 @@ cargo build --release        # binary at target/release/open-media
 
 - An external player on your `PATH`: **mpv** (recommended — unlocks IPC resume,
   OP/ED skip, and progress tracking) or **vlc** (launch-only).
-- **All API tokens are optional.** Search works keyless via Cinemeta + AniList;
-  without a Real-Debrid token, playback falls back to built-in P2P streaming.
+- **All API tokens are optional.** Search works keyless via Cinemeta + AniList.
+  Playback of remote releases needs **opt-in** source adapters and either a
+  debrid token or `allow_p2p` (see below and [docs/LEGAL.md](docs/LEGAL.md)).
 
 ## Usage
 
 ```sh
 open-media init                                  # create ~/.config/open-media/config.toml
-open-media config set real_debrid_token=...      # optional, recommended (instant cached playback)
 open-media config set tmdb_api_key=...           # optional (Cinemeta already works keyless)
-open-media                                # interactive TUI
-open-media search "interstellar"                 # list matches
+open-media                                # interactive TUI (Home, library, search)
+open-media search "interstellar"                 # metadata search
 open-media search "frieren" --kind anime
-open-media play "interstellar"                   # one-shot: search → best source → play
-open-media play "frieren" --season 1 --episode 1
-open-media login anilist                         # optional anime progress tracking token
-open-media login mal                             # MyAnimeList OAuth (needs mal_client_id, see below)
 open-media library list                          # local watchlist (add --status watching)
 open-media library plan "dune part two"          # save as plan-to-watch
 open-media library watching "frieren"            # mark as currently watching
 open-media library watched "interstellar"        # mark as completed
+open-media login anilist                         # optional anime progress tracking token
+open-media login mal                             # MyAnimeList OAuth (needs mal_client_id, see below)
 open-media config show                           # print config summary (secrets masked)
 open-media config path                           # print the config file path
 ```
+
+`open-media play "…"` searches and plays via source adapters. **Those adapters
+are off by default** — enable them first (see [Optional source adapters](#optional-source-adapters)
+and [docs/LEGAL.md](docs/LEGAL.md)). Without them, play reports that no source
+providers are enabled.
 
 `open-media config set` supports the scalar keys most users need:
 `tmdb_api_key`, `real_debrid_token`, `torbox_token`, `anilist_token`,
 `mal_token`, `mal_client_id`, `mal_client_secret`,
 `debrid_provider`, `player_command`, `quality`, `nyaa_category`, `theme`,
-`show_uncached`, `nyaa_direct`, `cinemeta`, `skip_intro_outro`, `skip_filler`,
+`show_uncached`, `torrentio`, `nyaa_direct`, `cinemeta`, `sources_acknowledged`,
+`allow_p2p`, `skip_intro_outro`, `skip_filler`,
 `autoplay_next`, `playlist_next`, `resume`, `discord_presence`, `telemetry`,
 `cleanup_after_playback`, `complete_threshold`, `http_port`, and
 `player.thumbnail_previews`. List/nested
 values such as `torrentio_providers`, `player.args`, `[subtitles]`, and
 `[ui.sources]` are still edited directly in `config.toml`.
+
+## Optional source adapters
+
+Torrent index adapters and local P2P are **disabled by default** so a fresh
+install is metadata + library + player oriented. To enable the advanced path
+(after reading [docs/LEGAL.md](docs/LEGAL.md)):
+
+```sh
+open-media config set torrentio=true
+open-media config set nyaa_direct=true          # anime RSS
+open-media config set sources_acknowledged=true
+open-media config set real_debrid_token=...     # preferred over local P2P when available
+# or, for local BitTorrent (may upload pieces to peers):
+open-media config set allow_p2p=true
+```
+
+Debrid does **not** grant copyright rights to media. Local P2P may **upload**.
+You remain responsible for lawful use under the laws of your jurisdiction.
 
 ## Configuration
 
@@ -185,17 +211,20 @@ the Nix store. `open-media init` creates it.
 | Section / key | Default | Purpose |
 |---------------|---------|---------|
 | `[credentials]` `tmdb_api_key` | — | optional TMDB v3 key (Cinemeta is the keyless default) |
-| `[credentials]` `real_debrid_token` | — | instant cached playback (else P2P) |
+| `[credentials]` `real_debrid_token` | — | optional debrid CDN playback (your account) |
 | `[credentials]` `torbox_token` | — | TorBox API key (used when `debrid_provider = "torbox"`) |
 | `[credentials]` `anilist_token` / `mal_token` | — | anime progress tracking (`open-media login anilist` / `login mal`) |
 | `[credentials]` `mal_client_id` | — | your MAL API client id (register at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig), App Type `other`, redirect URL `http://localhost:42069/callback`); MAL tokens then auto-refresh |
 | `[credentials]` `debrid_provider` | `real-debrid` | active debrid backend: `real-debrid` or `torbox` |
-| `[providers]` `cinemeta` / `nyaa_direct` | `true` | keyless movie/series source; direct nyaa.si |
+| `[providers]` `cinemeta` | `true` | keyless movie/series metadata |
+| `[providers]` `torrentio` / `nyaa_direct` | `false` / `false` | opt-in source adapters (see LEGAL.md) |
+| `[providers]` `sources_acknowledged` | `false` | set when enabling sources after reading LEGAL |
 | `[providers]` `quality` | `best` | `best` / `2160p` / `1080p` / `720p` / `480p` |
 | `[providers]` `show_uncached` | `false` | include uncached sources (slower to start) |
-| `[providers]` `torrentio_providers` | yts,eztv,…,nyaasi | Torrentio trackers, priority order |
+| `[providers]` `torrentio_providers` | yts,eztv,… | Tracker list used **only when** `torrentio=true` |
 | `[player]` `command` / `args` | `mpv` / `["--fullscreen"]` | player + extra args |
 | `[player]` `thumbnail_previews` | `false` | seekbar thumbnails for streams; requires user-installed mpv scripts (thumbfast + uosc or a compatible OSC) |
+| `[streaming]` `allow_p2p` | `false` | opt-in local BitTorrent streaming (may upload) |
 | `[streaming]` `http_port` / `cleanup_after_playback` | `3131` / `true` | local P2P stream server |
 | `[behavior]` `skip_intro_outro` / `resume` | `true` | auto-skip OP/ED (AniSkip, falling back to the file's own chapter names); resume from last position |
 | `[behavior]` `playlist_next` | `true` | keep one mpv per episodic session with the next episode pre-appended, so mpv's own **Next** button works even without autoplay |
@@ -285,6 +314,7 @@ env) cover real Real-Debrid, real mpv, and live P2P.
 
 [MIT](LICENSE) © 2026 Grok Insider.
 
-This is a client for services you bring your own account to (TMDB, Real-Debrid,
-AniList) and for public indexes. You are responsible for complying with the laws
-of your jurisdiction and the terms of those services.
+open-media is dual-use client software for services you authenticate to yourself
+and optional public indexes. It does not host media or license copyrighted works.
+You are responsible for complying with the laws of your jurisdiction and
+third-party terms. See [docs/LEGAL.md](docs/LEGAL.md).

@@ -13,11 +13,13 @@ pieces are shaped the way they are.
 ## 1. Goals that shape the design
 
 1. **One pipeline for movies, series, and anime.** The differences (TMDB vs
-   AniList, IMDB vs MAL ids, nyaa vs general trackers) are isolated behind ports;
-   the orchestration is identical.
-2. **Debrid-first, P2P-capable.** Real-Debrid gives instant cached HTTPS streams;
-   when absent or uncached, the same chosen release is streamed P2P locally. The
-   player only ever sees an HTTP URL.
+   AniList, IMDB vs MAL ids, optional indexers) are isolated behind ports; the
+   orchestration is identical.
+2. **Optional stream resolution.** When the user enables source/debrid/P2P
+   adapters, a chosen candidate resolves to an HTTP URL the player can open:
+   debrid CDN when configured and available, otherwise local P2P if allowed. The
+   player only ever sees an HTTP URL. Adapters are off by default (see
+   `docs/LEGAL.md`).
 3. **Replaceable everything.** Debrid service, indexer, metadata source, tracker,
    player — each is an adapter behind a trait. New ones drop in without touching
    the core or the app.

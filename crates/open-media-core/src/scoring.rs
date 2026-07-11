@@ -18,7 +18,7 @@ use crate::stream::{CacheState, Quality, SourceCandidate};
 /// User preferences that shape ranking.
 #[derive(Debug, Clone)]
 pub struct ScoringPrefs {
-    /// Strongly prefer debrid-cached candidates (instant start, no seeding).
+    /// Strongly prefer debrid-cached candidates (instant HTTPS start when available).
     pub prefer_cached: bool,
     /// Desired quality tier; an exact match earns a bonus.
     pub target_quality: Option<Quality>,

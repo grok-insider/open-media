@@ -1,8 +1,9 @@
 //! # open-media-debrid
 //!
-//! [`DebridProvider`] adapters. A debrid service turns a magnet into an instant
-//! HTTPS link served from its own CDN — no P2P on the user's machine, no seeding,
-//! no VPN needed.
+//! [`DebridProvider`] adapters. A debrid service turns a magnet into an HTTPS
+//! link served from its CDN when the backend has the release (or can obtain it).
+//! That path does not open a local BitTorrent swarm; it is not a copyright license
+//! to the underlying work (see `docs/LEGAL.md`).
 //!
 //! - [`RealDebrid`] — the canonical flow (`addMagnet` → poll `info` →
 //!   `selectFiles` → poll → `unrestrict`).

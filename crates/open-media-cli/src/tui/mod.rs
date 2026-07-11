@@ -619,6 +619,19 @@ impl App {
                 self.media = Some(media);
                 self.nav.set_stack(stack);
                 self.recompute_visible();
+                if self.candidates.is_empty() {
+                    self.status =
+                        if !self.cfg.providers.torrentio && !self.cfg.providers.nyaa_direct {
+                            "No source providers enabled — read docs/LEGAL.md, then: \
+                         config set torrentio=true / nyaa_direct=true \
+                         (+ debrid token or allow_p2p=true)"
+                                .into()
+                        } else {
+                            "No sources found".into()
+                        };
+                } else {
+                    self.status = format!("{} sources", self.candidates.len());
+                }
             }
             Msg::PlayEnded => {
                 self.busy = false;

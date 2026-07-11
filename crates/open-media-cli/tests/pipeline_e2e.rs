@@ -112,7 +112,7 @@ fn build_engine(tmdb: &MockServer, torrentio: &MockServer, rd: &MockServer) -> E
             "testcfg",
             torrentio.uri(),
         )))
-        .resolver(Arc::new(HybridResolver::new(Some(debrid), p2p)))
+        .resolver(Arc::new(HybridResolver::new(Some(debrid), Some(p2p))))
         .scoring_prefs(ScoringPrefs::default())
         .build()
 }

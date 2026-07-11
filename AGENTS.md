@@ -4,17 +4,17 @@ Instructions for AI agents and contributors working on **open-media**.
 
 ## Project overview
 
-open-media is a Rust terminal app to watch **movies, series, and anime** from one
-interface. It discovers titles (TMDB / AniList), finds releasable files
-(Torrentio / nyaa.si), turns the chosen one into a playable URL via a **debrid**
-service (Real-Debrid: instant, cached, no P2P/seeding/VPN) or a **built-in P2P
-streamer** (librqbit), and plays it in **mpv** (driven over IPC) or **vlc**. On
-top of playback it layers resume, AniSkip intro/outro skipping, AniList/MAL
-progress tracking, Discord presence, and optional external subtitles.
+open-media is a **Rust terminal media client**: search metadata (movies, series,
+anime), manage a local library/watchlist, and drive **mpv** (IPC) or **vlc** with
+resume, AniSkip skip, AniList/MAL tracking, Discord presence, and optional
+subtitles.
 
-It is a from-scratch synthesis of the best ideas from `miru`, `toru`, `ani-cli`,
-`curd`, `littlejohn`, and `rdbatch` — see `docs/RESEARCH.md` for the analysis and
-`docs/ARCHITECTURE.md` for the design.
+**Optional** adapters (off by default) can query third-party indexes (Torrentio,
+nyaa) and resolve playback via a user-supplied debrid account or local P2P
+(librqbit on `127.0.0.1`). The project does not host media. See `docs/LEGAL.md`.
+
+Engineering prior art (`miru`, `toru`, `ani-cli`, `curd`, `littlejohn`,
+`rdbatch`) is analyzed in `docs/RESEARCH.md`; design in `docs/ARCHITECTURE.md`.
 
 - **Native Rust**, async (tokio). No shelling out to other media CLIs.
 - **Cargo workspace**, one crate per concern (see Module layout).
@@ -197,3 +197,9 @@ Releases are automated with **release-plz** (`release-plz.toml` +
   in `open-media-core` (a new capability) — not edits to the core/app; see "How to add an
   adapter".
 - Prefer fixing the contract in `open-media-core` over working around it in an adapter.
+- **Dual-use / legality:** torrent index adapters (Torrentio, nyaa) and local P2P
+  are **opt-in** (`providers.torrentio`, `providers.nyaa_direct`,
+  `streaming.allow_p2p` default off). Do not re-enable them by default without an
+  explicit product decision. Never add DRM circumvention, bundled credentials, or
+  project-hosted media/indexes. See `docs/LEGAL.md` and `CONTRIBUTING.md` → Scope
+  & legality.

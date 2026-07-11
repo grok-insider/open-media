@@ -6,7 +6,8 @@
 //!
 //! - [`HybridResolver`] — the [`StreamResolver`] strategy. If the candidate is
 //!   cached (or already has a direct URL) it returns the debrid URL; otherwise it
-//!   either warms the debrid cache or falls back to [`P2pEngine`].
+//!   either warms the debrid cache or falls back to [`P2pEngine`] when P2P is
+//!   enabled.
 //! - [`P2pEngine`] — wraps `librqbit`: adds the magnet, waits for metadata, picks
 //!   the largest video file, and exposes librqbit's Range-aware HTTP endpoint
 //!   (`/torrents/{id}/stream/{file_idx}`). This is the Rust equivalent of toru's
@@ -14,8 +15,9 @@
 //!
 //! Resolution policy: a direct URL plays as-is; with debrid configured, the
 //! candidate is warmed/unrestricted via the backend and, on failure (dead torrent
-//! or a warm-up that times out), falls back to P2P when a magnet is available.
-//! With no debrid, everything goes P2P.
+//! or a warm-up that times out), falls back to P2P when a magnet is available
+//! **and** a P2P engine was wired. With no debrid and no P2P, resolution fails
+//! with an actionable config error.
 //!
 //! [`SourceCandidate`]: open_media_core::stream::SourceCandidate
 //! [`Playback`]: open_media_core::stream::Playback
@@ -33,17 +35,25 @@ pub use p2p::P2pEngine;
 
 /// Picks debrid-direct vs P2P for each candidate.
 ///
-/// Holds an optional debrid backend (when a token is configured) and the P2P
-/// engine fallback. This is the single seam where "cached → instant URL,
-/// otherwise → warm cache or stream P2P" is decided.
+/// Holds an optional debrid backend (when a token is configured) and an optional
+/// P2P engine (when `streaming.allow_p2p` is enabled). This is the single seam
+/// where "cached → instant URL, otherwise → warm cache or stream P2P" is decided.
 pub struct HybridResolver {
     debrid: Option<Arc<dyn DebridProvider>>,
-    p2p: Arc<P2pEngine>,
+    p2p: Option<Arc<P2pEngine>>,
 }
 
 impl HybridResolver {
-    pub fn new(debrid: Option<Arc<dyn DebridProvider>>, p2p: Arc<P2pEngine>) -> Self {
+    pub fn new(debrid: Option<Arc<dyn DebridProvider>>, p2p: Option<Arc<P2pEngine>>) -> Self {
         Self { debrid, p2p }
+    }
+
+    fn p2p_disabled_error() -> CoreError {
+        CoreError::Config(
+            "local P2P is disabled (streaming.allow_p2p=false). \
+             Configure a debrid token, or set allow_p2p=true after reading docs/LEGAL.md"
+                .into(),
+        )
     }
 }
 
@@ -64,28 +74,41 @@ impl StreamResolver for HybridResolver {
         // 2. Debrid backend configured → add/warm/unrestrict via it. This handles
         //    both cached (instant) and uncached (RD downloads to its CDN, bounded
         //    by the adapter's poll timeout) picks. On any failure — a dead torrent
-        //    or a warm-up that times out — fall back to P2P when we have a magnet.
+        //    or a warm-up that times out — fall back to P2P when we have a magnet
+        //    and P2P is enabled.
         if let Some(debrid) = &self.debrid {
             match debrid.resolve_playback(candidate).await {
                 Ok(playback) => return Ok(playback),
-                Err(e) => match &magnet {
-                    Some(m) => {
+                Err(e) => match (&magnet, &self.p2p) {
+                    (Some(m), Some(p2p)) => {
                         tracing::warn!(error = %e, "debrid resolve failed; falling back to P2P");
-                        return self.p2p.stream_magnet(m).await;
+                        return p2p.stream_magnet(m).await;
                     }
-                    None => return Err(e),
+                    (Some(_), None) => {
+                        tracing::warn!(
+                            error = %e,
+                            "debrid resolve failed; P2P disabled — not falling back"
+                        );
+                        return Err(e);
+                    }
+                    (None, _) => return Err(e),
                 },
             }
         }
 
-        // 3. No debrid: stream the torrent locally over P2P.
+        // 3. No debrid: stream the torrent locally over P2P when enabled.
         let magnet = magnet
             .ok_or_else(|| CoreError::NoSource("candidate has no magnet or infohash".into()))?;
-        self.p2p.stream_magnet(&magnet).await
+        match &self.p2p {
+            Some(p2p) => p2p.stream_magnet(&magnet).await,
+            None => Err(Self::p2p_disabled_error()),
+        }
     }
 
     async fn cleanup(&self) {
-        self.p2p.cleanup().await;
+        if let Some(p2p) = &self.p2p {
+            p2p.cleanup().await;
+        }
     }
 }
 
@@ -169,7 +192,7 @@ mod tests {
     }
 
     fn resolver(debrid: Option<Arc<dyn DebridProvider>>) -> HybridResolver {
-        HybridResolver::new(debrid, Arc::new(P2pEngine::new(0, true)))
+        HybridResolver::new(debrid, Some(Arc::new(P2pEngine::new(0, true))))
     }
 
     #[tokio::test]
@@ -196,5 +219,26 @@ mod tests {
         let r = resolver(Some(Arc::new(FakeDebrid { ok: false })));
         let c = candidate(CacheState::Cached, None, None);
         assert!(r.resolve(&c).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn magnet_without_debrid_or_p2p_returns_config_error() {
+        let r = HybridResolver::new(None, None);
+        let c = candidate(CacheState::Uncached, Some("aabbccdd"), None);
+        let err = r.resolve(&c).await.unwrap_err();
+        match err {
+            CoreError::Config(msg) => {
+                assert!(msg.contains("allow_p2p"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn debrid_failure_without_p2p_propagates_debrid_error() {
+        let r = HybridResolver::new(Some(Arc::new(FakeDebrid { ok: false })), None);
+        let c = candidate(CacheState::Uncached, Some("aabbccdd"), None);
+        let err = r.resolve(&c).await.unwrap_err();
+        assert!(matches!(err, CoreError::Timeout(_)));
     }
 }
