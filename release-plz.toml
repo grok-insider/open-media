@@ -91,9 +91,7 @@ version_group = "om"
 [[package]]
 name = "open-media-subs"
 version_group = "om"
-# open-media-subs depends on the open-subtitle engine from crates.io (the open-subtitle-*
-# crates), so `cargo package` resolves it during change detection like every other
-# crate — it is no longer excluded from release processing.
+# open-media-subs depends on open-subtitle crates via git (not crates.io).
 
 # --- The binary: the single release unit (one `vX.Y.Z` tag + Release + changelog).
 [[package]]
