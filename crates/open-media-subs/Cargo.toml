@@ -15,18 +15,13 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-# The open-subtitle engine, consumed from crates.io. The crates are published
-# under `open-subtitle-*` (the generic `os-*` names are taken by unrelated crates),
-# but imported here as `os_core`/`os_config`/… via the `package = …` rename, so
-# the rest of open-media-subs is unchanged. open-media-subs is the only place that names them — the
-# rest of open-media stays behind the SubtitleProvider port.
-#
-# Registry (not git) deps are what let `cargo package` — which release-plz runs for
-# change detection — resolve them, so open-media-subs is no longer excluded from releases.
-os-core = { package = "open-subtitle-core", version = "0.2.1" }
-os-config = { package = "open-subtitle-config", version = "0.2.1" }
-os-compose = { package = "open-subtitle-compose", version = "0.2.1" }
-os-engine = { package = "open-subtitle-engine", version = "0.2.1" }
+# open-subtitle engine via git (org policy: no crates.io for shipper crates).
+# Pin rev deliberately when bumping; refresh with cargo update after rev change.
+# package= renames keep `use os_core::…` imports stable.
+os-core = { package = "open-subtitle-core", git = "https://github.com/grok-insider/open-subtitle", rev = "ebcb327c7288d3233aac4ff84551a22341d51106" }
+os-config = { package = "open-subtitle-config", git = "https://github.com/grok-insider/open-subtitle", rev = "ebcb327c7288d3233aac4ff84551a22341d51106" }
+os-compose = { package = "open-subtitle-compose", git = "https://github.com/grok-insider/open-subtitle", rev = "ebcb327c7288d3233aac4ff84551a22341d51106" }
+os-engine = { package = "open-subtitle-engine", git = "https://github.com/grok-insider/open-subtitle", rev = "ebcb327c7288d3233aac4ff84551a22341d51106" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
