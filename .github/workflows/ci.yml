@@ -1,20 +1,32 @@
 name: CI
 
+# Status checks (fmt/clippy/test, msrv) run on pull requests only — not on bare
+# pushes to master/dev. That way force-pushes and direct pushes do not attach
+# failed checks to branch tips.
+#
+# Nix/cachix publish runs only after a PR into master is merged (or on v* tags /
+# manual dispatch). There is no "push came from a PR" flag on push events, so
+# post-merge work uses pull_request closed + merged.
+
 on:
-  push:
-    branches: [main, master]
-    tags: ["v*"]
   pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  # Fast Rust gate on every push/PR: fmt + clippy + the hermetic test suite.
+  # Fast Rust gate on every PR open/sync (and tags / manual dispatch).
   rust:
     name: fmt + clippy + test
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'push'
+      || (github.event_name == 'pull_request' && github.event.action != 'closed')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +48,10 @@ jobs:
   # for everyday dev/CI builds.
   msrv:
     name: msrv (cargo check @ 1.82)
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'push'
+      || (github.event_name == 'pull_request' && github.event.action != 'closed')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,16 +62,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
 
-  # On main/master pushes (plus tags + manual dispatch): build the `open-media` package
-  # with Nix and push every store path to the grok-insider cachix cache, so NixOS
-  # consumers pointing at github:grok-insider/open-media pull instead of compiling.
-  # PRs never publish (no secrets on fork PRs).
+  # After a PR is merged into master (or on v* tags / manual dispatch): build the
+  # `open-media` package with Nix and push store paths to the grok-insider cachix
+  # cache. Not on bare push to master; not on open PR synchronize (no secrets
+  # needed for fork PRs either).
   build:
     name: nix build + cachix push (x86_64-linux)
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'pull_request'
+          && github.event.action == 'closed'
+          && github.event.pull_request.merged == true
+          && github.event.pull_request.base.ref == 'master')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On PR closed, checkout the merge commit on the base branch.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31

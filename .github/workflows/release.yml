@@ -4,21 +4,22 @@ name: Release
 # release-plz.toml). Repo admins use Manual Version Bump for deliberate
 # major/minor releases.
 #
-# Flow on every push to master:
+# Runs only when a PR into master is *merged* (not on bare/force push to master):
 #   * release-plz-pr      — opens/updates the "release PR" (bumps the single
 #                           [workspace.package].version + Cargo.lock, regenerates
 #                           CHANGELOG.md from Conventional Commits).
-#   * release-plz-release — when that PR is merged, creates the `vX.Y.Z` tag +
-#                           GitHub Release from the changelog (no crates.io).
+#   * release-plz-release — when a version-bump PR was merged, creates the
+#                           `vX.Y.Z` tag + GitHub Release (no crates.io).
 #   * artifacts           — builds release archives for Linux/macOS/Windows.
 #
 # Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
-# master push and pushes `open-media-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
-# version straight from Cargo.toml). Workspace crates are not published to crates.io
-# (`publish = false` in release-plz.toml and Cargo.toml).
+# master merge and pushes `open-media-X.Y.Z` to grok-insider.cachix.org (flake.nix
+# reads the version straight from Cargo.toml). Workspace crates are not published
+# to crates.io (`publish = false` in release-plz.toml and Cargo.toml).
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [master]
 
 # Least privilege by default; each job elevates only what it needs.
@@ -26,11 +27,13 @@ permissions:
   contents: read
 
 jobs:
-  # Keep the release PR up to date on every push. Merging that PR is what later
-  # triggers the `release` job (via the resulting push to master).
+  # Keep the release PR up to date after each merge into master. Merging the
+  # release PR is what later cuts the tag (same closed+merged event).
   release-plz-pr:
     name: release-plz PR
-    if: github.repository_owner == 'grok-insider'
+    if: >
+      github.event.pull_request.merged == true
+      && github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -101,7 +104,9 @@ jobs:
   # whether a release was cut (and its tag/version) to the artifact job below.
   release-plz-release:
     name: release-plz release
-    if: github.repository_owner == 'grok-insider'
+    if: >
+      github.event.pull_request.merged == true
+      && github.repository_owner == 'grok-insider'
     runs-on: ubuntu-latest
     permissions:
       contents: write

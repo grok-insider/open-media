@@ -188,6 +188,11 @@ Releases are automated with **release-plz** (`release-plz.toml` +
   pushes `open-media-X.Y.Z` to cachix (`flake.nix` reads the version). Workspace
   crates are not published to crates.io. Repo admins can run the Manual Version
   Bump workflow when a minor/major milestone should ship.
+- **Actions triggers:** CI status checks (`fmt + clippy + test`, msrv) run on
+  **pull requests** only — not on bare pushes to `master`/`dev`. Release-plz,
+  release artifacts, and Nix/cachix publish run only when a PR into `master` is
+  **merged** (`pull_request` closed + `merged`), not on force-push. Tags `v*` and
+  `workflow_dispatch` remain available for intentional rebuilds.
 
 ## Conventions
 
