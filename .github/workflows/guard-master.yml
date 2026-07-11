@@ -1,15 +1,14 @@
-name: guard master
-
-# Enforce the integration-branch policy: only `dev` may open a PR into `master`.
-# `master` is the released branch; all feature/fix branches land in `dev` first,
-# and a single `dev -> master` PR is the only sanctioned path. GitHub branch
-# protection can require a check but can't express "only this branch may merge",
-# so this job is that check: it fails any PR into `master` whose head is not
-# `dev`. Add it to master's required status checks to make it blocking.
+# Canonical org guard — copy to <product>/.github/workflows/guard-master.yml
 #
-# Exception: release-plz, release-please, and manual version-bump workflows open
-# machine-generated PRs straight into `master`. Those are sanctioned release
-# paths, so they are allowlisted here — otherwise no release could ever merge.
+# Enforce Model A: only `dev` (or release-bot heads) may open a PR into `master`.
+# Add the job name `only dev into master` to master's required status checks.
+#
+# Allowed heads:
+#   - dev
+#   - release-plz-* / release-plz-manual-*
+#   - release-please--* / release-please-manual-*
+
+name: guard master
 
 on:
   pull_request:
@@ -20,7 +19,7 @@ jobs:
     name: only dev into master
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the PR head branch is dev (or a release branch)
+      - name: Verify PR head is dev or a release branch
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
@@ -31,6 +30,7 @@ jobs:
             *)
               echo "::error::PRs into 'master' must come from 'dev' (got '$HEAD_REF')."
               echo "Land your work in 'dev' first, then open a single 'dev -> master' PR."
+              echo "Release bots may use release-plz-* / release-please--* heads."
               exit 1
               ;;
           esac
