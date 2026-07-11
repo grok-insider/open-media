@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "open-media core: domain model, ports (traits), and scoring. Zero I/O."
 
 [dependencies]

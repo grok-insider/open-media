@@ -184,9 +184,9 @@ Releases are automated with **release-plz** (`release-plz.toml` +
   `dev`→`master` integration PR (release-plz PRs are the only other branch allowed
   into `master`). A `feat:`/`fix:` on `master` makes release-plz maintain a patch
   release PR (version bump + `CHANGELOG` + `Cargo.lock`); merging it tags
-  `vX.Y.Z`, publishes crates to crates.io in dependency order, creates the GitHub
-  Release + prebuilt `open-media` archives, and CI pushes `open-media-X.Y.Z` to
-  cachix (`flake.nix` reads the version). Repo admins can run the Manual Version
+  `vX.Y.Z`, creates the GitHub Release + prebuilt `open-media` archives, and CI
+  pushes `open-media-X.Y.Z` to cachix (`flake.nix` reads the version). Workspace
+  crates are not published to crates.io. Repo admins can run the Manual Version
   Bump workflow when a minor/major milestone should ship.
 
 ## Conventions

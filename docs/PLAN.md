@@ -115,10 +115,11 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
       `rebuild` installs `open-media` from the cache (no compile).
 - [x] Automated releases (`release-plz.toml` + `.github/workflows/release.yml`):
       `dev` → `master` integration → patch release PR (version bump +
-      `CHANGELOG`) → merging it tags `vX.Y.Z`, publishes crates to crates.io,
-      creates the GitHub Release + prebuilt `open-media` archives, and cachix gets
-      `open-media-X.Y.Z`. Conventional Commits drive patch releases; repo admins
-      use the Manual Version Bump workflow for minor/major milestones.
+      `CHANGELOG`) → merging it tags `vX.Y.Z`, creates the GitHub Release +
+      prebuilt `open-media` archives, and cachix gets `open-media-X.Y.Z`.
+      Workspace crates are not published to crates.io. Conventional Commits drive
+      patch releases; repo admins use the Manual Version Bump workflow for
+      minor/major milestones.
 - [x] Bootstrap: `v0.1.0` tagged + GitHub Release published (anchors release-plz).
       Pipeline verified live — the release PR opens on `feat`/`fix` and no-ops
       otherwise, and the `v*` tag's CI pushed `open-media-0.1.0` to cachix.
@@ -163,8 +164,8 @@ this section summarizes the roadmap-relevant state.
   wider `config show`/`set`; anime episode titles from Jikan/streaming metadata;
   positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB bridge;
   keyless Torrentio tracker parsing; shared `open-media-net` HTTP timeouts/retry;
-  source-level playback failover; MSRV CI; crates.io publishing for every crate;
-  and `open-media --version` naming cleanup.
+  source-level playback failover; MSRV CI; and `open-media --version` naming
+  cleanup. (crates.io publishing was offered briefly and later withdrawn.)
 - **0.6.2–0.6.3 shipped work:** local library/watchlist (new `LibraryStore` port +
   SQLite adapter, `open-media library {list,plan,watching,watched}`, automatic
   status/progress updates during playback with best-effort tracker dual-write);

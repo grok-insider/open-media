@@ -108,12 +108,6 @@ attaches `open-media-<version>-<target>.tar.gz` (+ `.sha256`) for static Linux
 (x86_64/aarch64 musl), native macOS (x86_64/arm64), and native Windows (x86_64).
 Download, verify, extract, and put `open-media` on your `PATH`.
 
-**Cargo / crates.io**:
-
-```sh
-cargo install open-media-cli
-```
-
 **Nix / NixOS** (x86_64-linux; prebuilt on the `grok-insider` cachix cache):
 
 ```nix

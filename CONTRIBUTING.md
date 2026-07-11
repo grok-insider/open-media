@@ -91,11 +91,12 @@ versions or write changelog entries by hand:
    `version.workspace = true`), refreshes `Cargo.lock`, and regenerates
    `CHANGELOG.md` from the commits since the last tag. The workflow then enriches
    that changelog section with AI-written user-facing notes.
-4. **Merge the release PR to ship.** It tags `vX.Y.Z`, publishes every crate to
-   crates.io in dependency order, creates the GitHub Release, and attaches
-   prebuilt `open-media` archives for Linux/macOS/Windows. The same push makes CI build and push
-   `open-media-X.Y.Z` to the `grok-insider` cachix cache (`flake.nix` reads the version from
-   `Cargo.toml`), and `open-media --version` reports it.
+4. **Merge the release PR to ship.** It tags `vX.Y.Z`, creates the GitHub
+   Release, and attaches prebuilt `open-media` archives for Linux/macOS/Windows.
+   Workspace crates are **not** published to crates.io. The same push makes CI
+   build and push `open-media-X.Y.Z` to the `grok-insider` cachix cache
+   (`flake.nix` reads the version from `Cargo.toml`), and `open-media --version`
+   reports it.
 5. For deliberate minor/major milestones, a repo admin runs the **Manual Version
    Bump** workflow. It opens a `release-plz-manual-v…` PR into `master` that
    updates `Cargo.toml`/`Cargo.lock`; merging that PR ships the requested version
@@ -103,9 +104,8 @@ versions or write changelog entries by hand:
 
 **One-time setup.** Enable *Settings → Actions → General → "Allow GitHub Actions
 to create and approve pull requests"* (so release-plz can open the release PR);
-configure `RELEASE_PLZ_TOKEN`, `CARGO_REGISTRY_TOKEN`, `OPENROUTER_API_KEY`, and
-`CACHIX_AUTH_TOKEN` secrets. To anchor a fresh release history, tag the current
-baseline once:
+configure `RELEASE_PLZ_TOKEN`, `OPENROUTER_API_KEY`, and `CACHIX_AUTH_TOKEN`
+secrets. To anchor a fresh release history, tag the current baseline once:
 
 ```bash
 git tag -a v0.1.0 -m "open-media 0.1.0" && git push origin v0.1.0

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Tracker (AniList/MAL/composite), Enricher (AniSkip/Jikan), and Discord presence."
 
 [dependencies]

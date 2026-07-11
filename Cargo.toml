@@ -26,6 +26,8 @@ rust-version = "1.82"
 license = "MIT"
 authors = ["Grok Insider <admin@grokinsider.net>"]
 repository = "https://github.com/grok-insider/open-media"
+# App workspace, not a library API. Install via GitHub Release / Nix / source.
+publish = false
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---

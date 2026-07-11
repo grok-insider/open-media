@@ -8,8 +8,8 @@ nice-to-haves in `future-features.md`.
 
 The full engineering plan (PLAN Phases 0–10) is **implemented and shipping**; the
 current workspace version is `0.6.3`. The app covers discover → source → resolve
-→ play, session features, the TUI, Nix/CI packaging, crates.io publishing, and
-prebuilt Linux/macOS/Windows archives. Post-MVP work already landed includes
+→ play, session features, the TUI, Nix/CI packaging, and prebuilt
+Linux/macOS/Windows archives. Post-MVP work already landed includes
 keyless Cinemeta, AniList/MAL→IMDB bridging for anime, external subtitle fetching,
 episode titles, theme support, poster/still rendering, source fallback,
 auto-advance/binge, search pagination for TMDB/AniList, and Windows IPC support.
@@ -102,7 +102,7 @@ The session features that make it pleasant.
 | Subtitles | OpenSubtitles/SubDL/Jimaku via open-subtitle | v0.3 |
 | Packaging | Nix flake + HM module | v0.4 |
 | Packaging | Automated releases (release-plz → GitHub Releases + cachix) | v0.4 |
-| Packaging | crates.io publishing (`cargo install open-media-cli`) | v0.6 |
+| Packaging | crates.io publishing (withdrawn; install via Release/Nix/source) | — |
 | Platform | Windows mpv/Discord IPC + release artifact | v0.2 |
 | Watch-together | syncplay | future |
 | Library mode | Zurg/Jellyfin-style RD library | future |

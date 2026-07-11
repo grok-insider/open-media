@@ -9,13 +9,13 @@ name: Release
 #                           [workspace.package].version + Cargo.lock, regenerates
 #                           CHANGELOG.md from Conventional Commits).
 #   * release-plz-release — when that PR is merged, creates the `vX.Y.Z` tag +
-#                           GitHub Release from the changelog and publishes crates.
+#                           GitHub Release from the changelog (no crates.io).
 #   * artifacts           — builds release archives for Linux/macOS/Windows.
 #
 # Cachix is intentionally NOT handled here: ci.yml's `build` job runs on the same
 # master push and pushes `open-media-X.Y.Z` to grok-insider.cachix.org (flake.nix reads the
-# version straight from Cargo.toml). Crates.io publishing is handled by the
-# release-plz release job below.
+# version straight from Cargo.toml). Workspace crates are not published to crates.io
+# (`publish = false` in release-plz.toml and Cargo.toml).
 
 on:
   push:
@@ -123,10 +123,7 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
-          # Publish each crate to crates.io in dependency order (publish = true in
-          # release-plz.toml). Token is the `open-media-publish` crates.io API key
-          # (publish-new + publish-update scopes), owned by grok-insider.
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
 
   # Resolve the just-created release's tag/version once (jq on Linux) so the
   # cross-platform matrix (incl. Windows) doesn't need jq.

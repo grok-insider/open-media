@@ -24,7 +24,7 @@ anime per-episode titles from Jikan/streaming metadata; keyless Torrentio tracke
 parsing; positional `open-media "query"` TUI prefill; Fribb AniList/MAL→IMDB
 bridge; subtitles via `open-media-subs`; Windows mpv/Discord IPC and release
 artifact; shared HTTP timeouts/retry in `open-media-net`; source-level playback
-failover; MSRV CI; crates.io publishing; local library/watchlist (`LibraryStore`
+failover; MSRV CI; local library/watchlist (`LibraryStore`
 port, SQLite adapter, `open-media library` subcommand, playback auto-status);
 TUI Home screen with Continue Watching + Library screen with status filters;
 mpv playlist next-episode playback (`PlaylistControl` port); opt-in mpv
@@ -117,8 +117,8 @@ Releases use release-plz plus the GitHub workflow:
 - `feat:`/`fix:` commits on `master` make release-plz maintain a patch release PR;
   repo admins use the Manual Version Bump workflow for deliberate minor/major
   milestones.
-- Merging the release PR tags `vX.Y.Z`, publishes every `open-media-*` crate to
-  crates.io in dependency order, creates the GitHub Release, uploads prebuilt
-  archives, and lets CI push the Nix closure to cachix.
+- Merging the release PR tags `vX.Y.Z`, creates the GitHub Release, uploads
+  prebuilt archives, and lets CI push the Nix closure to cachix. Workspace
+  crates are not published to crates.io.
 - `open-media-subs` now depends on registry `open-subtitle-*` crates, so the old
   git-dependency/release-plz `continue-on-error` caveat is gone.
