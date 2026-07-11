@@ -132,7 +132,7 @@ Legend: `[x]` done · `[ ]` todo · **Mn** = user-visible milestone.
 ## Post-0.1 hardening (ongoing)
 
 After 0.1.0, several audit, portability, release, and UX passes landed. Current
-workspace version: `0.6.3`. `CHANGELOG.md` remains the release source of truth;
+workspace version: `0.0.1`. `CHANGELOG.md` remains the release source of truth;
 this section summarizes the roadmap-relevant state.
 
 - **Keyless metadata:** `CinemetaProvider` — movies/series search with no TMDB key;

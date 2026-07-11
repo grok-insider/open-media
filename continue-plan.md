@@ -1,6 +1,6 @@
 # continue-plan.md
 
-Actionable engineering follow-ups (current as of 0.6.3). The broader backlog
+Actionable engineering follow-ups (current as of 0.0.1). The broader backlog
 lives in `future-features.md`; this file is for concrete work that is close enough
 to pick up.
 

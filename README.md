@@ -8,9 +8,9 @@
 local library, drive **mpv**/**vlc** with resume and tracking. Optional adapters
 can resolve playable streams via your own debrid account or local P2P.
 
-> **Status: released — v0.6.3.** Discover → optional sources → resolve → play is
-> implemented, tested, packaged (Nix + prebuilt binaries), and runs on
-> **Linux, macOS, and Windows**. See [CHANGELOG.md](CHANGELOG.md).
+> **Status: v0.0.1.** Dual-use terminal media client — metadata, library, and
+> player control; optional source adapters off by default. See
+> [CHANGELOG.md](CHANGELOG.md) and [docs/LEGAL.md](docs/LEGAL.md).
 >
 > **Legal:** open-media is dual-use client software. It does not host media or
 > grant rights to works. You are responsible for lawful use in your jurisdiction.

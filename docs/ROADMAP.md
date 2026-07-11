@@ -7,7 +7,7 @@ nice-to-haves in `future-features.md`.
 ## Status (2026-07)
 
 The full engineering plan (PLAN Phases 0–10) is **implemented and shipping**; the
-current workspace version is `0.6.3`. The app covers discover → source → resolve
+current workspace version is `0.0.1`. The app covers discover → source → resolve
 → play, session features, the TUI, Nix/CI packaging, and prebuilt
 Linux/macOS/Windows archives. Post-MVP work already landed includes
 keyless Cinemeta, AniList/MAL→IMDB bridging for anime, external subtitle fetching,
