@@ -264,6 +264,20 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
                     let item = &app.continue_watching[*i];
                     continue_list_item(item, &app.theme, inner_w)
                 }
+                HomeRow::CatalogAiring => action_list_item(
+                    "Airing",
+                    "anime currently releasing",
+                    "A",
+                    &app.theme,
+                    inner_w,
+                ),
+                HomeRow::CatalogSeasonal => action_list_item(
+                    "This Season",
+                    "current anime broadcast season",
+                    "S",
+                    &app.theme,
+                    inner_w,
+                ),
                 // No leading arrow — list highlight_symbol ("▶ ") owns selection.
                 HomeRow::OpenLibrary => action_list_item(
                     "Library",

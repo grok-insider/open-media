@@ -105,10 +105,11 @@ versions or write changelog entries by hand:
 **One-time setup.** Enable *Settings → Actions → General → "Allow GitHub Actions
 to create and approve pull requests"* (so release-plz can open the release PR);
 configure `RELEASE_PLZ_TOKEN`, `OPENROUTER_API_KEY`, and `CACHIX_AUTH_TOKEN`
-secrets. To anchor a fresh release history, tag the current baseline once:
+secrets. To anchor a fresh release history, tag the current baseline once (the
+public version line currently starts at `0.0.1`):
 
 ```bash
-git tag -a v0.1.0 -m "open-media 0.1.0" && git push origin v0.1.0
+git tag -a v0.0.1 -m "open-media 0.0.1" && git push origin v0.0.1
 ```
 
 ## Adding an adapter — checklist

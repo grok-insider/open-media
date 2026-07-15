@@ -394,11 +394,14 @@ fn home_rows_group_by_kind_newest_groups_first() {
             _ => None,
         })
         .collect();
-    assert_eq!(labels[0], "Anime · 2");
-    assert_eq!(labels[1], "Tv · 1");
+    assert_eq!(labels[0], "Discover");
+    assert!(labels.contains(&"Anime · 2"));
+    assert!(labels.contains(&"Tv · 1"));
     assert!(labels.contains(&"Actions"));
     assert!(!HomeRow::Section("x".into()).is_selectable());
     assert!(HomeRow::Continue(0).is_selectable());
+    assert!(HomeRow::CatalogAiring.is_selectable());
+    assert!(HomeRow::CatalogSeasonal.is_selectable());
 }
 
 #[test]

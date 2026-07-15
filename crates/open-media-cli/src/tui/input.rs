@@ -253,6 +253,12 @@ pub(super) fn select_home(app: &mut App) {
             };
             open_library_item(app, item);
         }
+        HomeRow::CatalogAiring => {
+            open_catalog(app, open_media_core::model::CatalogKind::AiringAnime);
+        }
+        HomeRow::CatalogSeasonal => {
+            open_catalog(app, open_media_core::model::CatalogKind::SeasonalAnime);
+        }
         HomeRow::OpenLibrary => {
             app.library_filter = super::state::LibraryFilter::All;
             app.go_root(Root::Library);
@@ -261,6 +267,45 @@ pub(super) fn select_home(app: &mut App) {
             app.go_root(Root::Search);
         }
     }
+}
+
+/// Load a curated AniList catalog into the Results screen (search-like list).
+fn open_catalog(app: &mut App, kind: open_media_core::model::CatalogKind) {
+    app.clear_drill_state();
+    app.search_id = app.search_id.wrapping_add(1);
+    let search_id = app.search_id;
+    app.busy = true;
+    app.results.clear();
+    app.results_state.select(None);
+    app.status = format!("Loading {}…", kind.label());
+    // Stay on Home as root so Esc returns to Home; Results is the drill screen.
+    app.nav.root = Root::Home;
+    app.nav.set_stack([Screen::Results]);
+    let engine = app.engine.clone();
+    let tx = app.tx.clone();
+    tokio::spawn(async move {
+        match engine.catalog(kind).await {
+            Ok(results) => {
+                let n = results.len();
+                let _ = tx.send(Msg::SearchProgress {
+                    search_id,
+                    progress: open_media_app::SearchProgress {
+                        results,
+                        failed_providers: 0,
+                        failed_provider_names: Vec::new(),
+                        finished: true,
+                    },
+                });
+                let _ = tx.send(Msg::Status(format!("{} · {n} titles", kind.label())));
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::SearchError {
+                    search_id,
+                    error: e.to_string(),
+                });
+            }
+        }
+    });
 }
 
 pub(super) fn select_library_item(app: &mut App) {
@@ -467,7 +512,9 @@ async fn fetch_episodes(
     media: Media,
     season: u32,
 ) {
-    let episodes = match engine.episodes(&media.ids, season).await {
+    // Prefer episodes_for: metadata list + optional index-title discovery when
+    // the provider cannot enumerate a full season (airing / incomplete).
+    let episodes = match engine.episodes_for(&media, season).await {
         Ok(eps) if !eps.is_empty() => eps,
         _ => fallback_episodes(season, media.episode_count.unwrap_or(1).max(1)),
     };
