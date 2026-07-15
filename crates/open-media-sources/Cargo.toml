@@ -20,6 +20,8 @@ urlencoding = { workspace = true }
 regex = { workspace = true }
 quick-xml = { workspace = true }
 tracing = { workspace = true }
+# `time`: pace nyaa GETs and back off on 429/503 (no higher public rate tier).
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

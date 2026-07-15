@@ -1,15 +1,19 @@
 //! Anime season disambiguation for nyaa.
 //!
-//! AniList models each season of an anime as a **separate, flat-numbered entry**
-//! (S1 episodes 1..20, S2 episodes 1..12 under its own id), and reports a single
-//! synthetic "Season 1" for each. So the engine can't tell seasons apart by
-//! number — the only reliable signal is the **title** ("2nd Season" / "Season 2"
-//! / "S2" / a trailing roman numeral).
+//! Two metadata models both feed this module:
+//!
+//! - **AniList**: each season is a **separate, flat-numbered entry** (S1
+//!   episodes 1..20, S2 episodes 1..12 under its own id), with a synthetic
+//!   "Season 1" on every entry. The season signal lives in the **title**
+//!   (`"2nd Season"` / `"Season 2"` / `"S2"` / a trailing roman numeral).
+//! - **TMDB/Cinemeta**: one franchise title with **no** season suffix, and the
+//!   real season number on the request (`SourceQuery::season` /
+//!   `imdb_season`). [`resolve_season_ordinal`] merges both signals.
 //!
 //! Without this, a nyaa search for `"<base> 01"` returns episode-1 releases from
 //! *every* season (`- 01`, `S2 - 01`, `2nd Season - 01`). These helpers extract a
-//! season ordinal from the selected entry's title, and classify each release by
-//! the season(s) it covers so the wrong season can be filtered out.
+//! season ordinal, and classify each release by the season(s) it covers so the
+//! wrong season can be filtered out.
 //!
 //! Handled: explicit numeric markers (`S2`, `Season 2`, `2nd Season`), multi-season
 //! ranges (`S01-S05`, `Seasons 1-5`), and trailing roman numerals (`… II`). Also
@@ -54,14 +58,32 @@ re!(R_S_N, r"\bs0*(\d+)\b");
 // anime release the franchise name is the base, so a trailing "2nd"/"3rd" is a
 // sequel marker even without the word "Season".
 re!(R_NTH_BARE, r"\b(\d+)(?:st|nd|rd|th)\b");
-re!(R_ROMAN_START, r"^\s*(viii|vii|vi|iv|ix|iii|ii|x|v)\b");
+// Roman season markers may sit mid-decoration after an English subtitle
+// ("… Jobless Reincarnation II - 01"), not only at the start of the tail.
+// Longer forms first so "viii" wins over "vi"/"v".
+re!(R_ROMAN_WORD, r"\b(viii|vii|vi|iv|ix|iii|ii|x|v)\b");
+// Tokyo Ghoul–style named sequel ("… :re", "… re - 01") treated as season 2.
+re!(R_RE_SEQUEL, r"(?:^|[\s\-_.:]+)re(?:\s|$|[\[(.\-_])");
 
 // Episode coordinate in the decoration: a `-`/`~`/`#`-introduced number, with an
 // optional `~`/`-` range end (`- 21`, `- 01 ~ 20`, `#01-12`). Anchored on a
 // `-`/`~`/`#` lead so a bare resolution/year token elsewhere isn't read as the
 // episode. 1–4 digits covers absolute counts without matching `1080`/`2024`,
 // which are not `-`-led in a release name.
-re!(R_EPISODE, r"[-~#]\s*0*(\d{1,4})(?:\s*[-~]\s*0*(\d{1,4}))?");
+// Also accepts international batch connectors: `to`, `a`, `&`, `+` (e.g. `01 a 12`).
+re!(
+    R_EPISODE,
+    r"[-~#]\s*0*(\d{1,4})(?:\s*(?:[-~]|to|a|&|\+)\s*0*(\d{1,4}))?"
+);
+// Spanish/EU bare ranges without a leading dash (`01 a 12`, `01 to 24`).
+re!(
+    R_EPISODE_RANGE_BARE,
+    r"\b0*(\d{1,4})\s+(?:to|a|&|\+)\s+0*(\d{1,4})\b"
+);
+// CJK season markers in a *metadata* title ("第2期", "第 3 季").
+re!(M_CJK_SEASON, r"第\s*0*(\d+)\s*[季期기]");
+// CJK episode markers in a *normalized* decoration ("第05話").
+re!(R_CJK_EPISODE, r"第\s*0*(\d+)\s*[話话集화회편]");
 
 /// Which season(s) a release covers. `None` means no marker → treated as the
 /// first season (the bare `- 01` convention).
@@ -81,6 +103,33 @@ impl SeasonMatch {
             SeasonMatch::Range(a, b) => *a <= ordinal && ordinal <= *b,
         }
     }
+
+    /// Multi-season batch (`S01-S04`, `Seasons 1-5`) — noisy for single-episode play.
+    pub fn is_multi_season_range(&self) -> bool {
+        matches!(self, SeasonMatch::Range(a, b) if a != b)
+    }
+}
+
+/// Pick the season ordinal used to filter/search releases.
+///
+/// Two metadata models collide here:
+/// - **AniList-style**: each season is its own entry. Titles carry the marker
+///   (`"2nd Season"`, `"S2"`, roman `II`) while `season` on the request is
+///   usually `1`. Prefer the title-derived ordinal when it is &gt; 1.
+/// - **TMDB/Cinemeta multi-season**: one franchise title with no marker, and
+///   the real season number lives on the request (`season` / `imdb_season`).
+///   Prefer those when the title is unmarked.
+///
+/// Precedence: title marker (&gt; 1) → `imdb_season` → `season` → title default.
+pub fn resolve_season_ordinal(
+    title_ordinal: u32,
+    season: Option<u32>,
+    imdb_season: Option<u32>,
+) -> u32 {
+    if title_ordinal > 1 {
+        return title_ordinal;
+    }
+    imdb_season.or(season).unwrap_or(title_ordinal).max(1)
 }
 
 /// Split a metadata title into `(base name, season ordinal)`.
@@ -99,7 +148,7 @@ pub fn parse_title_season(title: &str) -> (String, u32) {
             best = Some((start, ord));
         }
     };
-    for re in [&M_NTH_SEASON, &M_SEASON_N, &M_S_N] {
+    for re in [&M_NTH_SEASON, &M_SEASON_N, &M_S_N, &M_CJK_SEASON] {
         if let Some(c) = re.captures(title) {
             let start = c.get(0).unwrap().start();
             let ord = c[1].parse().unwrap_or(1);
@@ -147,8 +196,12 @@ pub fn release_season(release_title: &str, base: &str) -> SeasonMatch {
             }
         }
     }
-    if let Some(c) = R_ROMAN_START.captures(decoration) {
+    if let Some(c) = R_ROMAN_WORD.captures(decoration) {
         return SeasonMatch::Single(roman_to_u32(&c[1]));
+    }
+    // Named sequel with no numeric marker (Tokyo Ghoul :re, etc.).
+    if R_RE_SEQUEL.is_match(decoration) {
+        return SeasonMatch::Single(2);
     }
     SeasonMatch::None
 }
@@ -194,19 +247,65 @@ pub fn release_episode(release_title: &str, base: &str) -> EpisodeMatch {
             None => rel.as_str(),
         },
     };
-    match R_EPISODE.captures(decoration) {
-        Some(c) => {
-            let a: u32 = match c[1].parse() {
-                Ok(v) => v,
-                Err(_) => return EpisodeMatch::None,
-            };
-            match c.get(2).and_then(|m| m.as_str().parse::<u32>().ok()) {
-                Some(b) => EpisodeMatch::Range(a.min(b), a.max(b)),
-                None => EpisodeMatch::Single(a),
+    if let Some(c) = R_EPISODE.captures(decoration) {
+        let a: u32 = match c[1].parse() {
+            Ok(v) => v,
+            Err(_) => return EpisodeMatch::None,
+        };
+        return match c.get(2).and_then(|m| m.as_str().parse::<u32>().ok()) {
+            Some(b) => EpisodeMatch::Range(a.min(b), a.max(b)),
+            None => EpisodeMatch::Single(a),
+        };
+    }
+    // Bare international ranges without a leading dash (`01 a 12`, `01 to 24`).
+    if let Some(c) = R_EPISODE_RANGE_BARE.captures(decoration) {
+        if let (Ok(a), Ok(b)) = (c[1].parse::<u32>(), c[2].parse::<u32>()) {
+            if b > a {
+                return EpisodeMatch::Range(a, b);
             }
         }
-        None => EpisodeMatch::None,
     }
+    if let Some(c) = R_CJK_EPISODE.captures(decoration) {
+        if let Ok(n) = c[1].parse::<u32>() {
+            return EpisodeMatch::Single(n);
+        }
+    }
+    EpisodeMatch::None
+}
+
+/// Cap for discovered episode numbers (guards against year/res false positives).
+const DISCOVER_EP_MAX: u32 = 500;
+
+/// Scan release titles for the highest episode number belonging to `ordinal`.
+///
+/// Used when metadata cannot enumerate a season (airing OVAs, incomplete
+/// AniList counts): scrape/index results become the episode list upper bound.
+/// Returns `None` when nothing parseable is found.
+pub fn discover_max_episode<'a, I>(titles: I, base: &str, ordinal: u32) -> Option<u32>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut max = 0u32;
+    for title in titles {
+        let season = release_season(title, base);
+        // Multi-season packs are not a reliable per-season episode ceiling.
+        if season.is_multi_season_range() {
+            continue;
+        }
+        if !season.covers(ordinal) {
+            continue;
+        }
+        match release_episode(title, base) {
+            EpisodeMatch::Single(n) if (1..=DISCOVER_EP_MAX).contains(&n) => {
+                max = max.max(n);
+            }
+            EpisodeMatch::Range(_, end) if (1..=DISCOVER_EP_MAX).contains(&end) => {
+                max = max.max(end);
+            }
+            _ => {}
+        }
+    }
+    (max > 0).then_some(max)
 }
 
 /// Lowercase; keep alphanumerics plus `-`/`~` (so season/episode ranges survive);
@@ -268,6 +367,28 @@ mod tests {
             parse_title_season("Sword Art Online III"),
             ("Sword Art Online".to_string(), 3)
         );
+    }
+
+    #[test]
+    fn resolve_ordinal_prefers_title_marker_over_flat_season() {
+        // AniList sequel: title says S2, request season is the flat 1.
+        assert_eq!(resolve_season_ordinal(2, Some(1), None), 2);
+        assert_eq!(resolve_season_ordinal(3, Some(1), Some(3)), 3);
+    }
+
+    #[test]
+    fn resolve_ordinal_uses_request_season_when_title_unmarked() {
+        // Multi-season TMDB entry: plain franchise title, real season on the query.
+        assert_eq!(resolve_season_ordinal(1, Some(3), None), 3);
+        assert_eq!(resolve_season_ordinal(1, Some(2), Some(2)), 2);
+        // imdb_season wins over AniList's flat season=1 when title is unmarked.
+        assert_eq!(resolve_season_ordinal(1, Some(1), Some(2)), 2);
+    }
+
+    #[test]
+    fn resolve_ordinal_defaults_to_one() {
+        assert_eq!(resolve_season_ordinal(1, None, None), 1);
+        assert_eq!(resolve_season_ordinal(1, Some(1), None), 1);
     }
 
     #[test]
@@ -384,6 +505,67 @@ mod tests {
         let m1 = release_season("[X] Mob Psycho 100 - 01 [1080p]", "Mob Psycho 100");
         assert_eq!(m1, SeasonMatch::None);
         assert!(m1.covers(1));
+    }
+
+    #[test]
+    fn release_roman_mid_decoration_after_english_subtitle() {
+        // Batch leak: S1 kept "… Jobless Reincarnation II - 01" because roman
+        // was only recognized at the start of the decoration.
+        let m = release_season(
+            "[Anime Time] Mushoku Tensei - Jobless Reincarnation II - 01 [1080p]",
+            "Mushoku Tensei",
+        );
+        assert_eq!(m, SeasonMatch::Single(2));
+        assert!(!m.covers(1));
+        assert!(m.covers(2));
+    }
+
+    #[test]
+    fn release_re_named_sequel_is_season_two() {
+        let m = release_season("[Watanabe] Tokyo Ghoul :re 01 [720p]", "Tokyo Ghoul");
+        assert_eq!(m, SeasonMatch::Single(2));
+        assert!(!m.covers(1));
+    }
+
+    #[test]
+    fn multi_season_range_flag() {
+        assert!(SeasonMatch::Range(1, 4).is_multi_season_range());
+        assert!(!SeasonMatch::Range(2, 2).is_multi_season_range());
+        assert!(!SeasonMatch::Single(2).is_multi_season_range());
+        assert!(!SeasonMatch::None.is_multi_season_range());
+    }
+
+    #[test]
+    fn episode_international_and_cjk_ranges() {
+        assert_eq!(
+            release_episode("[X] Some Show - 01 a 12 [1080p]", "Some Show"),
+            EpisodeMatch::Range(1, 12)
+        );
+        assert_eq!(
+            release_episode("[X] Some Show 01 to 24 BATCH", "Some Show"),
+            EpisodeMatch::Range(1, 24)
+        );
+        assert_eq!(
+            release_episode("[X] 某番 第05話 [1080p]", "某番"),
+            EpisodeMatch::Single(5)
+        );
+    }
+
+    #[test]
+    fn title_cjk_season_marker() {
+        assert_eq!(parse_title_season("某番 第2期"), ("某番".to_string(), 2));
+    }
+
+    #[test]
+    fn discover_max_episode_from_index_titles() {
+        let titles = [
+            "[SubsPlease] Frieren - 01 (1080p)",
+            "[SubsPlease] Frieren - 12 (1080p)",
+            "[Batch] Frieren - 01 ~ 28 (1080p)",
+            "[Other] Unrelated S2 - 99 (1080p)",
+        ];
+        assert_eq!(discover_max_episode(titles, "Frieren", 1), Some(28));
+        assert_eq!(discover_max_episode(["[X] Show S2 - 03"], "Show", 1), None);
     }
 
     #[test]

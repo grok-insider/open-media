@@ -1,11 +1,11 @@
 # next-task.md — open-media
 
-> Working session brief. This file is local-only (git-excluded). Read it first,
-> then follow the workflow at the bottom. Do **not** merge anything.
+> Working session brief. Read it first, then follow the workflow at the bottom.
+> Do **not** merge anything.
 
 ## Current status
 
-- Current workspace version: **0.6.1**.
+- Current workspace version: **0.0.1** (the public version line was reset; earlier 0.x milestones referenced in docs are history).
 - PLAN Phases 0–10 are complete; post-0.1 hardening through crates.io publishing,
   subtitles, Windows IPC/artifacts, auto-advance, pagination, episode titles,
   source failover, and shared HTTP retry has landed.
@@ -19,8 +19,7 @@
 
 1. Real-Debrid `check_cached` is still a no-op; non-Torrentio cache state remains
    `Unknown` until RD or another backend exposes a reliable bulk cache API.
-2. MAL OAuth acquisition + refresh is still open. `open-media login anilist`
-   exists; `open-media login mal` still intentionally bails.
+   (TorBox implements a real `check_cached`, so this is RD-specific.)
 
 ### P2 — incomplete features
 
@@ -30,13 +29,10 @@
   `player.args`, `[subtitles]`, and `[ui.sources]`.
 - Telemetry plumbing is present but inert because the collector endpoint is the
   `PLACEHOLDER` sentinel.
-- Add a second debrid backend (Torbox, AllDebrid, or Premiumize) to prove the port
-  against another production API.
 
 ### P3 — polish
 
 - Local subtitle sidecar discovery.
-- Recent-history / continue-watching TUI home screen.
 - Rich P2P/debrid progress in the TUI.
 - Shell completions.
 - Platform-aware player lookup beyond PATH defaults.

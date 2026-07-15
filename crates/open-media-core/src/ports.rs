@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::CoreResult;
-use crate::model::{Episode, IdSet, Media, MediaKind, Season};
+use crate::model::{CatalogKind, Episode, IdSet, Media, MediaKind, Season};
 use crate::stream::{Playback, SourceCandidate};
 use crate::subtitle::{SubtitleQuery, SubtitleTrack};
 use crate::tracking::{Activity, LibraryItem, ListStatus, SkipTimes, WatchProgress};
@@ -49,6 +49,14 @@ pub trait MetadataProvider: Send + Sync {
 
     /// List episodes within a season.
     async fn episodes(&self, ids: &IdSet, season: u32) -> CoreResult<Vec<Episode>>;
+
+    /// Browse a curated catalog (airing, current anime season, …).
+    ///
+    /// Default empty: only providers that expose a catalog (AniList for anime
+    /// airing/seasonal) override this. The engine merges non-empty responses.
+    async fn catalog(&self, _kind: CatalogKind) -> CoreResult<Vec<Media>> {
+        Ok(Vec::new())
+    }
 
     /// The absolute-numbering offset for this title: the number of episodes that
     /// aired in prior, continuously-numbered seasons of the same franchise.

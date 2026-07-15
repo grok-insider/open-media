@@ -41,6 +41,30 @@ impl MediaKind {
     }
 }
 
+/// Curated browse catalogs exposed by metadata providers that support them.
+///
+/// Used by Home → Airing / This Season. Providers that do not implement a given
+/// kind return an empty list from [`MetadataProvider::catalog`].
+///
+/// [`MetadataProvider::catalog`]: crate::ports::MetadataProvider::catalog
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CatalogKind {
+    /// Anime currently airing (`RELEASING` on AniList).
+    AiringAnime,
+    /// Anime of the current broadcast season (Winter/Spring/Summer/Fall).
+    SeasonalAnime,
+}
+
+impl CatalogKind {
+    /// Short label for list/UI rendering.
+    pub fn label(self) -> &'static str {
+        match self {
+            CatalogKind::AiringAnime => "Airing",
+            CatalogKind::SeasonalAnime => "This Season",
+        }
+    }
+}
+
 /// A single external identifier for a piece of media.
 ///
 /// Different ports speak different ID dialects: Torrentio/Comet key off IMDB,

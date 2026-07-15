@@ -57,6 +57,7 @@
 //! [`IdBridge`]: ports::IdBridge
 //! [`UsageReporter`]: ports::UsageReporter
 
+pub mod episode_discover;
 pub mod error;
 pub mod model;
 pub mod ports;

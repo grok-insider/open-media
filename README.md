@@ -236,7 +236,7 @@ the Nix store. `open-media init` creates it.
 
 open-media has a single **anonymous** usage ping once per launch so the project
 can estimate how many active installs exist. It is **on by default (opt-out)**,
-but the shipped binaries (as of `0.6.3`) still point at a placeholder collector endpoint,
+but the shipped binaries currently point at a placeholder collector endpoint,
 so the reporter is currently inert and sends nothing until a real endpoint is
 configured in a future release.
 
