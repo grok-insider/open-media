@@ -523,6 +523,243 @@ async fn nyaa_season_one_does_not_fetch_or_match_absolute_release() {
     );
 }
 
+/// Multi-season TMDB/Cinemeta franchise: plain title (no "Season 3" suffix) with
+/// `season = 3` on the query. Must keep S3-tagged releases and drop S1 packs —
+/// not treat the unmarked title as season 1.
+///
+/// Mixed feed (S1 + S2 + S3) so the **filter** is what selects S3, not which
+/// mock URL was hit. Avoids flaky catch-all mock ordering when season-first
+/// queries share a server with a bare-fallback mock.
+#[tokio::test]
+async fn nyaa_uses_query_season_for_multi_season_franchise_title() {
+    let server = MockServer::start().await;
+
+    let rss_mixed = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[EMBER] Mushoku Tensei - Jobless Reincarnation (Season 1) [BD 1080p]</title>
+      <nyaa:seeders>600</nyaa:seeders><nyaa:size>17.0 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[SubsPlease] Mushoku Tensei II - 01 (1080p) [S2].mkv</title>
+      <nyaa:seeders>200</nyaa:seeders><nyaa:size>1.4 GiB</nyaa:size>
+      <nyaa:infoHash>3333333333333333333333333333333333333333</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[SubsPlease] Mushoku Tensei S3 - 01 (1080p) [S3EP1].mkv</title>
+      <nyaa:seeders>150</nyaa:seeders><nyaa:size>1.5 GiB</nyaa:size>
+      <nyaa:infoHash>4444444444444444444444444444444444444444</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[Erai-raws] Mushoku Tensei Season 3 - 01 [1080p][Multiple Subtitle]</title>
+      <nyaa:seeders>120</nyaa:seeders><nyaa:size>1.4 GiB</nyaa:size>
+      <nyaa:infoHash>5555555555555555555555555555555555555555</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_mixed))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    // TMDB-style: English franchise title only — no season in the name.
+    let m = media(
+        MediaKind::Anime,
+        IdSet::default().with_imdb("tt13293588"),
+        "Mushoku Tensei: Jobless Reincarnation",
+    );
+    let q = SourceQuery {
+        media: m,
+        season: Some(3),
+        episode: Some(1),
+        absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
+        include_uncached: true,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+
+    assert!(
+        !candidates.is_empty(),
+        "expected S3 releases, got empty list"
+    );
+    assert!(
+        candidates.iter().all(|c| {
+            let t = c.title.to_ascii_lowercase();
+            t.contains("s3") || t.contains("season 3")
+        }),
+        "only S3-tagged releases should remain, got: {:?}",
+        candidates.iter().map(|c| &c.title).collect::<Vec<_>>()
+    );
+    assert!(
+        !candidates.iter().any(|c| {
+            let t = c.title.to_ascii_lowercase();
+            t.contains("season 1") || t.contains(" s1 ") || t.contains(" ii ")
+        }),
+        "S1/S2 packs must not leak into an S3 result"
+    );
+}
+
+/// When ordinal > 1 and nothing matches the season filter, do **not** fall back
+/// to the unfiltered S1-dominated set (that reintroduced wrong-season packs).
+#[tokio::test]
+async fn nyaa_later_season_does_not_fall_back_to_unfiltered_s1() {
+    let server = MockServer::start().await;
+
+    let rss_s1_only = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[EMBER] Mushoku Tensei - Jobless Reincarnation (Season 1) [BD 1080p]</title>
+      <nyaa:seeders>600</nyaa:seeders><nyaa:size>17.0 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[SubsPlease] Mushoku Tensei - 01 (1080p).mkv</title>
+      <nyaa:seeders>500</nyaa:seeders><nyaa:size>1.4 GiB</nyaa:size>
+      <nyaa:infoHash>2222222222222222222222222222222222222222</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_s1_only))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let m = media(
+        MediaKind::Anime,
+        IdSet::default().with_imdb("tt13293588"),
+        "Mushoku Tensei: Jobless Reincarnation",
+    );
+    let q = SourceQuery {
+        media: m,
+        season: Some(3),
+        episode: Some(1),
+        absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
+        include_uncached: true,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+    assert!(
+        candidates.is_empty(),
+        "S3 with only S1 hits must return empty, not unfiltered S1; got: {:?}",
+        candidates.iter().map(|c| &c.title).collect::<Vec<_>>()
+    );
+}
+
+/// S1 episode play must drop later-season roman markers and multi-season packs.
+#[tokio::test]
+async fn nyaa_s1_drops_sequel_roman_and_multi_season_range() {
+    let server = MockServer::start().await;
+
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Mushoku Tensei - 01 (1080p) [S1].mkv</title>
+      <nyaa:seeders>500</nyaa:seeders><nyaa:size>1.4 GiB</nyaa:size>
+      <nyaa:infoHash>1111111111111111111111111111111111111111</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[Anime Time] Mushoku Tensei - Jobless Reincarnation II - 01 [1080p]</title>
+      <nyaa:seeders>200</nyaa:seeders><nyaa:size>1.4 GiB</nyaa:size>
+      <nyaa:infoHash>2222222222222222222222222222222222222222</nyaa:infoHash>
+    </item>
+    <item>
+      <title>[Pack] Mushoku Tensei S01-S03 Complete [1080p]</title>
+      <nyaa:seeders>100</nyaa:seeders><nyaa:size>40 GiB</nyaa:size>
+      <nyaa:infoHash>3333333333333333333333333333333333333333</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let mut m = media(
+        MediaKind::Anime,
+        IdSet::default().with_imdb("tt13293588"),
+        "Mushoku Tensei: Jobless Reincarnation",
+    );
+    m.original_title = Some("Mushoku Tensei".into());
+    let q = SourceQuery {
+        media: m,
+        season: Some(1),
+        episode: Some(1),
+        absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
+        include_uncached: true,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+    assert_eq!(candidates.len(), 1, "only bare S1 premiere: {candidates:?}");
+    assert!(candidates[0].title.contains("SubsPlease"));
+    assert!(!candidates.iter().any(|c| c.title.contains(" II ")));
+    assert!(!candidates.iter().any(|c| c.title.contains("S01-S03")));
+}
+
+/// HTTP 429 is retried with backoff until a success body is returned.
+#[tokio::test]
+async fn nyaa_retries_on_http_429() {
+    let server = MockServer::start().await;
+
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+  <channel>
+    <item>
+      <title>[SubsPlease] Frieren - 01 (1080p) [OK].mkv</title>
+      <nyaa:seeders>10</nyaa:seeders><nyaa:size>1.0 GiB</nyaa:size>
+      <nyaa:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</nyaa:infoHash>
+    </item>
+  </channel>
+</rss>"#;
+
+    // First response: rate limited. Second: success.
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("page", "rss"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss))
+        .mount(&server)
+        .await;
+
+    let src = NyaaSource::with_base_url(server.uri());
+    let q = SourceQuery {
+        media: media(MediaKind::Anime, IdSet::default().with_mal(1), "Frieren"),
+        season: Some(1),
+        episode: Some(1),
+        absolute_episode: None,
+        kitsu: None,
+        imdb_season: None,
+        include_uncached: true,
+    };
+
+    let candidates = src.find(&q).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].title.contains("Frieren"));
+}
+
 #[tokio::test]
 async fn nyaa_does_not_support_movies() {
     let src = NyaaSource::new();

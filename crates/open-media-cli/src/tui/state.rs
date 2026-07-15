@@ -244,6 +244,10 @@ pub(super) enum HomeRow {
     Section(String),
     /// Index into the continue-watching list.
     Continue(usize),
+    /// Browse AniList airing anime catalog.
+    CatalogAiring,
+    /// Browse AniList current broadcast season catalog.
+    CatalogSeasonal,
     OpenLibrary,
     Search,
 }
@@ -295,6 +299,11 @@ pub(super) fn build_home_rows(
     });
 
     let mut rows = Vec::new();
+    // Discover catalogs first — Amatsu-style airing / seasonal browse.
+    rows.push(HomeRow::Section("Discover".into()));
+    rows.push(HomeRow::CatalogAiring);
+    rows.push(HomeRow::CatalogSeasonal);
+
     for (label, idxs) in groups {
         rows.push(HomeRow::Section(format!("{label} · {}", idxs.len())));
         for i in idxs {

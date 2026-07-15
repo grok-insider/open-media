@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use open_media_core::error::{CoreError, CoreResult};
-use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
+use open_media_core::model::{CatalogKind, Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::MetadataProvider;
 use reqwest::Client;
 use serde::Deserialize;
@@ -71,6 +71,45 @@ query ($id: Int) {
 /// graph can never spin the walk forever. Five hops covers even long franchises
 /// (a 5th-season sequel summing its four predecessors).
 const PREQUEL_HOP_CAP: u8 = 5;
+
+/// Catalog browse: currently airing anime (two pages of popularity).
+const AIRING_QUERY: &str = r#"
+query ($page: Int, $perPage: Int) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo { hasNextPage }
+    media(type: ANIME, isAdult: false, status: RELEASING, sort: POPULARITY_DESC,
+          format_in: [TV, TV_SHORT, ONA, OVA]) {
+      id idMal
+      title { romaji english native }
+      seasonYear episodes averageScore
+      description(asHtml: false)
+      coverImage { large }
+      status format genres
+      nextAiringEpisode { episode }
+    }
+  }
+}"#;
+
+/// Catalog browse: anime of a given broadcast season.
+const SEASONAL_QUERY: &str = r#"
+query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo { hasNextPage }
+    media(type: ANIME, isAdult: false, season: $season, seasonYear: $seasonYear,
+          sort: POPULARITY_DESC, format_in: [TV, TV_SHORT, ONA, OVA]) {
+      id idMal
+      title { romaji english native }
+      seasonYear episodes averageScore
+      description(asHtml: false)
+      coverImage { large }
+      status format genres
+      nextAiringEpisode { episode }
+    }
+  }
+}"#;
+
+const CATALOG_PER_PAGE: u32 = 50;
+const CATALOG_MAX_PAGES: u32 = 2;
 
 /// AniList-backed metadata provider (anime only).
 pub struct AniListProvider {
@@ -220,6 +259,86 @@ impl AniListProvider {
         }
         Ok(Some(total))
     }
+
+    /// Fetch up to [`CATALOG_MAX_PAGES`] of a catalog GraphQL query.
+    ///
+    /// `extra` merges into each page's variables (`season` / `seasonYear` for
+    /// seasonal; none for airing).
+    async fn fetch_catalog_pages(
+        &self,
+        query: &str,
+        extra: Option<serde_json::Value>,
+    ) -> CoreResult<Vec<Media>> {
+        let mut media = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page_no in 1..=CATALOG_MAX_PAGES {
+            let mut variables = serde_json::json!({
+                "page": page_no,
+                "perPage": CATALOG_PER_PAGE,
+            });
+            if let Some(extra) = &extra {
+                if let (Some(obj), Some(extra_obj)) = (variables.as_object_mut(), extra.as_object())
+                {
+                    for (k, v) in extra_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            let data: GqlData = self.query(query, variables).await?;
+            let page = data.page.ok_or_else(|| CoreError::Parse {
+                what: "anilist catalog".into(),
+                message: "missing Page".into(),
+            })?;
+            for m in page.media {
+                if seen.insert(m.id) {
+                    media.push(m.into_media());
+                }
+            }
+            if !page.page_info.map(|p| p.has_next_page).unwrap_or(false) {
+                break;
+            }
+        }
+        Ok(media)
+    }
+}
+
+/// AniList `MediaSeason` + year for "now", matching industry broadcast seasons.
+///
+/// December is treated as the **next calendar year's** Winter (standard anime
+/// season calendar).
+fn current_anime_season() -> (&'static str, i32) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month) = civil_year_month((secs / 86400) as i64);
+    match month {
+        1..=2 => ("WINTER", year),
+        3..=5 => ("SPRING", year),
+        6..=8 => ("SUMMER", year),
+        9..=11 => ("FALL", year),
+        // December → next year's Winter
+        _ => ("WINTER", year + 1),
+    }
+}
+
+/// `(year, month)` from days since Unix epoch (Howard Hinnant civil_from_days).
+fn civil_year_month(days: i64) -> (i32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 {
+        mp as i32 + 3
+    } else {
+        mp as i32 - 9
+    };
+    let year = (y + i64::from(m <= 2)) as i32;
+    (year, m as u32)
 }
 
 async fn anilist_http_error_message(
@@ -306,6 +425,23 @@ impl MetadataProvider for AniListProvider {
 
     async fn details(&self, ids: &IdSet) -> CoreResult<Media> {
         Ok(self.fetch_media(ids).await?.into_media())
+    }
+
+    async fn catalog(&self, kind: CatalogKind) -> CoreResult<Vec<Media>> {
+        match kind {
+            CatalogKind::AiringAnime => self.fetch_catalog_pages(AIRING_QUERY, None).await,
+            CatalogKind::SeasonalAnime => {
+                let (season, year) = current_anime_season();
+                self.fetch_catalog_pages(
+                    SEASONAL_QUERY,
+                    Some(serde_json::json!({
+                        "season": season,
+                        "seasonYear": year,
+                    })),
+                )
+                .await
+            }
+        }
     }
 
     async fn seasons(&self, ids: &IdSet) -> CoreResult<Vec<Season>> {
@@ -698,6 +834,7 @@ impl AniListMedia {
         if let Some(mal) = self.id_mal {
             ids = ids.with_mal(mal);
         }
+        let ep_count = self.effective_episode_count();
         let title = self
             .title
             .english
@@ -713,7 +850,8 @@ impl AniListMedia {
         let (kind, episode_count, season_count) = if is_movie {
             (MediaKind::Movie, None, None)
         } else {
-            (MediaKind::Anime, self.episodes, Some(1))
+            // Prefer effective count (airing shows use nextAiringEpisode).
+            (MediaKind::Anime, Some(ep_count), Some(1))
         };
         Media {
             kind,

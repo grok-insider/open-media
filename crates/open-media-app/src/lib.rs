@@ -32,10 +32,10 @@ pub use builder::EngineBuilder;
 use std::sync::Arc;
 
 use open_media_core::error::{CoreError, CoreResult};
-use open_media_core::model::{Episode, IdSet, Media, MediaKind, Season};
+use open_media_core::model::{CatalogKind, Episode, IdSet, Media, MediaKind, Season};
 use open_media_core::ports::{
     Enricher, HistoryStore, IdBridge, LibraryStore, MetadataProvider, Player, PresenceReporter,
-    SourceProvider, StreamResolver, SubtitleProvider, Tracker,
+    SourceProvider, SourceQuery, StreamResolver, SubtitleProvider, Tracker,
 };
 use open_media_core::scoring::ScoringPrefs;
 
@@ -214,6 +214,118 @@ impl Engine {
         }
         self.overlay_bridged_episode_details(ids, &mut eps).await;
         Ok(eps)
+    }
+
+    /// Like [`Self::episodes`], then **best-effort** expands a thin/incomplete
+    /// episode list by scanning source-index release titles (Amatsu-style
+    /// dynamic episode discovery). Used when AniList/TMDB cannot enumerate a
+    /// full season (airing shows, OVAs with `episodes: null`).
+    ///
+    /// Never fails: source lookup errors leave the metadata list as-is.
+    pub async fn episodes_for(&self, media: &Media, season: u32) -> CoreResult<Vec<Episode>> {
+        let mut eps = self.episodes(&media.ids, season).await?;
+        self.discover_episodes_from_sources(media, season, &mut eps)
+            .await;
+        Ok(eps)
+    }
+
+    /// Browse a curated catalog (airing anime, current broadcast season).
+    ///
+    /// Fans out across metadata providers and returns the first non-empty list.
+    /// Empty when no provider implements the catalog.
+    pub async fn catalog(&self, kind: CatalogKind) -> CoreResult<Vec<Media>> {
+        if self.metadata.is_empty() {
+            return Err(CoreError::NotImplemented("no metadata providers"));
+        }
+        for provider in &self.metadata {
+            match provider.catalog(kind).await {
+                Ok(items) if !items.is_empty() => return Ok(items),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        provider = provider.name(),
+                        kind = ?kind,
+                        error = %e,
+                        "catalog lookup failed"
+                    );
+                }
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// When metadata only knows a handful of episodes (or none), probe source
+    /// indexes with a bare franchise query and raise the episode ceiling from
+    /// parsed release titles.
+    async fn discover_episodes_from_sources(
+        &self,
+        media: &Media,
+        season: u32,
+        eps: &mut Vec<Episode>,
+    ) {
+        if !media.kind.is_episodic() || self.sources.is_empty() {
+            return;
+        }
+        if !needs_episode_discovery(media, eps) {
+            return;
+        }
+
+        let query = SourceQuery {
+            media: media.clone(),
+            season: Some(season),
+            episode: None,
+            absolute_episode: None,
+            kitsu: None,
+            imdb_season: None,
+            include_uncached: true,
+        };
+
+        let mut titles: Vec<String> = Vec::new();
+        let calls = self
+            .sources
+            .iter()
+            .filter(|s| s.supports(media.kind))
+            .map(|source| {
+                let query = &query;
+                async move { source.find(query).await }
+            });
+        for found in futures::future::join_all(calls).await.into_iter().flatten() {
+            titles.extend(found.into_iter().map(|c| c.title));
+        }
+        if titles.is_empty() {
+            return;
+        }
+
+        let max = open_media_core::episode_discover::discover_max_episode(
+            titles.iter().map(String::as_str),
+            season,
+        );
+        let Some(max) = max else {
+            return;
+        };
+        let have = eps.iter().map(|e| e.number).max().unwrap_or(0);
+        if max <= have {
+            return;
+        }
+        tracing::debug!(
+            title = %media.display_title(),
+            season,
+            from = have,
+            to = max,
+            "expanded episode list from source index titles"
+        );
+        for n in (have + 1)..=max {
+            eps.push(Episode {
+                season,
+                number: n,
+                title: None,
+                air_date: None,
+                overview: None,
+                runtime_minutes: None,
+                rating: None,
+                still: None,
+            });
+        }
     }
 
     /// Fill missing per-episode details (still, synopsis, air date, runtime,
@@ -398,5 +510,18 @@ impl Engine {
             }
         }
         None
+    }
+}
+
+/// Whether the metadata episode list is too thin to trust — trigger index
+/// discovery so airing/OVA titles still get a usable list.
+fn needs_episode_discovery(media: &Media, eps: &[Episode]) -> bool {
+    if !media.kind.is_episodic() {
+        return false;
+    }
+    match media.episode_count {
+        None | Some(0) => true,
+        Some(1) => eps.len() <= 1,
+        Some(n) => (eps.len() as u32) < n.min(3) || eps.len() <= 1,
     }
 }

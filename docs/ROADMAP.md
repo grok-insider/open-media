@@ -23,8 +23,9 @@ The remaining committed follow-ups are tracked in `continue-plan.md`.
 
 > These are **milestone names**, not the literal crate version. Actual releases are
 > cut by [release-plz](https://release-plz.dev) from Conventional Commits (see
-> `CONTRIBUTING.md` → Releases): the workspace is single-versioned (started at
-> `0.1.0`), `feat:`/`fix:` commits open patch-line release PRs, and repo-admin
+> `CONTRIBUTING.md` → Releases): the workspace is single-versioned (the public
+> version line was reset to `0.0.1`), `feat:`/`fix:` commits open patch-line
+> release PRs, and repo-admin
 > manual version-bump PRs own deliberate minor/major milestones. Merging either
 > release PR tags `vX.Y.Z` → GitHub Release (+ prebuilt `open-media`) → cachix.
 
