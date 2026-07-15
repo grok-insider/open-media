@@ -20,9 +20,11 @@
 
 [workspace]
 # GitHub-only delivery: tag + GitHub Release + prebuilt binaries + cachix.
-# Do not publish workspace members to crates.io (also `publish = false` on
-# every package via workspace inheritance).
-git_only = false
+# Do not publish workspace members to crates.io.
+# git_only: version baseline from tags (vX.Y.Z), not crates.io — required because
+# nothing is published to a registry. Without this, release-plz skips every
+# package when Cargo.toml has publish=false, or treats crates as missing.
+git_only = true
 publish = false
 # Release the current workspace version whenever it isn't tagged yet (robust; lets
 # a direct version bump cut a release and re-baseline at packageable code).
