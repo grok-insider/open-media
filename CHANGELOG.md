@@ -4,6 +4,20 @@ All notable changes to open-media are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.0.2
+
+### Added
+
+- AniList airing and seasonal catalogs on the TUI Discover home
+- Dynamic episode discovery from release titles when metadata episode lists are incomplete
+
+### Fixed
+
+- Multi-season nyaa queries now respect the requested season (e.g. Mushoku S3)
+- Nyaa rate-limit backoff, response caching, and mock-server e2e stability
+- Catalog failures surface as errors instead of silent empty results
+- Nix `cargoLock.outputHashes` for open-subtitle git deps
+
 ## 0.0.1
 
 Initial public line of the dual-use open-media client:
