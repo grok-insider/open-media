@@ -125,11 +125,20 @@ impl NyaaSource {
         self.fetch_qtext(&qtext).await
     }
 
+    /// Cache only production nyaa hosts. Mock servers in tests must not share a
+    /// process-wide cache (parallel e2e cases reuse query strings across ports
+    /// and would otherwise serve another test's RSS body).
+    fn cache_enabled(&self) -> bool {
+        self.base_url.contains("nyaa.si") || self.base_url.contains("nyaa.iss.one")
+    }
+
     async fn fetch_qtext(&self, qtext: &str) -> CoreResult<Vec<SourceCandidate>> {
         let cache_key = format!("{}|{}|{}", self.base_url, self.category, qtext);
-        if let Some(hit) = cache_get(&cache_key) {
-            tracing::debug!(%qtext, "nyaa cache hit");
-            return Ok(hit);
+        if self.cache_enabled() {
+            if let Some(hit) = cache_get(&cache_key) {
+                tracing::debug!(%qtext, "nyaa cache hit");
+                return Ok(hit);
+            }
         }
 
         let q = urlencoding::encode(qtext).into_owned();
@@ -140,9 +149,14 @@ impl NyaaSource {
         );
         tracing::debug!(%url, "nyaa rss request");
 
+        // Tests use mock servers: skip the production min-interval gate so
+        // parallel e2e cases don't queue behind each other and flake timeouts.
+        let pace = self.cache_enabled();
         let mut backoff = STATUS_BACKOFF_BASE;
         for attempt in 0..STATUS_RETRY_ATTEMPTS {
-            pace_request().await;
+            if pace {
+                pace_request().await;
+            }
 
             let resp = open_media_net::retry(|| async {
                 self.client.get(&url).send().await.map_err(|e| {
@@ -162,7 +176,9 @@ impl NyaaSource {
                     .await
                     .map_err(|e| CoreError::Network(format!("nyaa: {e}")))?;
                 let parsed = parse_rss(&xml)?;
-                cache_put(&cache_key, parsed.clone());
+                if self.cache_enabled() {
+                    cache_put(&cache_key, parsed.clone());
+                }
                 return Ok(parsed);
             }
 
