@@ -237,10 +237,14 @@ impl Engine {
         if self.metadata.is_empty() {
             return Err(CoreError::NotImplemented("no metadata providers"));
         }
+        let mut saw_ok = false;
+        let mut last_err: Option<CoreError> = None;
         for provider in &self.metadata {
             match provider.catalog(kind).await {
                 Ok(items) if !items.is_empty() => return Ok(items),
-                Ok(_) => {}
+                Ok(_) => {
+                    saw_ok = true;
+                }
                 Err(e) => {
                     tracing::debug!(
                         provider = provider.name(),
@@ -248,7 +252,13 @@ impl Engine {
                         error = %e,
                         "catalog lookup failed"
                     );
+                    last_err = Some(e);
                 }
+            }
+        }
+        if !saw_ok {
+            if let Some(e) = last_err {
+                return Err(e);
             }
         }
         Ok(Vec::new())
